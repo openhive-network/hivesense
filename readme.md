@@ -26,3 +26,16 @@ Docker
 ### System context diagram
 ![](./doc/images/system_context.png)
 
+### Database
+#### PostgreSQL roles
+- **hivesense_owner** is able to modify the database tables, their content and modify schema. If used to start HiveSense
+  haf application main loop that fill the tables
+- **hivesense_user** has only read access to the HiveSense tables, used to execute queries started by REST API server 
+
+#### HAF application
+- context name: **hivesense_app**
+- context schema(default): **hivesense_app**
+
+##### Stages
+1.  **MASSIVE_PROCESSING** started when the context is more than 10 blocks after hive head. Max. 100 blocks in a one batch
+
