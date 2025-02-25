@@ -8,7 +8,7 @@ DECLARE
 BEGIN
   SHOW SEARCH_PATH INTO __schema_name;
 
-  synchronization_stages := ARRAY[( 'MASSIVE_PROCESSING', 11, 100 ), hive.live_stage()]::hive.application_stages;
+  synchronization_stages := ARRAY[( 'MASSIVE_PROCESSING', 11, 10000 ), hive.live_stage()]::hive.application_stages;
 
   RAISE NOTICE 'HiveSense will be installed in schema % with context %', __schema_name, __schema_name;
 

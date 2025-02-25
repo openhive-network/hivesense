@@ -65,17 +65,17 @@ $$;
 
 
 
-CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.context_name, _block_range hive.blocks_range, _logs BOOLEAN = true)
+CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.context_name, _block_range hive.blocks_range, OUT _done INT, _logs BOOLEAN = true)
 LANGUAGE 'plpgsql'
 AS
 $$
 BEGIN
   IF hive.get_current_stage_name(_context_name) = 'MASSIVE_PROCESSING' THEN
-    CALL hivesense_massive_processing(_block_range.first_block, _block_range.last_block, _logs);
+    CALL hivesense_massive_processing(_block_range.first_block, _block_range.last_block, _logs, _done);
     RETURN;
   END IF;
 
-  CALL hivesense_single_processing(_block_range.first_block, _block_range.last_block, _logs);
+  CALL hivesense_single_processing(_block_range.first_block, _block_range.last_block, _logs, _done);
 END
 $$;
 
