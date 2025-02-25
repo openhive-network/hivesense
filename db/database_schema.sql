@@ -20,7 +20,7 @@ BEGIN
   PERFORM hive.app_create_context(
     _name =>__schema_name,
     _schema => __schema_name,
-    False,
+    _is_forking => False,
     _stages => synchronization_stages
   );
 
@@ -35,11 +35,13 @@ CREATE TABLE IF NOT EXISTS version(
   runtime_hash TEXT
 );
 
+-- extend to public, to find vector from pgvector
+EXECUTE format( 'SET SEARCH_PATH TO %s, public', __schema_name );
 CREATE TABLE IF NOT EXISTS posts_vectors
 (
     post_id INT NOT NULL,
     embedding vector(1024),
-    CONSTRAINT PK_account_reputations PRIMARY KEY (post_id)
+    CONSTRAINT PK_posts_vectors PRIMARY KEY (post_id)
 );
 
 -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'

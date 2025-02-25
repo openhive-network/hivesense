@@ -18,13 +18,21 @@ Docker
 
 #### External containers
 1. [HAF](https://gitlab.syncad.com/hive/haf) server includes
-    - hivemind
+    - [**Hivemind**](https://gitlab.syncad.com/hive/hivemind)
     - [pgai](https://github.com/Postgres-artificialintelligence/PGAI)
     - [pgvector](https://github.com/pgvector/pgvector)
 2. [OLLAMA server](https://github.com/ollama/ollama)
 
 ### System context diagram
 ![](./doc/images/system_context.png)
+
+### Structure of sources
+| **Directory Structure**                                                                    | **Description**                                                             |
+|--------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| **db/**                                                                                    | SQL code: schema definitions, runtime plpgsql code, HAF application code    |
+| **doc/**                                                                                   | Resources for documentation                                                 |
+| **scripts/**                                                                               | shell scripts                                                               |
+| **tests/**                                                                                 | Tests                                                                       |
 
 ### Database
 #### PostgreSQL roles
