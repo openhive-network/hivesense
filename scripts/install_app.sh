@@ -20,6 +20,8 @@ print_help () {
     echo "  --is_forking=TRUE/FALSE   Allows to specify if app should be forking or not (defaults to true)"
     echo "  --indexes-only            Only creates indexes"
     echo "  --schema-only             Only creates schema, but not indexes"
+    echo "  --llm=MODEL_NAME          Choose LLM model (defaults: bge-m3:latest)"
+    echo "  --ollama=OLLAMA_URLS      Choose OLLAM server (defaults: http://192.168.6.17:11434)"
     echo "  --help               Display this help screen and exit"
     echo
 }
@@ -32,6 +34,8 @@ POSTGRES_URL=${POSTGRES_URL:-""}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
 SWAGGER_URL=${SWAGGER_URL:-"{hivesense-host}"}
 POSTGRES_APP_NAME=hivesense_install
+LLM='bge-m3:latest'
+OLLAMA_HOST='http://192.168.6.17:11434'
 
 
 while [ $# -gt 0 ]; do
@@ -51,8 +55,11 @@ while [ $# -gt 0 ]; do
     --schema=*)
         hivesense_SCHEMA="${1#*=}"
         ;;
-    --is_forking=*)
-        IS_FORKING="${1#*=}"
+    --llm=*)
+        LLM="${1#*=}"
+        ;;
+    --ollama=*)
+        OLLAMA_HOST="${1#*=}"
         ;;
     --help)
         print_help
@@ -82,18 +89,23 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
 
 
   echo "Installing app..."
+
+
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -f "$SRCPATH/db/builtin_roles.sql"
 
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "CREATE EXTENSION IF NOT EXISTS ai CASCADE;"
+
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT USAGE ON SCHEMA ai to hivesense_owner"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT USAGE ON SCHEMA ai to hivesense_user"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ai TO hivesense_user;"
+
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner;CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA} AUTHORIZATION hivesense_owner;"
 
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/main_loop.sql"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
 
 
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT USAGE ON SCHEMA ai to hivesense_user"
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ai TO hivesense_user;"
   # TODO(mickiewicz@syncad.com): not sounds well that we grant on hivemind tables
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT USAGE ON SCHEMA hivemind_app to hivesense_user"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT SELECT ON ALL TABLES IN SCHEMA hivemind_app TO hivesense_user;"

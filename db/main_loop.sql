@@ -1,5 +1,24 @@
 SET ROLE hivesense_owner;
 
+DO $BODY$
+    DECLARE
+        __llm TEXT := current_setting('pg_temp.LLM', TRUE);
+        __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
+    BEGIN
+        EXECUTE format($$
+        CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
+        RETURNS vector(1024)
+        IMMUTABLE
+        LANGUAGE plpgsql
+        AS
+		$BODY2$
+        BEGIN
+            RETURN ai.ollama_embed('%s', _post, host => '%s');
+        END;
+		$BODY2$
+		$$, __llm, __ollama);
+END $BODY$;
+
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,
     _last_block_num INT,
@@ -45,7 +64,7 @@ BEGIN
             INSERT INTO posts_vectors (post_id, embedding)
             SELECT
                 posts.id,
-                    ai.ollama_embed('bge-m3:latest', posts.body, host => 'http://192.168.6.17:11434') FROM (
+                     hivesense_embed(posts.body) FROM (
                      SELECT hp.id, hpd.body
                      FROM hivemind_app.hive_posts as hp
                      JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
