@@ -1,9 +1,10 @@
 -- noqa: disable=CP03
 SET ROLE hivesense_owner;
 
-DO $$
+DO $BODY$
 DECLARE 
   __schema_name VARCHAR;
+  __vector_size INT := current_setting('pg_temp.VECTOR_SIZE', TRUE)::INT;
   synchronization_stages hive.application_stages;
 BEGIN
   SHOW SEARCH_PATH INTO __schema_name;
@@ -37,11 +38,15 @@ CREATE TABLE IF NOT EXISTS version(
 
 -- extend to public, to find vector from pgvector
 EXECUTE format( 'SET SEARCH_PATH TO %s, public', __schema_name );
-CREATE TABLE IF NOT EXISTS posts_vectors
-(
-    post_id INT NOT NULL,
-    embedding vector(1024),
-    CONSTRAINT PK_posts_vectors PRIMARY KEY (post_id)
+
+EXECUTE format($$
+            CREATE TABLE IF NOT EXISTS posts_vectors
+            (
+                post_id INT NOT NULL,
+                embedding vector( %s ),
+                CONSTRAINT PK_posts_vectors PRIMARY KEY (post_id)
+            );
+            $$, __vector_size
 );
 
 -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'
@@ -49,7 +54,7 @@ EXECUTE format( 'GRANT MAINTAIN ON ALL TABLES IN SCHEMA %s TO hived_group' , __s
 EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 
   END
-$$;
+$BODY$;
 
 INSERT INTO hivesense_app_status
 (continue_processing)

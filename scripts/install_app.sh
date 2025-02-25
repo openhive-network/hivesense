@@ -22,6 +22,7 @@ print_help () {
     echo "  --schema-only             Only creates schema, but not indexes"
     echo "  --llm=MODEL_NAME          Choose LLM model (defaults: bge-m3:latest)"
     echo "  --ollama=OLLAMA_URLS      Choose OLLAM server (defaults: http://192.168.6.17:11434)"
+    echo "  --vector_size=NUMBER      Choose vector size for embeddings (defaults: 1024)"
     echo "  --help               Display this help screen and exit"
     echo
 }
@@ -36,6 +37,7 @@ SWAGGER_URL=${SWAGGER_URL:-"{hivesense-host}"}
 POSTGRES_APP_NAME=hivesense_install
 LLM='bge-m3:latest'
 OLLAMA_HOST='http://192.168.6.17:11434'
+VECTOR_SIZE=1024
 
 
 while [ $# -gt 0 ]; do
@@ -53,13 +55,16 @@ while [ $# -gt 0 ]; do
         SWAGGER_URL="${1#*=}"
         ;;
     --schema=*)
-        hivesense_SCHEMA="${1#*=}"
+        HIVESENSE_SCHEMA="${1#*=}"
         ;;
     --llm=*)
         LLM="${1#*=}"
         ;;
     --ollama=*)
         OLLAMA_HOST="${1#*=}"
+        ;;
+    --vector_size=*)
+        VECTOR_SIZE="${1#*=}"
         ;;
     --help)
         print_help
@@ -101,9 +106,9 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
 
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner;CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA} AUTHORIZATION hivesense_owner;"
 
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
 
 
   # TODO(mickiewicz@syncad.com): not sounds well that we grant on hivemind tables
