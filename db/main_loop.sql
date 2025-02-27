@@ -7,7 +7,7 @@ DO $BODY$
     BEGIN
         EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
-        RETURNS vector(1024)
+        RETURNS vector
         IMMUTABLE
         LANGUAGE plpgsql
         AS
