@@ -33,6 +33,7 @@ DECLARE
     __start_ts timestamptz;
     __end_ts   timestamptz;
     __number_of_posts INT;
+    __workers_number INT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
