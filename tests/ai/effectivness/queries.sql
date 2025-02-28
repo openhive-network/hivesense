@@ -1,3 +1,6 @@
+SET SEARCH_PATH TO :'HIVESENSE_SCHEMA', public;
+
+
 CREATE TEMP TABLE SEMANTIC_QUERIES (
     id SERIAL PRIMARY KEY,
     query TEXT
@@ -103,13 +106,11 @@ VALUES
     ('The new law aims to protect endangered species from extinction.');
 
 -- TODO(mickiewicz@syncad.com) create index by the workers
-CREATE INDEX vectorized_posts_hnsw ON vectorized_posts USING hnsw (embedding vector_cosine_ops); --czas tworzenia 1m6s 1.45GB
+CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
 
 WITH nearest_posts_id AS (
 	SELECT sq.id, hivesense_app.find_nearest_post(sq.query) as nearest_post_id, sq.query
 	FROM SEMANTIC_QUERIES sq
-	ORDER BY sq.id ASC
-	LIMIT 2
 ), query_and_link AS (
 		SELECT
 		       npid.id
