@@ -65,6 +65,32 @@ then retries.
 ##### Stages
 1.  **MASSIVE_PROCESSING** started when the context is more than 10 blocks after hive head. Max. 100 blocks in a one batch
 
-./scripts/install_app.sh  --llm='bge-m3:latest'  --vector_size=1024 --ollama=http://192.168.6.186:11434 --parallel_workers=8
-time ./scripts/process_blocks.sh --stop-at-block=5000000
-./scripts/uninstall_app.sh
+
+## Installation
+
+It must be installed alongside HAF and an already synced Hivemind.
+
+1. **Install**  
+   You need to choose an Ollama host and an LLM model along with its vector
+   size. It is also possible to specify the address of a HAF server with
+   Hivemind. See `./scripts/install_app.sh --help` for details.
+
+   ```bash
+   ./scripts/install_app.sh --llm='bge-m3:latest' --vector_size=1024 \
+       --ollama=http://192.168.6.186:11434 --parallel_workers=8
+   ```
+
+2. **Start synchronization**  
+   By default, it will synchronize indefinitely, but you can set a block
+   height to stop at.
+
+   ```bash
+   time ./scripts/process_blocks.sh --stop-at-block=5000000
+   ```
+
+3. **Uninstall**  
+   Completely remove the HiveSense data from HAF.
+
+   ```bash
+   ./scripts/uninstall_app.sh
+   ```
