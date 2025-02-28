@@ -7,7 +7,7 @@ DO $BODY$
     BEGIN
         EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
-        RETURNS vector(1024)
+        RETURNS vector
         IMMUTABLE
         LANGUAGE plpgsql
         AS
@@ -22,7 +22,8 @@ END $BODY$;
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,
     _last_block_num INT,
-    _logs BOOLEAN
+    _logs BOOLEAN,
+    _worker INT
 )
     RETURNS INT  -- NULL need to wait for hivemind, otherwise number of vectorized posts
     LANGUAGE 'plpgsql'
@@ -33,12 +34,17 @@ DECLARE
     __start_ts timestamptz;
     __end_ts   timestamptz;
     __number_of_posts INT;
+    __number_of_workers INT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
     -- will RAISE when hivemind context does not exist
     -- TODO(mickiewicz@syncad.com): customize hivemind context
     SELECT hive.app_get_current_block_num( 'hivemind_app' ) INTO __hivemind_current_block;
+    SELECT parallel_workers FROM hivesense_app_status INTO __number_of_workers;
+
+    ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
+    ASSERT __number_of_workers > 0 , 'number of workers less than 1';
 
     -- hivemind exists
     IF __hivemind_current_block < _first_block_num THEN
@@ -50,7 +56,7 @@ BEGIN
     END IF;
 
     IF _logs THEN
-        RAISE NOTICE 'Hivesense is attempting to process a block range: <%, %>', _first_block_num, _last_block_num;
+        RAISE NOTICE 'Hivesense % is attempting to process a block range: <%, %>', _worker, _first_block_num, _last_block_num;
         __start_ts := clock_timestamp();
     END IF;
 
@@ -64,14 +70,16 @@ BEGIN
             INSERT INTO posts_vectors (post_id, embedding)
             SELECT
                 posts.id,
-                     hivesense_embed(posts.body) FROM (
-                     SELECT hp.id, hpd.body
+                hivesense_embed(posts.body)
+            FROM (
+                     SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, hpd.body
                      FROM hivemind_app.hive_posts as hp
                      JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
                      WHERE hp.id=hp.root_id
-                     AND hp.block_num BETWEEN _first_block_num AND _last_block_num
+                     AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
                      ORDER by hp.id
             ) AS posts
+            WHERE __number_of_workers - (posts.row_id % __number_of_workers )  = _worker
             RETURNING 1
     )
     SELECT COUNT(*) FROM vectorize INTO __number_of_posts;
@@ -80,8 +88,8 @@ BEGIN
 
     IF _logs THEN
         __end_ts := clock_timestamp();
-        RAISE NOTICE 'Hivesense processed block range: <%, %> with % roots posts successfully in % s
-    ', _first_block_num, _last_block_num, __number_of_posts, (extract(epoch FROM __end_ts - __start_ts));
+        RAISE NOTICE 'Hivesense % processed block range: <%, %> with % roots posts successfully in % s
+    ', _worker, _first_block_num, _last_block_num, __number_of_posts, (extract(epoch FROM __end_ts - __start_ts));
     END IF;
 
     RETURN __number_of_posts;
@@ -91,7 +99,7 @@ $$;
 
 
 CREATE OR REPLACE PROCEDURE hivesense_massive_processing(
-    IN _from INT, IN _to INT, IN _logs BOOLEAN, OUT _done INT
+    IN _from INT, IN _to INT, IN _logs BOOLEAN, IN _worker INT, OUT _done INT
 )
 LANGUAGE 'plpgsql'
 AS
@@ -99,19 +107,19 @@ $$
 BEGIN
   PERFORM set_config('synchronous_commit', 'OFF', false);
 
-  SELECT hivesense_block_range_data(_from, _to, _logs) INTO _done;
+  SELECT hivesense_block_range_data(_from, _to, _logs, _worker) INTO _done;
 END
 $$;
 
 CREATE OR REPLACE PROCEDURE hivesense_single_processing(
-    in _from INT, in _to INT, IN _logs BOOLEAN, _done OUT INT)
+    in _from INT, in _to INT, IN _logs BOOLEAN,  IN _worker INT, _done OUT INT)
 LANGUAGE 'plpgsql'
 AS
 $$
 BEGIN
   PERFORM set_config('synchronous_commit', 'ON', false);
 
-  SELECT hivesense_block_range_data(_from, _to, _logs) INTO _done;
+  SELECT hivesense_block_range_data(_from, _to, _logs, _worker) INTO _done;
 END
 $$;
 
@@ -148,7 +156,8 @@ $$;
   - To stop it call `stopProcessing();` from another session and commit its trasaction.
 */
 CREATE OR REPLACE PROCEDURE main(
-    IN _appContext hive.context_name,
+    IN _appContextBaseName hive.context_name,
+    IN _worker INT,
     IN _maxBlockLimit INT = NULL
 )
 LANGUAGE 'plpgsql'
@@ -157,6 +166,7 @@ $$
 DECLARE
   _blocks_range hive.blocks_range := (0,0);
   __number_of_posts INT;
+  __context_name hive.context_name := _appContextBaseName || _worker;
 BEGIN
   IF _maxBlockLimit != NULL THEN
     RAISE NOTICE 'Max block limit is specified as: %', _maxBlockLimit;
@@ -164,18 +174,18 @@ BEGIN
 
   PERFORM allowProcessing();
   
-  RAISE NOTICE 'Last block processed by application: %', hive.app_get_current_block_num(_appContext);
+  RAISE NOTICE 'Last block processed by application: %', hive.app_get_current_block_num(__context_name);
 
   RAISE NOTICE 'Entering application main loop...';
 
   LOOP
     CALL hive.app_next_iteration(
-      _appContext,
+      __context_name,
       _blocks_range, 
       _override_max_batch => NULL, 
       _limit => _maxBlockLimit);
 
-    IF NOT continueProcessingLoop( _appContext, _maxBlockLimit, _blocks_range ) THEN
+    IF NOT continueProcessingLoop( __context_name, _maxBlockLimit, _blocks_range ) THEN
         ROLLBACK;
         RETURN;
     END IF;
@@ -185,7 +195,7 @@ BEGIN
       CONTINUE;
     END IF;
 
-    CALL hivesense_process_blocks(_appContext, _blocks_range, __number_of_posts);
+    CALL hivesense_process_blocks(__context_name, _blocks_range, _worker, __number_of_posts);
     IF  __number_of_posts IS NULL  THEN
         ROLLBACK;
         PERFORM pg_sleep( 1.5 ); -- wait for hivemind

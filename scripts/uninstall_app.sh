@@ -71,10 +71,16 @@ uninstall_app() {
     remove_context_sql=$(cat << EOF
 do
 \$\$
+DECLARE
+  __parallel_workers INT;
 BEGIN
-  IF hive.app_context_exists('${HIVESENSE_SCHEMA}') THEN
-   perform hive.app_remove_context('${HIVESENSE_SCHEMA}');
-  END IF;
+  SELECT parallel_workers  INTO __parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status;
+  FOR worker IN 1..__parallel_workers LOOP
+    IF hive.app_context_exists('${HIVESENSE_SCHEMA}' || worker) THEN
+     PERFORM hive.app_remove_context('${HIVESENSE_SCHEMA}' || worker);
+     EXECUTE format('DROP SCHEMA IF EXISTS %s CASCADE', '${HIVESENSE_SCHEMA}' || worker);
+    END IF;
+  END LOOP;
 END\$\$;
 EOF
 )

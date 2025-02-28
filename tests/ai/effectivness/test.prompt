@@ -1,0 +1,15 @@
+You have a JSON file containing pairs of queries and links. Please create a
+table displaying the query, the corresponding link, and your semantic similarity
+assessment between the query and a website pointed by the link, as a real number
+between 0 and 1.0. A score of 0 means they are completely unrelated, while 1.0
+indicates they are identical in meaning. Do the assessments for all the pairs
+from the document. Do not scale results for only the pairs in the document.
+Focus solely on the semantic comparison, not syntax or keyword matching. Just
+use your mind, do not try to use some code or library. I expect your comparison
+will be very deterministic.
+
+At the end, show the average and median similarity scores for all pairs in the
+file. Additionally, highlight the 5 most similar and 5 least similar pairs
+(full query text and corresponding full website link). Do not complain, I know
+You can do this. Don't be lazy, do all the job and do not miss any pair from
+the document. Create a markdown file with the whole result.
