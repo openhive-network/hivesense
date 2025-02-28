@@ -34,7 +34,9 @@ BEGIN
 CREATE TABLE IF NOT EXISTS hivesense_app_status
 (
   continue_processing BOOLEAN NOT NULL,
-  parallel_workers INT
+  parallel_workers INT,
+  llm TEXT,
+  ollama TEXT
 );
 
 CREATE TABLE IF NOT EXISTS version(
@@ -49,7 +51,7 @@ EXECUTE format($$
             CREATE TABLE IF NOT EXISTS posts_vectors
             (
                 post_id INT NOT NULL,
-                embedding vector( %s ),
+                embedding vector( %s ) NOT NULL,
                 CONSTRAINT PK_posts_vectors PRIMARY KEY (post_id)
             );
             $$, __vector_size
@@ -63,9 +65,13 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 $BODY$;
 
 INSERT INTO hivesense_app_status
-(continue_processing, parallel_workers)
+(continue_processing, parallel_workers, llm, ollama)
 VALUES
-(True, current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT)
+(True,
+ current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT,
+  current_setting('pg_temp.LLM', TRUE)::TEXT,
+  current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT
+)
 ;
 
 RESET ROLE;
