@@ -21,8 +21,10 @@ print_help () {
     echo "  --indexes-only            Only creates indexes"
     echo "  --schema-only             Only creates schema, but not indexes"
     echo "  --llm=MODEL_NAME          Choose LLM model (defaults: bge-m3:latest)"
-    echo "  --ollama=OLLAMA_URLS      Choose OLLAM server (defaults: http://192.168.6.17:11434)"
+    echo "  --ollama=OLLAMA_URLS      Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
     echo "  --vector_size=NUMBER      Choose vector size for embeddings (defaults: 1024)"
+    echo "  --start_block=NUMBER      Choose start block to sync (default: 1)"
+    echo "  --parallel_workers=NUMBER Choose number of parallel contexts that ask OLLAMA"
     echo "  --help               Display this help screen and exit"
     echo
 }
@@ -39,6 +41,7 @@ LLM='bge-m3:latest'
 OLLAMA_HOST='http://192.168.6.17:11434'
 VECTOR_SIZE=1024
 PARALLEL_WORKERS=1
+START_BLOCK=1
 
 
 while [ $# -gt 0 ]; do
@@ -69,6 +72,9 @@ while [ $# -gt 0 ]; do
         ;;
     --parallel_workers=*)
             PARALLEL_WORKERS="${1#*=}"
+        ;;
+    --start_block=*)
+            START_BLOCK="${1#*=}"
         ;;
     --help)
         print_help
@@ -116,7 +122,7 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
     psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner; CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA}${i} AUTHORIZATION hivesense_owner;"
   done
 
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}';SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.START_BLOCK TO ${START_BLOCK};SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}';SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/search.sql"

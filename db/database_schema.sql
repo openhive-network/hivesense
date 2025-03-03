@@ -6,6 +6,7 @@ DECLARE
   __schema_name VARCHAR;
   __vector_size INT := current_setting('pg_temp.VECTOR_SIZE', TRUE)::INT;
   __parallel_workers INT := current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT;
+  __start_block INT := current_setting('pg_temp.START_BLOCK', TRUE)::INT;
   synchronization_stages hive.application_stages;
   __worker INT;
 BEGIN
@@ -23,12 +24,15 @@ BEGIN
               RAISE NOTICE 'Context % already exists, it means all tables are already created and data installing is skipped', __schema_name || __worker;
               CONTINUE;
           END IF;
+
           PERFORM hive.app_create_context(
                   _name => __schema_name || __worker ,
                   _schema => __schema_name || __worker,
                   _is_forking => False,
                   _stages => synchronization_stages
           );
+
+          PERFORM hive.app_set_current_block_num( __schema_name || __worker, __start_block - 1 );
   END LOOP;
 
 CREATE TABLE IF NOT EXISTS hivesense_app_status
