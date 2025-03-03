@@ -70,9 +70,9 @@ BEGIN
             INSERT INTO posts_vectors (post_id, embedding)
             SELECT
                 posts.id,
-                hivesense_embed(posts.body)
+                hivesense_embed( posts.body )
             FROM (
-                     SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, hpd.body
+                     SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, clean_content( hpd.body ) as body
                      FROM hivemind_app.hive_posts as hp
                      JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
                      WHERE hp.id=hp.root_id
@@ -80,6 +80,8 @@ BEGIN
                      ORDER by hp.id
             ) AS posts
             WHERE __number_of_workers - (posts.row_id % __number_of_workers )  = _worker
+            AND posts.body IS NOT NULL
+            AND posts.body != ''
             RETURNING 1
     )
     SELECT COUNT(*) FROM vectorize INTO __number_of_posts;
