@@ -1,0 +1,3 @@
+[submodule "submodules/haf"]
+	path = submodules/haf
+	url = git@gitlab.syncad.com:hive/haf.git
