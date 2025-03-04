@@ -101,6 +101,7 @@ EOF
 
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "${remove_context_sql}"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "DROP SCHEMA IF EXISTS ${HIVESENSE_SCHEMA} CASCADE;"
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "DROP SCHEMA IF EXISTS hivesense_endpoints CASCADE;"
 
   psql "$POSTGRES_ACCESS" -c "${drop_users_sql}" || true
 
