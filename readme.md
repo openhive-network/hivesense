@@ -29,12 +29,14 @@ sudo apt-get install postgresql-plpython3-17 postgresql-17-pgvector
 ![](./doc/images/system_context.png)
 
 ### Structure of sources
-| **Directory Structure**                                                                    | **Description**                                                             |
-|--------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
-| **db/**                                                                                    | SQL code: schema definitions, runtime plpgsql code, HAF application code    |
-| **doc/**                                                                                   | Resources for documentation                                                 |
-| **scripts/**                                                                               | shell scripts                                                               |
-| **tests/**                                                                                 | Tests                                                                       |
+| **Directory Structure** | **Description**                                                          |
+|-------------------------|--------------------------------------------------------------------------|
+| **db/**                 | SQL code: schema definitions, runtime plpgsql code, HAF application code |
+| **doc/**                | Resources for documentation                                              |
+| **docker/**             | Scripts for docker container                                             |
+| **endpoints/**          | REST API definitions                                                     |
+| **scripts/**            | shell scripts                                                            |
+| **tests/**              | Tests                                                                    |
 
 ### Database
 #### PostgreSQL roles
