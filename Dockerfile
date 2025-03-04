@@ -1,3 +1,4 @@
+# docker build -t hivesense:local .
 # syntax=docker/dockerfile:1.5
 ARG PAAS_PSQL_VERSION=11251948d5dd4867552f9b9836a9e02110304df5
 FROM ghcr.io/alphagov/paas/psql:${PAAS_PSQL_VERSION} AS psql_client

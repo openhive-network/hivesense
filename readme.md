@@ -36,6 +36,7 @@ sudo apt-get install postgresql-plpython3-17 postgresql-17-pgvector
 | **docker/**             | Scripts for docker container                                             |
 | **endpoints/**          | REST API definitions                                                     |
 | **scripts/**            | shell scripts                                                            |
+| **submodules/**         | git submodules                                                           |
 | **tests/**              | Tests                                                                    |
 
 ### Database
