@@ -23,7 +23,7 @@ SET ROLE hivesense_owner;
           type: string
         description: pattern to search in posts
       - in: query
-        name: limit
+        name: pagesize
         required: true
     responses:
       '200':
@@ -42,26 +42,25 @@ SET ROLE hivesense_owner;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
-    _pattern TEXT, _limit INT
+    pattern TEXT, pagesize INT
 )
-    RETURNS TEXT[] -- sorted array of @<author>/<permlink>
+    RETURNS JSON -- sorted array of @<author>/<permlink>
 -- openapi-generated-code-end
     LANGUAGE 'plpgsql' STABLE
 AS
 $$
 DECLARE
-    __result TEXT[];
+    __result JSON;
 BEGIN
-    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
 
-    SELECT ARRAY_AGG( '@' || ha.name || '/' ||  hpd.permlink ORDER BY search.similarity_order )
-    FROM find_nearest_posts( _pattern, _limit ) as search
+    SELECT TO_JSON(ARRAY_AGG('@' || ha.name || '/' || hpd.permlink ORDER BY search.similarity_order))
+    FROM find_nearest_posts( pattern, pagesize ) as search
     JOIN hivemind_app.hive_posts hp ON hp.id = search.post_id
     JOIN hivemind_app.hive_accounts ha ON hp.author_id = ha.id
     JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
     INTO __result;
 
-    RETURN __result;
+    RETURN COALESCE( __result, '{}'::JSON);
 END
 $$;
 
