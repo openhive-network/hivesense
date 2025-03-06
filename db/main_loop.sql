@@ -55,6 +55,8 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    -- TODO(mickiewicz@syncad.com) when hivemind is not in a live stage then do not process
+
     IF _logs THEN
         RAISE NOTICE 'Hivesense % is attempting to process a block range: <%, %>', _worker, _first_block_num, _last_block_num;
         __start_ts := clock_timestamp();
