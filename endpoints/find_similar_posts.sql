@@ -30,7 +30,7 @@ SET ROLE hivesense_owner;
     responses:
       '200':
         description: |
-          * Returns  'JSON'
+          * Returns  JSON
         content:
           application/json:
             schema:
