@@ -87,7 +87,7 @@ AS $$
 DECLARE
     __cleaned_text TEXT;
 BEGIN
-    RETURN _text_input;
+
     -- Step 1: Remove image markdown, URLs, and HTML tags in one go
     __cleaned_text := regexp_replace(
             _text_input,

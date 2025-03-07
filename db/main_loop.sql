@@ -7,11 +7,11 @@ CREATE TYPE hivesense_app.id_and_post AS(
 
 DROP TYPE iF EXISTS hivesense_app.post_and_vector CASCADE;
 CREATE TYPE hivesense_app.post_and_vector AS(
-      t TEXT
+      t INTEGER
     , vec vector
 );
 
-DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text,hivesense_app.id_and_post,text,text,jsonb);
+DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text,hivesense_app.id_and_post[],text,text,jsonb);
 CREATE FUNCTION hivesense_app.ollama_embed(
     model text,
     posts hivesense_app.id_and_post[],
@@ -88,7 +88,23 @@ DO $BODY$
         END;
 		$BODY2$
 		$$, __llm, __ollama);
+
+        EXECUTE format($$
+        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[])
+        RETURNS hivesense_app.post_and_vector[]
+        IMMUTABLE
+        LANGUAGE plpgsql
+        PARALLEL SAFE
+        AS
+		$BODY2$
+        BEGIN
+            RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s');
+        END;
+		$BODY2$
+		$$, __llm, __ollama);
 END $BODY$;
+
+
 
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,
@@ -144,25 +160,31 @@ BEGIN
     -- TODO(mickiewicz@syncad.com): parametrize hivemind schema
     -- TODO(mickiewicz@syncad.com): parametrize LLM model
 
-    WITH vectorize AS(
-            INSERT INTO posts_vectors (post_id, embedding)
-            SELECT
-                posts.id,
-                hivesense_embed( posts.body )
-            FROM (
-                     SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, clean_content( hpd.body ) as body
-                     FROM hivemind_app.hive_posts as hp
-                     JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
-                     WHERE hp.id=hp.root_id
-                     AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-                     ORDER by hp.id
-            ) AS posts
-            WHERE __number_of_workers - (posts.row_id % __number_of_workers )  = _worker
-            AND posts.body IS NOT NULL
-            AND posts.body != ''
-            RETURNING 1
-    )
-    SELECT COUNT(*) FROM vectorize INTO __number_of_posts;
+    WITH posts AS (
+        SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, clean_content( hpd.body ) as body
+        FROM hivemind_app.hive_posts as hp
+                 JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
+        WHERE hp.id=hp.root_id
+        AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
+        ORDER by hp.id
+    ), id_and_body_agg AS (
+        SELECT ARRAY_AGG( (p.id, p.body)::hivesense_app.id_and_post ) as id_and_body
+        FROM posts p
+        WHERE p.body != ''
+        AND p.body IS NOT NULL
+        AND __number_of_workers - (p.row_id % __number_of_workers )  = _worker
+    ), embeddings AS (
+        SELECT (id_vector).t as post_id, (id_vector).vec as embedding
+        FROM (
+                 SELECT UNNEST(hivesense_embed(ibagg.id_and_body)) AS id_vector
+                 FROM id_and_body_agg ibagg
+                 WHERE CARDINALITY(ibagg.id_and_body) > 0
+             ) AS subquery
+    ), insert_to AS (
+        INSERT INTO hivesense_app.posts_vectors (post_id, embedding)
+            SELECT emb.post_id, emb.embedding
+            FROM embeddings emb
+    ) SELECT COUNT(*) FROM embeddings INTO __number_of_posts;
 
     __number_of_posts = COALESCE( __number_of_posts, 0 );
 
