@@ -68,6 +68,7 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
   END
 $BODY$;
 
+-- TODO(mickiewicz@syncad.com) do not insert when something is already inserted
 INSERT INTO hivesense_app_status
 (continue_processing, parallel_workers, llm, ollama)
 VALUES
