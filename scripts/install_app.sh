@@ -114,6 +114,7 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT USAGE ON SCHEMA ai to hivesense_user"
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ai TO hivesense_user;"
 
+
   # common schema for all workers
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner;CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA} AUTHORIZATION hivesense_owner;"
 

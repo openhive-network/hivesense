@@ -80,46 +80,33 @@ END
 $$;
 
 CREATE OR REPLACE FUNCTION clean_content(_text_input TEXT)
-RETURNS TEXT
-LANGUAGE plpgsql
-IMMUTABLE
+    RETURNS TEXT
+    LANGUAGE plpgsql
+    IMMUTABLE
 AS $$
 DECLARE
     __cleaned_text TEXT;
 BEGIN
-    -- Step 1: Remove image markdown and raw URLs
-    __cleaned_text := regexp_replace(_text_input, '!\[.*?\]\(.*?\)', '', 'g');
-    __cleaned_text := regexp_replace(__cleaned_text, 'https?://\S+', '', 'g');
-
-    -- Step 2: Remove specific HTML tags (img, b, table, div, style, script)
-    __cleaned_text := regexp_replace(__cleaned_text, '<(img|b|table|div|style|script)[^>]*>.*?</\1>', '', 'gi');
-
-    -- Step 3: Extract text content (strip all remaining HTML)
-    __cleaned_text := regexp_replace(__cleaned_text, '<[^>]+>', ' ', 'g');
-
-    -- Step 4: Remove "Posted via" text patterns
-    __cleaned_text := regexp_replace(__cleaned_text, 'Posted via.*$', '', 'gmi');
-
-    -- Step 5: Remove Markdown-style image placeholders
-    __cleaned_text := regexp_replace(__cleaned_text, '!\S+\.(jpg|jpeg|png|gif)', '', 'gi');
-
-    -- Step 6: Remove Markdown-style links
-    __cleaned_text := regexp_replace(__cleaned_text, '\[([^\]]+)\]\([^\)]+\)', '\1', 'g');
-
-    -- Step 7: Remove Markdown image placeholders
-    __cleaned_text := regexp_replace(__cleaned_text, '!\[\]\([^)]*\)', '', 'g');
-
-    -- Step 8: Remove excessive stars, underscores, and emojis
-    __cleaned_text := regexp_replace(__cleaned_text, '[*_]+', '', 'g');
-    __cleaned_text := regexp_replace(__cleaned_text,  '[^\w\s,.!?"\'']+', '', 'g');
-    
-    -- Step 9: Remove excessive whitespace
-    __cleaned_text := regexp_replace(__cleaned_text, '\s+', ' ', 'g');
-    __cleaned_text := trim(__cleaned_text);
-
+    RETURN _text_input;
+    -- Step 1: Remove image markdown, URLs, and HTML tags in one go
+    __cleaned_text := regexp_replace(
+            _text_input,
+            '(!\[.*?\]\(.*?\)|https?://\S+|<img[^>]*>|<b[^>]*>.*?</b>|<table[^>]*>.*?</table>|' ||
+            '<div[^>]*>.*?</div>|<style[^>]*>.*?</style>|<script[^>]*>.*?</script>|<[^>]+>)',
+            '', 'gi'
+                      );
+    -- Step 2: Remove Markdown-style links and image placeholders
+    __cleaned_text := regexp_replace(__cleaned_text, '\[([^\]]+)\]\([^\)]+\)|!\[\]\([^)]*\)|!\S+\.(jpg|jpeg|png|gif)', '\1', 'gi');
+    -- Step 3: Remove "Posted via" and unwanted characters
+    __cleaned_text := regexp_replace(__cleaned_text, 'Posted via.*$|[*_]+|[^[:alnum:]\s,.!?"''’]', '', 'gmi');
+    -- Step 4: Normalize whitespace (final step)
+    __cleaned_text := trim(regexp_replace(__cleaned_text, '\s+', ' ', 'g'));
     RETURN __cleaned_text;
 END;
 $$;
+
+
+
 
 
 RESET ROLE;
