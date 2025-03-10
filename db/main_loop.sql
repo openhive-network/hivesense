@@ -91,7 +91,7 @@ BEGIN
     -- TODO(mickiewicz@syncad.com): parametrize LLM model
 
     WITH posts AS (
-        SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, clean_content( hpd.body ) as body
+        SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, post_clean_content( hpd.body ) as body
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id

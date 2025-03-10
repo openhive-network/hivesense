@@ -1,6 +1,6 @@
 SET ROLE hivesense_owner;
 
-CREATE OR REPLACE FUNCTION clean_content(_text_input TEXT)
+CREATE OR REPLACE FUNCTION post_clean_content(_text_input TEXT)
     RETURNS TEXT
     LANGUAGE plpgsql
     IMMUTABLE
