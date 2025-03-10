@@ -1,29 +1,37 @@
-SET ROLE hivesense_owner;
-
 CREATE OR REPLACE FUNCTION post_clean_content(_text_input TEXT)
     RETURNS TEXT
-    LANGUAGE plpgsql
+    LANGUAGE plpython3u
     IMMUTABLE
 AS $$
-DECLARE
-    __cleaned_text TEXT;
-BEGIN
+import re
 
-    -- Step 1: Remove image markdown, URLs, and HTML tags in one go
-    __cleaned_text := regexp_replace(
-            _text_input,
-            '(!\[.*?\]\(.*?\)|https?://\S+|<img[^>]*>|<b[^>]*>.*?</b>|<table[^>]*>.*?</table>|' ||
-            '<div[^>]*>.*?</div>|<style[^>]*>.*?</style>|<script[^>]*>.*?</script>|<[^>]+>)',
-            '', 'gi'
-                      );
-    -- Step 2: Remove Markdown-style links and image placeholders
-    __cleaned_text := regexp_replace(__cleaned_text, '\[([^\]]+)\]\([^\)]+\)|!\[\]\([^)]*\)|!\S+\.(jpg|jpeg|png|gif)', '\1', 'gi');
-    -- Step 3: Remove "Posted via" and unwanted characters
-    __cleaned_text := regexp_replace(__cleaned_text, 'Posted via.*$|[*_]+|[^[:alnum:]\s,.!?"''’]', '', 'gmi');
-    -- Step 4: Normalize whitespace (final step)
-    __cleaned_text := trim(regexp_replace(__cleaned_text, '\s+', ' ', 'g'));
-    RETURN __cleaned_text;
-END;
+# Cache regex patterns in a global dictionary to avoid recompilation
+if 'post_clean_content_patterns' not in globals():
+    globals()['post_clean_content_patterns'] = {
+        "remove_html": re.compile(r'(!\[.*?\]\(.*?\)|https?://\S+|<img[^>]*>|<b[^>]*>.*?</b>|'
+                                  r'<table[^>]*>.*?</table>|<div[^>]*>.*?</div>|'
+                                  r'<style[^>]*>.*?</style>|<script[^>]*>.*?</script>|<[^>]+>)', re.IGNORECASE),
+
+        "remove_markdown_links": re.compile(r'\[([^\]]+)\]\([^\)]+\)|!\[\]\([^)]*\)|!\S+\.(jpg|jpeg|png|gif)', re.IGNORECASE),
+
+        "remove_unwanted": re.compile(r'Posted via.*$|[*_]+|[^a-zA-Z0-9\s,.!?\"\'’]', re.MULTILINE),
+
+        "normalize_whitespace": re.compile(r'\s+')
+    }
+
+patterns = globals()['post_clean_content_patterns']
+
+def clean_text(text):
+    text = patterns["remove_html"].sub('', text)
+    text = patterns["remove_markdown_links"].sub(r'\1', text)
+    text = patterns["remove_unwanted"].sub('', text)
+    return patterns["normalize_whitespace"].sub(' ', text).strip()
+
+return clean_text(_text_input)
 $$;
 
-RESET ROLE;
+
+
+GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
