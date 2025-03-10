@@ -57,7 +57,6 @@ BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
     -- will RAISE when hivemind context does not exist
-    -- TODO(mickiewicz@syncad.com): customize hivemind context
     SELECT last_completed_block_num FROM hivemind_app.hive_state INTO __hivemind_current_block;
     SELECT parallel_workers FROM hivesense_app_status INTO __number_of_workers;
 
@@ -85,10 +84,6 @@ BEGIN
         RAISE NOTICE 'Hivesense % is attempting to process a block range: <%, %>', _worker, _first_block_num, _last_block_num;
         __start_ts := clock_timestamp();
     END IF;
-
-    -- TODO(mickiewicz@syncad.com): parametrize ollama address
-    -- TODO(mickiewicz@syncad.com): parametrize hivemind schema
-    -- TODO(mickiewicz@syncad.com): parametrize LLM model
 
     WITH posts AS (
         SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, post_clean_content( hpd.body ) as body
