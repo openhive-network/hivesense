@@ -3,10 +3,9 @@ SET ROLE hivesense_owner;
 DO $BODY$
     DECLARE
         __llm TEXT := current_setting('pg_temp.LLM', TRUE);
-        __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
     BEGIN
         EXECUTE format($$
-        CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
+        CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT, _ollama_host TEXT)
         RETURNS vector
         IMMUTABLE
         LANGUAGE plpgsql
@@ -14,13 +13,13 @@ DO $BODY$
         AS
 		$BODY2$
         BEGIN
-            RETURN ai.ollama_embed('%s', _post, host => '%s');
+            RETURN ai.ollama_embed('%s', _post, host => _ollama_host);
         END;
 		$BODY2$
-		$$, __llm, __ollama);
+		$$, __llm);
 
         EXECUTE format($$
-        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[])
+        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[], _ollama_host TEXT)
         RETURNS hivesense_app.post_and_vector[]
         IMMUTABLE
         LANGUAGE plpgsql
@@ -28,10 +27,10 @@ DO $BODY$
         AS
 		$BODY2$
         BEGIN
-            RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s');
+            RETURN hivesense_app.ollama_embed('%s', _posts, host => _ollama_host);
         END;
 		$BODY2$
-		$$, __llm, __ollama);
+		$$, __llm);
 END $BODY$;
 
 
@@ -53,6 +52,7 @@ DECLARE
     __end_ts   timestamptz;
     __number_of_posts INT;
     __number_of_workers INT;
+    __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
@@ -106,7 +106,7 @@ BEGIN
     ), embeddings AS (
         SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding
         FROM (
-                 SELECT UNNEST(hivesense_embed(ibagg.id_and_body)) AS id_vector
+                 SELECT UNNEST(hivesense_embed(ibagg.id_and_body, __ollama)) AS id_vector
                  FROM id_and_body_agg ibagg
                  WHERE CARDINALITY(ibagg.id_and_body) > 0
              ) AS subquery

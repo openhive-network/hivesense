@@ -12,6 +12,7 @@ print_help () {
     echo "  --port=NUMBER        Allows to specify a PostgreSQL operating port (defaults to 5432)"
     echo "  --postgres-url=URL   Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
     echo "  --stop-at-block=num  Allows to stop processing (sync) at given block"
+    echo "  --ollama=OLLAMA_URLS Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
     echo "  --help               Display this help screen and exit"
     echo
 }
@@ -23,6 +24,7 @@ POSTGRES_URL=${POSTGRES_URL:-""}
 PROCESS_BLOCK_LIMIT=${PROCESS_BLOCK_LIMIT:-null}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
 PARALLEL_WORKERS=1
+OLLAMA_HOST='http://192.168.6.17:11434'
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +45,9 @@ while [ $# -gt 0 ]; do
         ;;
     --schema=*)
         HIVESENSE_SCHEMA="${1#*=}"
+        ;;
+    --ollama=*)
+        OLLAMA_HOST="${1#*=}"
         ;;
     --help)
         print_help
@@ -73,7 +78,7 @@ process_blocks() {
     # record the startup time for use in health checks
     date -uIseconds > /tmp/block_processing_startup_time.txt
 
-    psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1 | tee -i $log_file
+    psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1 | tee -i $log_file
 }
 
 # gen number of workers
