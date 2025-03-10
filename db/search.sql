@@ -1,11 +1,10 @@
 SET ROLE hivesense_owner;
 
-
 DROP TYPE IF EXISTS similar_post_result CASCADE;
 CREATE TYPE similar_post_result AS (
-                                       similarity_order INT
+      similarity_order INT
     , post_id INT
-                                   );
+);
 
 DROP FUNCTION IF EXISTS find_nearest_posts;
 CREATE FUNCTION hivesense_app.find_nearest_posts(
