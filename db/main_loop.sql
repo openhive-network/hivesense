@@ -10,6 +10,7 @@ DO $BODY$
         RETURNS vector
         IMMUTABLE
         LANGUAGE plpgsql
+        PARALLEL SAFE
         AS
 		$BODY2$
         BEGIN
@@ -17,7 +18,23 @@ DO $BODY$
         END;
 		$BODY2$
 		$$, __llm, __ollama);
+
+        EXECUTE format($$
+        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[])
+        RETURNS hivesense_app.post_and_vector[]
+        IMMUTABLE
+        LANGUAGE plpgsql
+        PARALLEL SAFE
+        AS
+		$BODY2$
+        BEGIN
+            RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s');
+        END;
+		$BODY2$
+		$$, __llm, __ollama);
 END $BODY$;
+
+
 
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,
@@ -28,6 +45,7 @@ CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     RETURNS INT  -- NULL need to wait for hivemind, otherwise number of vectorized posts
     LANGUAGE 'plpgsql'
     VOLATILE
+    PARALLEL SAFE
 AS $$
 DECLARE
     __hivemind_current_block INT;
@@ -39,12 +57,12 @@ BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
     -- will RAISE when hivemind context does not exist
-    -- TODO(mickiewicz@syncad.com): customize hivemind context
-    SELECT hive.app_get_current_block_num( 'hivemind_app' ) INTO __hivemind_current_block;
+    SELECT last_completed_block_num FROM hivemind_app.hive_state INTO __hivemind_current_block;
     SELECT parallel_workers FROM hivesense_app_status INTO __number_of_workers;
 
     ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
     ASSERT __number_of_workers > 0 , 'number of workers less than 1';
+
 
     -- hivemind exists
     IF __hivemind_current_block < _first_block_num THEN
@@ -55,36 +73,43 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    -- TODO(mickiewicz@syncad.com) when hivemind is not in a live stage then do not process
+    -- maybe it is not required because last_completed in enough ?
+    -- but last completed does not guaranteen index on block_num_created, but maybe this is an edge case
+    --IF hive.get_current_stage_name( 'hivemind_app' ) != 'live' THEN
+    --    RETURN NULL;
+    --END IF;
+
     IF _logs THEN
         RAISE NOTICE 'Hivesense % is attempting to process a block range: <%, %>', _worker, _first_block_num, _last_block_num;
         __start_ts := clock_timestamp();
     END IF;
 
-    -- TODO(mickiewicz@syncad.com): parametrize ollama address
-    -- TODO(mickiewicz@syncad.com): parametrize hivemind schema
-    -- TODO(mickiewicz@syncad.com): parametrize LLM model
-
-    -- bge-m3:latest
-    -- yxchia/multilingual-e5-base:F16 2xfaster
-    WITH vectorize AS(
-            INSERT INTO posts_vectors (post_id, embedding)
-            SELECT
-                posts.id,
-                hivesense_embed( posts.body )
-            FROM (
-                     SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, clean_content( hpd.body ) as body
-                     FROM hivemind_app.hive_posts as hp
-                     JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
-                     WHERE hp.id=hp.root_id
-                     AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-                     ORDER by hp.id
-            ) AS posts
-            WHERE __number_of_workers - (posts.row_id % __number_of_workers )  = _worker
-            AND posts.body IS NOT NULL
-            AND posts.body != ''
-            RETURNING 1
-    )
-    SELECT COUNT(*) FROM vectorize INTO __number_of_posts;
+    WITH posts AS (
+        SELECT ROW_NUMBER() OVER (ORDER BY hp.id) AS row_id, hp.id, post_clean_content( hpd.body ) as body
+        FROM hivemind_app.hive_posts as hp
+                 JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
+        WHERE hp.id=hp.root_id
+        AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
+        ORDER by hp.id
+    ), id_and_body_agg AS (
+        SELECT ARRAY_AGG( (p.id, p.body)::hivesense_app.id_and_post ) as id_and_body
+        FROM posts p
+        WHERE p.body != ''
+        AND p.body IS NOT NULL
+        AND __number_of_workers - (p.row_id % __number_of_workers )  = _worker
+    ), embeddings AS (
+        SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding
+        FROM (
+                 SELECT UNNEST(hivesense_embed(ibagg.id_and_body)) AS id_vector
+                 FROM id_and_body_agg ibagg
+                 WHERE CARDINALITY(ibagg.id_and_body) > 0
+             ) AS subquery
+    ), insert_to AS (
+        INSERT INTO hivesense_app.posts_vectors (post_id, embedding)
+            SELECT emb.post_id, emb.embedding
+            FROM embeddings emb
+    ) SELECT COUNT(*) FROM embeddings INTO __number_of_posts;
 
     __number_of_posts = COALESCE( __number_of_posts, 0 );
 
@@ -132,6 +157,7 @@ CREATE OR REPLACE FUNCTION continueProcessingLoop(
 )
 RETURNS BOOLEAN
 LANGUAGE 'plpgsql'
+PARALLEL SAFE
 AS
 $$
 BEGIN
@@ -148,6 +174,20 @@ BEGIN
     END IF;
 
     RETURN TRUE;
+END
+$$;
+
+CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.context_name, _block_range hive.blocks_range,  IN _worker INT, OUT _done INT, _logs BOOLEAN = true)
+    LANGUAGE 'plpgsql'
+AS
+$$
+BEGIN
+    IF hive.get_current_stage_name(_context_name) = 'MASSIVE_PROCESSING' THEN
+        CALL hivesense_massive_processing(_block_range.first_block, _block_range.last_block, _logs, _worker, _done);
+        RETURN;
+    END IF;
+
+    CALL hivesense_single_processing(_block_range.first_block, _block_range.last_block, _logs, _worker, _done);
 END
 $$;
 
@@ -176,7 +216,7 @@ BEGIN
 
   PERFORM allowProcessing();
   
-  RAISE NOTICE 'Last block processed by application: %', hive.app_get_current_block_num(__context_name);
+  RAISE NOTICE 'Last block processed by application %: %', __context_name, hive.app_get_current_block_num(__context_name);
 
   RAISE NOTICE 'Entering application main loop...';
 
@@ -193,14 +233,16 @@ BEGIN
     END IF;
 
     IF _blocks_range IS NULL THEN
-      RAISE INFO 'Waiting for next block...';
+        IF _worker = 1 THEN -- avoid logging from all workers because it is to verbose
+            RAISE INFO 'Waiting for next block...';
+        END IF;
       CONTINUE;
     END IF;
 
     CALL hivesense_process_blocks(__context_name, _blocks_range, _worker, __number_of_posts);
     IF  __number_of_posts IS NULL  THEN
         ROLLBACK;
-        PERFORM pg_sleep( 1.5 ); -- wait for hivemind
+        PERFORM pg_sleep( 5 ); -- wait for hivemind
     END IF;
   END LOOP;
 

@@ -30,13 +30,14 @@ BEGIN
                   _schema => __schema_name || __worker,
                   _is_forking => False,
                   _stages => synchronization_stages
-          );
+             );
 
           PERFORM hive.app_set_current_block_num( __schema_name || __worker, __start_block - 1 );
   END LOOP;
 
 CREATE TABLE IF NOT EXISTS hivesense_app_status
 (
+  id SERIAL PRIMARY KEY,
   continue_processing BOOLEAN NOT NULL,
   parallel_workers INT,
   llm TEXT,
@@ -69,13 +70,25 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 $BODY$;
 
 INSERT INTO hivesense_app_status
-(continue_processing, parallel_workers, llm, ollama)
+(id, continue_processing, parallel_workers, llm, ollama)
 VALUES
-(True,
+(
+ 1,
+ True,
  current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT,
-  current_setting('pg_temp.LLM', TRUE)::TEXT,
-  current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT
+ current_setting('pg_temp.LLM', TRUE)::TEXT,
+ current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT
 )
+ON CONFLICT(id)
+DO UPDATE SET
+    ollama = EXCLUDED.ollama
 ;
+-- only ollama host can be overridden by subsequent install
+-- changing llm model or number of host requires resync
+
+-- We can create the index at the start because calculating the vector is
+-- so slow that the additional slowdown on inserts caused by the index is negligible.
+--CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 300);
 
 RESET ROLE;

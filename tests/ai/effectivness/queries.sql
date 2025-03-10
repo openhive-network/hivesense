@@ -105,20 +105,18 @@ VALUES
     ('A sustainable lifestyle helps reduce the impact on the environment.'),
     ('The new law aims to protect endangered species from extinction.');
 
--- TODO(mickiewicz@syncad.com) create index by the workers
-CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
 
 WITH nearest_posts_id AS (
-	SELECT sq.id, hivesense_app.find_nearest_post(sq.query) as nearest_post_id, sq.query
+	SELECT sq.id, hivesense_app.find_nearest_posts(sq.query) as nearest_post_id, sq.query
 	FROM SEMANTIC_QUERIES sq
 ), query_and_link AS (
 		SELECT
-		       npid.id
+              (npid.nearest_post_id).similarity_order
 			,  npid.query
 			, 'https://hive.blog/@' || ha.name || '/' ||  hpd.permlink as link
 		FROM nearest_posts_id npid
-		JOIN hivemind_app.hive_posts as hp ON hp.id = npid.nearest_post_id
+		JOIN hivemind_app.hive_posts as hp ON hp.id = (npid.nearest_post_id).post_id
 		JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
 		JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
-) SELECT JSONB_AGG( qal.* ORDER BY qal.id ) FROM query_and_link qal;
+) SELECT JSONB_AGG( qal.* ORDER BY qal.similarity_order ) FROM query_and_link qal;
 
