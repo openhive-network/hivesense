@@ -177,6 +177,20 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.context_name, _block_range hive.blocks_range,  IN _worker INT, OUT _done INT, _logs BOOLEAN = true)
+    LANGUAGE 'plpgsql'
+AS
+$$
+BEGIN
+    IF hive.get_current_stage_name(_context_name) = 'MASSIVE_PROCESSING' THEN
+        CALL hivesense_massive_processing(_block_range.first_block, _block_range.last_block, _logs, _worker, _done);
+        RETURN;
+    END IF;
+
+    CALL hivesense_single_processing(_block_range.first_block, _block_range.last_block, _logs, _worker, _done);
+END
+$$;
+
 /** Application entry point, which:
   - defines its data schema,
   - creates HAF application context,
@@ -219,14 +233,16 @@ BEGIN
     END IF;
 
     IF _blocks_range IS NULL THEN
-      RAISE INFO 'Waiting for next block...';
+        IF _worker = 1 THEN -- avoid logging from all workers because it is to verbose
+            RAISE INFO 'Waiting for next block...';
+        END IF;
       CONTINUE;
     END IF;
 
     CALL hivesense_process_blocks(__context_name, _blocks_range, _worker, __number_of_posts);
     IF  __number_of_posts IS NULL  THEN
         ROLLBACK;
-        PERFORM pg_sleep( 1.5 ); -- wait for hivemind
+        PERFORM pg_sleep( 5 ); -- wait for hivemind
     END IF;
   END LOOP;
 
