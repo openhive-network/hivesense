@@ -105,8 +105,6 @@ VALUES
     ('A sustainable lifestyle helps reduce the impact on the environment.'),
     ('The new law aims to protect endangered species from extinction.');
 
--- TODO(mickiewicz@syncad.com) create index by the workers
-CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
 
 WITH nearest_posts_id AS (
 	SELECT sq.id, hivesense_app.find_nearest_posts(sq.query) as nearest_post_id, sq.query

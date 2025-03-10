@@ -86,4 +86,9 @@ DO UPDATE SET
 -- only ollama host can be overridden by subsequent install
 -- changing llm model or number of host requires resync
 
+-- We can create the index at the start because calculating the vector is
+-- so slow that the additional slowdown on inserts caused by the index is negligible.
+--CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 300);
+
 RESET ROLE;
