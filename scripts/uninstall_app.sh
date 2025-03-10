@@ -13,7 +13,6 @@ print_help () {
     echo "  --host=VALUE         Allows to specify a PostgreSQL host location (defaults to /var/run/postgresql)"
     echo "  --port=NUMBER        Allows to specify a PostgreSQL operating port (defaults to 5432)"
     echo "  --postgres-url=URL   Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
-    echo "  --drop-indexes       Allows to also drop indexes built by application on regular HAF tables (their rebuild can be timeconsuming). Indexes are preserved by default."
     echo "  --help               Display this help screen and exit"
     echo
 }
@@ -23,7 +22,6 @@ POSTGRES_HOST=${POSTGRES_HOST:-"localhost"}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
 POSTGRES_URL=${POSTGRES_URL:-""}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
-DROP_INDEXES=${DROP_INDEXES:-0}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,9 +36,6 @@ while [ $# -gt 0 ]; do
         ;;
     --postgres-url=*)
         POSTGRES_URL="${1#*=}"
-        ;;
-    --drop-indexes*)
-        DROP_INDEXES=1
         ;;
     --schema=*)
         HIVESENSE_SCHEMA="${1#*=}"
@@ -104,14 +99,6 @@ EOF
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "DROP SCHEMA IF EXISTS hivesense_endpoints CASCADE;"
 
   psql "$POSTGRES_ACCESS" -c "${drop_users_sql}" || true
-
-  if [ "${DROP_INDEXES}" -eq 1 ]; then
-    echo "Attempting to drop indexes built by application"
-
-    # TODO(mickiewicz@syncad.com): remove indexes here
-  else
-    echo "Indexes created by application have been preserved"
-  fi
 }
 
 uninstall_app
