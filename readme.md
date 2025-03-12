@@ -28,6 +28,8 @@ sudo apt-get install postgresql-plpython3-17 postgresql-17-pgvector
 ### System context diagram
 ![](./doc/images/system_context.png)
 
+![](./doc/images/containers.png)
+
 ### Structure of sources
 | **Directory Structure** | **Description**                                                          |
 |-------------------------|--------------------------------------------------------------------------|
@@ -81,6 +83,11 @@ It must be installed alongside HAF and an already synced Hivemind.
    ```bash
    ./scripts/install_app.sh --llm='bge-m3:latest' --vector_size=1024 \
        --ollama=http://192.168.6.186:11434 --parallel_workers=8
+   ```
+   It is possible to start vectorizing post from a given block with using '--start_block'
+   ```bash
+   ./scripts/install_app.sh --llm='bge-m3:latest' --vector_size=1024 \
+       --ollama=http://192.168.6.186:11434 --parallel_workers=8 --start_block=1000000
    ```
 
 2. **Start synchronization**  
