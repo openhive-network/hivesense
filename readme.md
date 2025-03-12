@@ -28,6 +28,8 @@ sudo apt-get install postgresql-plpython3-17 postgresql-17-pgvector
 ### System context diagram
 ![](./doc/images/system_context.png)
 
+![](./doc/images/containers.png)
+
 ### Structure of sources
 | **Directory Structure** | **Description**                                                          |
 |-------------------------|--------------------------------------------------------------------------|
