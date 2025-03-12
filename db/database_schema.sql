@@ -6,7 +6,6 @@ DECLARE
   __schema_name VARCHAR;
   __vector_size INT := current_setting('pg_temp.VECTOR_SIZE', TRUE)::INT;
   __parallel_workers INT := current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT;
-  __start_block INT := current_setting('pg_temp.START_BLOCK', TRUE)::INT;
   synchronization_stages hive.application_stages;
   __worker INT;
 BEGIN
@@ -31,8 +30,6 @@ BEGIN
                   _is_forking => False,
                   _stages => synchronization_stages
              );
-
-          PERFORM hive.app_set_current_block_num( __schema_name || __worker, __start_block - 1 );
   END LOOP;
 
 CREATE TABLE IF NOT EXISTS hivesense_app_status
@@ -41,7 +38,8 @@ CREATE TABLE IF NOT EXISTS hivesense_app_status
   continue_processing BOOLEAN NOT NULL,
   parallel_workers INT,
   llm TEXT,
-  ollama TEXT
+  ollama TEXT,
+  start_block INT
 );
 
 CREATE TABLE IF NOT EXISTS version(
@@ -70,14 +68,15 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 $BODY$;
 
 INSERT INTO hivesense_app_status
-(id, continue_processing, parallel_workers, llm, ollama)
+(id, continue_processing, parallel_workers, llm, ollama, start_block)
 VALUES
 (
  1,
  True,
  current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT,
  current_setting('pg_temp.LLM', TRUE)::TEXT,
- current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT
+ current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT,
+ current_setting('pg_temp.START_BLOCK', TRUE)::INT
 )
 ON CONFLICT(id)
 DO UPDATE SET
@@ -89,6 +88,6 @@ DO UPDATE SET
 -- We can create the index at the start because calculating the vector is
 -- so slow that the additional slowdown on inserts caused by the index is negligible.
 --CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 300);
+CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 300);
 
 RESET ROLE;

@@ -191,6 +191,35 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE FUNCTION wait_for_start_block( _start_block INT, _worker INT, _context hafd.context_name )
+    RETURNS BOOLEAN -- true: not waiting, false: waiting
+    LANGUAGE 'plpgsql'
+    PARALLEL SAFE
+    STABLE
+AS
+$$
+DECLARE
+  __head_of_irreversible_block INT;
+BEGIN
+
+
+    IF _start_block != 0 THEN
+        SELECT hir.consistent_block INTO __head_of_irreversible_block
+        FROM hafd.irreversible_data hir;
+
+        IF _start_block > __head_of_irreversible_block THEN
+            PERFORM pg_sleep( 5 );
+            IF _worker = 1 THEN
+                RAISE INFO 'Waiting for the first block(%) to vectorize. Current HAF head block is %', _start_block, __head_of_irreversible_block;
+            END IF;
+            RETURN FALSE;
+        END IF;
+    END IF;
+
+    RETURN TRUE;
+END
+$$;
+
 /** Application entry point, which:
   - defines its data schema,
   - creates HAF application context,
@@ -209,7 +238,11 @@ DECLARE
   _blocks_range hive.blocks_range := (0,0);
   __number_of_posts INT;
   __context_name hive.context_name := _appContextBaseName || _worker;
+  __start_block INT := 0;
 BEGIN
+  SELECT start_block INTO __start_block
+  FROM hivesense_app_status;
+
   IF _maxBlockLimit != NULL THEN
     RAISE NOTICE 'Max block limit is specified as: %', _maxBlockLimit;
   END IF;
@@ -220,7 +253,14 @@ BEGIN
 
   RAISE NOTICE 'Entering application main loop...';
 
+  PERFORM hive.app_set_current_block_num( __context_name, __start_block - 1 );
+
   LOOP
+
+    IF NOT wait_for_start_block( __start_block, _worker, __context_name ) THEN
+        CONTINUE;
+    END IF;
+
     CALL hive.app_next_iteration(
       __context_name,
       _blocks_range, 
