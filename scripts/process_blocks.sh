@@ -1,7 +1,6 @@
-#! /bin/bash -x
+#! /bin/bash
 set -e
 set -o pipefail
-# Script reponsible for execution of all actions required to finish configuration of the database holding a HAF database to work correctly with hivemind.
 
 print_help () {
     echo "Usage: $0 [OPTION[=VALUE]]..."
@@ -69,35 +68,32 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
 process_blocks() {
     local n_blocks="${2:-null}"
     local worker=${1}
+
+    trap '' SIGINT SIGTERM  # Child ignores signals
+
     log_file="hivesense_sync.log"
     # record the startup time for use in health checks
     date -uIseconds > /tmp/block_processing_startup_time.txt
 
-    psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1 | tee -i $log_file
+    setsid psql "${POSTGRES_ACCESS}${worker}" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1  | tee -i $log_file
+    echo "Worker ${worker} stopped"
 }
 
 # gen number of workers
 NUMBER_OF_WORKERS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 
-pids=()
-
 i=1
-
 while [ "$i" -le "$NUMBER_OF_WORKERS" ]; do
     process_blocks "$i" "$PROCESS_BLOCK_LIMIT" &
-    pids+=($!)
     i=$((i + 1))
 done
 
 terminate_jobs() {
     echo "Breaking HiveSense workers ${pids[@]}";
-    psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.stopProcessing()";
-    wait "${pids[@]}"
-    echo "Stopped HiveSense workers ${pids[@]}";
+    psql "${POSTGRES_ACCESS}breaker" -v "ON_ERROR_STOP=on" -t -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.stopProcessing()";
+    wait
 }
 
 trap 'terminate_jobs' INT TERM
-trap 'terminate_jobs' EXIT
 
 wait
-echo "Stopped HiveSense workers  2 ${pids[@]}";
