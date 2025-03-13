@@ -163,13 +163,13 @@ $$
 BEGIN
     IF _blocks_range IS NULL AND _maxBlockLimit IS NOT NULL THEN
         IF hive.app_get_current_block_num(_appContext) >= _maxBlockLimit THEN
-            RAISE NOTICE 'Blocks limit reached. Exiting application main loop at processed block: %.', hive.app_get_current_block_num(_appContext);
+            RAISE NOTICE 'Worker % reached blocks limit. Exiting application main loop at processed block: %.', _appContext, hive.app_get_current_block_num(_appContext);
             RETURN FALSE;
         END IF;
     END IF;
 
     IF NOT continueProcessing() THEN
-        RAISE NOTICE 'Exiting application main loop at processed block: %.', hive.app_get_current_block_num(_appContext);
+        RAISE NOTICE 'Worker % exiting application main loop at processed block: %.', _appContext, hive.app_get_current_block_num(_appContext);
         RETURN FALSE;
     END IF;
 
