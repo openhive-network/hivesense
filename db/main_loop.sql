@@ -252,7 +252,9 @@ BEGIN
 
   RAISE NOTICE 'Entering application main loop...';
 
-  PERFORM hive.app_set_current_block_num( __context_name, __start_block - 1 );
+  IF hive.app_get_current_block_num(__context_name) < __start_block - 1 THEN
+    PERFORM hive.app_set_current_block_num( __context_name, __start_block - 1 );
+  END IF;
 
   LOOP
 
