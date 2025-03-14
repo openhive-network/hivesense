@@ -9,7 +9,7 @@ $$;
 
 DO $$
 BEGIN
-  CREATE ROLE hivesense_user WITH LOGIN INHERIT IN ROLE hive_applications_group, hivemind_user;
+  CREATE ROLE hivesense_user WITH LOGIN INHERIT IN ROLE hive_applications_group, hivemind;
 EXCEPTION WHEN duplicate_object THEN RAISE NOTICE '%, skipping', SQLERRM USING ERRCODE = SQLSTATE;
 END
 $$;
