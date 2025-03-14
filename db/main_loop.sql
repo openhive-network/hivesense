@@ -86,7 +86,7 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, post_clean_content( hpd.body ) as body
+        SELECT hp.id as post_id, preprocess_post( hpd.body ) as body
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id
@@ -95,8 +95,7 @@ BEGIN
     ), id_and_body_agg AS (
         SELECT ARRAY_AGG( (p.post_id, p.body)::hivesense_app.id_and_post ) as id_and_body
         FROM posts p
-        WHERE p.body != ''
-        AND p.body IS NOT NULL
+        WHERE p.body IS NOT NULL
         AND __number_of_workers - (p.post_id % __number_of_workers )  = _worker
     ), embeddings AS (
         SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding

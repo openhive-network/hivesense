@@ -30,8 +30,45 @@ def clean_text(text):
 return clean_text(_text_input)
 $$;
 
-
-
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
+
+CREATE OR REPLACE FUNCTION post_count_words(_post_body text)
+RETURNS INTEGER
+LANGUAGE 'plpython3u'
+IMMUTABLE
+PARALLEL SAFE
+AS
+$BODY$
+    return len(_post_body.split())
+$BODY$;
+
+GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
+
+CREATE OR REPLACE FUNCTION preprocess_post(_post_body text)
+    RETURNS TEXT --NULL means that post was rejected
+    LANGUAGE 'plpgsql'
+    IMMUTABLE
+    PARALLEL SAFE
+AS
+$BODY$
+DECLARE
+    __words_limit INT := 15;
+    __result TEXT;
+BEGIN
+    __result := post_clean_content( _post_body );
+    IF __result IS NULL THEN
+        RETURN __result;
+    END IF;
+
+    IF post_count_words( __result ) <= __words_limit THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN __result;
+END;
+$BODY$;
+
