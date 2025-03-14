@@ -56,7 +56,7 @@ CREATE OR REPLACE FUNCTION preprocess_post(_post_body text)
 AS
 $BODY$
 DECLARE
-    __words_limit INT := 15;
+    __words_limit INT := 50;
     __result TEXT;
 BEGIN
     __result := post_clean_content( _post_body );
