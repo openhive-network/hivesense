@@ -10,7 +10,7 @@ SET ROLE hivesense_owner;
       Make a semantic search for a posts similar to a pattern text given as a parameter
 
       SQL example
-      * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 10);`
+      * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 10,0);`
 
       REST call example
       * `GET ''https://%1$s/hivesense-api/similarposts/''`
@@ -27,6 +27,12 @@ SET ROLE hivesense_owner;
         required: true
         schema:
           type: integer
+      - in: query
+        name: pagestart
+        required: true
+        schema:
+          type: integer
+        description: the order number of the starting post in the similarity-sorted list.
     responses:
       '200':
         description: |
@@ -42,9 +48,10 @@ SET ROLE hivesense_owner;
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "pattern" TEXT,
-    "pagesize" INT
+    "pagesize" INT,
+    "pagestart" INT
 )
-    RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
     LANGUAGE 'plpgsql' STABLE
 AS
@@ -53,8 +60,17 @@ DECLARE
     __result JSON;
 BEGIN
 
-    SELECT TO_JSON(ARRAY_AGG('@' || ha.name || '/' || hpd.permlink ORDER BY search.similarity_order))
-    FROM find_nearest_posts( pattern, pagesize ) as search
+    SELECT
+        TO_JSON(
+                ARRAY_AGG(
+                        JSON_BUILD_OBJECT(
+                                'url', '@' || ha.name || '/' || hpd.permlink,
+                                'similarity_order', search.similarity_order
+                        )
+                        ORDER BY search.similarity_order
+                )
+        )
+    FROM find_nearest_posts( pattern, pagesize, pagestart ) as search
              JOIN hivemind_app.hive_posts hp ON hp.id = search.post_id
              JOIN hivemind_app.hive_accounts ha ON hp.author_id = ha.id
              JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
