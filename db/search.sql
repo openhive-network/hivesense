@@ -21,22 +21,17 @@ DECLARE
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
 
-    RETURN QUERY WITH similar_posts AS (
+    RETURN QUERY WITH similar_posts AS MATERIALIZED (
         SELECT
                hpv.post_id as post_id
+             , ROW_NUMBER() OVER()::INTEGER as similarity_order
              , embedding <=> hivesense_embed(_query) AS similarity
         FROM posts_vectors hpv
         ORDER BY similarity ASC
         LIMIT __total_limit
-    ), posts_order AS (
-        SELECT
-               ROW_NUMBER() OVER(ORDER BY sp.similarity ASC )::INTEGER as similarity_order
-             , sp.post_id
-        FROM similar_posts sp
-        ORDER BY sp.similarity ASC
     )
     SELECT po.similarity_order, po.post_id as post_id
-    FROM posts_order po
+    FROM similar_posts po
     WHERE po.similarity_order > _from_order
     ORDER BY po.similarity_order ASC
     LIMIT _limit;
