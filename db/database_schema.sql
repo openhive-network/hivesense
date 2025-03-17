@@ -88,6 +88,7 @@ DO UPDATE SET
 -- We can create the index at the start because calculating the vector is
 -- so slow that the additional slowdown on inserts caused by the index is negligible.
 --CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 300);
+CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_ivflat_idxs ON posts_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 4000);
+
 
 RESET ROLE;
