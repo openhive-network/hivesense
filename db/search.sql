@@ -20,7 +20,7 @@ DECLARE
     __total_limit INT = 1000; -- no more than 1000 of post can be returned
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
-    PERFORM set_config('ivfflat.probes', '8', true);
+    PERFORM set_config('ivfflat.probes', '4', true);
 
     RETURN QUERY WITH similar_posts AS MATERIALIZED (
         SELECT
