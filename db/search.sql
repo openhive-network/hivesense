@@ -16,6 +16,8 @@ CREATE FUNCTION hivesense_app.find_nearest_posts(
     LANGUAGE 'plpgsql'
     STABLE PARALLEL SAFE
 AS $BODY$
+DECLARE
+    __total_limit INT = 1000; -- no more than 1000 of post can be returned
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
 
@@ -24,6 +26,8 @@ BEGIN
                hpv.post_id as post_id
              , embedding <=> hivesense_embed(_query) AS similarity
         FROM posts_vectors hpv
+        ORDER BY similarity ASC
+        LIMIT __total_limit
     ), posts_order AS (
         SELECT
                ROW_NUMBER() OVER(ORDER BY sp.similarity ASC )::INTEGER as similarity_order
