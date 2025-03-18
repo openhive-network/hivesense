@@ -121,48 +121,30 @@ It must be installed alongside HAF and an already synced Hivemind.
 
 ### Description
 Retrieves a list of posts that are semantically similar to the given pattern using a semantic search mechanism.
-The API supports pagination through the `pagesize` and `pagestart` parameters, where `pagesize` determines the 
-number of results per request and `pagestart` specifies the index of the first result in the similarity-sorted list.
-To fetch the next set of results, set `pagestart` to the last element index of the previous page (0 for the first page).
-The response is a JSON array where each object contains a `url` and `similarity_order`. Ensure the values are properly
-URL-encoded when making a request.
+It returns maximum 50 posts, which can be truncated to `truncate_body` size (0 means not to truncate)
 
 ### Parameters
 
-| Parameter   | Type   | Required | Description |
-|------------|--------|----------|-------------|
-| `pattern`  | string | Yes      | The pattern text used for semantic search in posts. |
-| `pagesize` | int    | Yes      | The number of results to return per request. |
-| `pagestart` | int    | Yes      | The index of the first post in the similarity-sorted list; use 0 for the first page and the last element index of the previous page for subsequent pages. |
+| Parameter       | Type   | Required | Description                                           |
+|-----------------|--------|----------|-------------------------------------------------------|
+| `pattern`       | string | Yes      | The pattern text used for semantic search in posts.   |
+| `truncate_body` | int    | Yes      | Truncate pos to given length. 0 means not to truncate |
 
 ### Example Request
 
 ```http
-GET /similarposts?pattern=thailand%20beaches&pagesize=10&pagestart=0
+GET /similarposts?pattern=thailand%20beaches&tr_body=10
 ```
 
 ### Example SQL Query
 
 ```sql
-SELECT * FROM hivesense_endpoints.get_similar_posts('thailand beaches', 10, 0);
+SELECT * FROM hivesense_endpoints.get_similar_posts('thailand beaches', 10);
 ```
-
-### Example Response
-
-```json
-[
-   {"url" : "@jpphotography/longtail-boat-in-the-andaman-sea-thailand", "similarity_order" : 1},
-   {"url" : "@karunagata/tour-to-the-beach-e91da61426e42", "similarity_order" : 2},
-   {"url" : "@hangin/landscape-seascape-contest-week-023", "similarity_order" : 3},
-   {"url" : "@sandstorm/beach-wednesday-jomtien-beach-thailand", "similarity_order" : 4},
-   {"url" : "@viktor.phuket/sunset-in-thailand", "similarity_order" : 5}
-]
-```
-
 
 ### REST Call Example
 ```http
-GET 'https://localhost/hivesense-swagger/hivesense-api/similarposts?pattern=thailand%20beaches&pagesize=10&pagestart=0'
+GET 'https://localhost/hivesense-api/similarposts?pattern=thailand%20beaches&tr_body=10'
 ```
 
 

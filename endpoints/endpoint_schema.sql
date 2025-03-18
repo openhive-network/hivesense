@@ -75,7 +75,7 @@ DO $__$
           "AI"
         ],
         "summary": "List of posts semantic similar to a given pattern",
-        "description": "Make a semantic search for a posts similar to a pattern text given as a parameter\n\nSQL example\n* `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 10,0);`\n\nREST call example\n* `GET ''https://%1$s/hivesense-api/similarposts/''`\n",
+        "description": "Make a semantic search for a posts similar to a pattern text given as a parameter. Returns first 50 most similar posts.\n\nSQL example\n* `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`\n\nREST call example\n* `GET ''https://%1$s/hivesense-api/similarposts/''`\n",
         "operationId": "hivesense_endpoints.get_similar_posts",
         "parameters": [
           {
@@ -89,20 +89,12 @@ DO $__$
           },
           {
             "in": "query",
-            "name": "pagesize",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "pagestart",
+            "name": "tr_body",
             "required": true,
             "schema": {
               "type": "integer"
             },
-            "description": "the order number of the starting post in the similarity-sorted list."
+            "description": "0 means no truncate, other return post shrinked to given value"
           }
         ],
         "responses": {
@@ -114,10 +106,7 @@ DO $__$
                   "type": "string",
                   "x-sql-datatype": "JSON"
                 },
-                "example": {
-                  "@bob/my_introduction_post": null,
-                  "@alice/intro": null
-                }
+                "example": {}
               }
             }
           }

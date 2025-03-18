@@ -7,10 +7,10 @@ SET ROLE hivesense_owner;
       - AI
     summary: List of posts semantic similar to a given pattern
     description: |
-      Make a semantic search for a posts similar to a pattern text given as a parameter
+      Make a semantic search for a posts similar to a pattern text given as a parameter. Returns first 50 most similar posts.
 
       SQL example
-      * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 10,0);`
+      * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`
 
       REST call example
       * `GET ''https://%1$s/hivesense-api/similarposts/''`
@@ -23,16 +23,11 @@ SET ROLE hivesense_owner;
           type: string
         description: pattern to search in posts
       - in: query
-        name: pagesize
+        name: tr_body
         required: true
         schema:
           type: integer
-      - in: query
-        name: pagestart
-        required: true
-        schema:
-          type: integer
-        description: the order number of the starting post in the similarity-sorted list.
+        description: 0 means no truncate, other return post shrinked to given value
     responses:
       '200':
         description: |
@@ -42,14 +37,13 @@ SET ROLE hivesense_owner;
             schema:
               type: string
               x-sql-datatype: JSON
-            example: { '@bob/my_introduction_post', '@alice/intro' }
+            example: { }
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "pattern" TEXT,
-    "pagesize" INT,
-    "pagestart" INT
+    "tr_body" INT
 )
 RETURNS JSON 
 -- openapi-generated-code-end
@@ -60,20 +54,52 @@ DECLARE
     __result JSON;
 BEGIN
 
-    SELECT
-        TO_JSON(
-                ARRAY_AGG(
-                        JSON_BUILD_OBJECT(
-                                'url', '@' || ha.name || '/' || hpd.permlink,
-                                'similarity_order', search.similarity_order
-                        )
-                        ORDER BY search.similarity_order
-                )
-        )
-    FROM find_nearest_posts( pattern, pagesize, pagestart ) as search
-             JOIN hivemind_app.hive_posts hp ON hp.id = search.post_id
-             JOIN hivemind_app.hive_accounts ha ON hp.author_id = ha.id
-             JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+    SELECT jsonb_agg (
+            hivemind_postgrest_utilities.create_bridge_post_object(row, tr_body, NULL, row.is_pinned, True)
+    ) FROM (
+       SELECT
+           hp.id,
+           hp.author,
+           hp.parent_author,
+           hp.author_rep,
+           hp.root_title,
+           hp.beneficiaries,
+           hp.max_accepted_payout,
+           hp.percent_hbd,
+           hp.url,
+           hp.permlink,
+           hp.parent_permlink_or_category,
+           hp.title,
+           hp.body,
+           hp.category,
+           hp.depth,
+           hp.payout,
+           hp.pending_payout,
+           hp.payout_at,
+           hp.is_paidout,
+           hp.children,
+           hp.votes,
+           hp.created_at,
+           hp.updated_at,
+           hp.rshares,
+           hp.abs_rshares,
+           hp.json,
+           hp.is_hidden,
+           hp.is_grayed,
+           hp.total_votes,
+           hp.sc_trend,
+           hp.role_title,
+           hp.community_title,
+           hp.role_id,
+           hp.is_pinned,
+           hp.curator_payout_value,
+           hp.is_muted,
+           hp.source AS blacklists,
+           hp.muted_reasons
+        FROM find_nearest_posts(pattern, 50, 0) as search,
+        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, NULL) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
+        ORDER BY search.similarity_order ASC
+    ) row
     INTO __result;
 
     RETURN COALESCE( __result, '{}'::JSON);
