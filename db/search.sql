@@ -17,7 +17,8 @@ CREATE FUNCTION hivesense_app.find_nearest_posts(
     STABLE PARALLEL SAFE
 AS $BODY$
 DECLARE
-    __total_limit INT = 1000; -- no more than 1000 of post can be returned
+    __total_limit INT = 50; -- no more than 50 of post can be returned
+    -- TODO(mickiewicz@syncad.com): change limit for 1000 after first demo
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
     PERFORM set_config('ivfflat.probes', '4', true);

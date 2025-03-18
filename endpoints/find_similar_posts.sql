@@ -28,6 +28,12 @@ SET ROLE hivesense_owner;
         schema:
           type: integer
         description: 0 means no truncate, other return post shrinked to given value
+      - in: query
+        name: posts_limit
+        required: true
+        schema:
+          type: integer
+        description: limit for number of posts, cannot be grater than 50
     responses:
       '200':
         description: |
@@ -43,7 +49,8 @@ SET ROLE hivesense_owner;
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "pattern" TEXT,
-    "tr_body" INT
+    "tr_body" INT,
+    "posts_limit" INT
 )
 RETURNS JSON 
 -- openapi-generated-code-end
@@ -53,6 +60,10 @@ $$
 DECLARE
     __result JSON;
 BEGIN
+    IF posts_limit > 50 THEN
+        RAISE EXCEPTION 'Limit of posts: % is grater than allowed maximum: 50', posts_limit;
+    END IF;
+
 
     SELECT jsonb_agg (
             hivemind_postgrest_utilities.create_bridge_post_object(row, tr_body, NULL, row.is_pinned, True)
@@ -96,7 +107,7 @@ BEGIN
            hp.is_muted,
            hp.source AS blacklists,
            hp.muted_reasons
-        FROM find_nearest_posts(pattern, 50, 0) as search,
+        FROM find_nearest_posts(pattern, posts_limit, 0) as search,
         LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, NULL) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
         ORDER BY search.similarity_order ASC
     ) row

@@ -95,6 +95,15 @@ DO $__$
               "type": "integer"
             },
             "description": "0 means no truncate, other return post shrinked to given value"
+          },
+          {
+            "in": "query",
+            "name": "posts_limit",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "limit for number of posts, cannot be grater than 50"
           }
         ],
         "responses": {
