@@ -1,6 +1,16 @@
-#!/bin/sh
+#!/bin/bash
 
-TAG=$1
+GIT_COMMIT_SHA="$(git rev-parse HEAD || true)"
+if [ -z "$GIT_COMMIT_SHA" ]; then
+  GIT_COMMIT_SHA="[unknown]"
+fi
+
+TAG=${1:-${GIT_COMMIT_SHA:0:8}}
+
+if [ -z "$TAG" ]; then
+  echo "No tag, please pass it at first argument" >&2
+  exit 1
+fi
 
 set -eu pipefail
 
