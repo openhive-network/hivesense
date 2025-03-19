@@ -8,9 +8,10 @@ CREATE TYPE similar_post_result AS (
 
 DROP FUNCTION IF EXISTS find_nearest_posts_with_embedding;
 CREATE FUNCTION find_nearest_posts_with_embedding(
-    _embedding vector,
+    _embedding public.vector,
     _limit integer DEFAULT 1,
-    _from_order INT = 0
+    _from_order INT = 0,
+    _exclude_post_id INT = NULL
 )
     RETURNS SETOF similar_post_result
     LANGUAGE 'plpgsql'
@@ -29,6 +30,7 @@ BEGIN
              , ROW_NUMBER() OVER()::INTEGER as similarity_order
              , embedding <=> _embedding AS similarity
         FROM posts_vectors hpv
+        WHERE _exclude_post_id IS NULL OR  hpv.post_id != _exclude_post_id
         ORDER BY similarity ASC
         LIMIT __total_limit
     )
@@ -75,7 +77,7 @@ CREATE FUNCTION find_nearest_posts_to_post(
 AS $BODY$
 DECLARE
     __post_id INT := hivemind_app.find_comment_id( _author, _permlink, True );
-    __post_embedding vector;
+    __post_embedding public.vector;
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
 
@@ -84,6 +86,7 @@ BEGIN
     WHERE post_id = __post_id
     INTO __post_embedding;
 
+    -- TODO(mickiewicz@syncad.com): maybe vectorize posts here ? but then we got two point of posts vectorization
     IF __post_embedding IS NULL THEN
         RAISE EXCEPTION 'Post @%/% is not vectorized yet or was discarded because is to short', _author, _permlink;
     END IF;
@@ -92,6 +95,7 @@ BEGIN
         __post_embedding
         , _limit
         , _from_order
+        , __post_id
     );
 END;
 $BODY$;
