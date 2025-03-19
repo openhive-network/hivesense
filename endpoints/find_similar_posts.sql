@@ -66,7 +66,7 @@ BEGIN
 
 
     SELECT jsonb_agg (
-            hivemind_postgrest_utilities.create_bridge_post_object(row, tr_body, NULL, row.is_pinned, True)
+            hivemind_postgrest_utilities.create_bridge_post_object(row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order ASC
     ) FROM (
        SELECT
            hp.id,
@@ -106,10 +106,10 @@ BEGIN
            hp.curator_payout_value,
            hp.is_muted,
            hp.source AS blacklists,
-           hp.muted_reasons
+           hp.muted_reasons,
+           search.similarity_order
         FROM find_nearest_posts(pattern, posts_limit, 0) as search,
         LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, NULL) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
-        ORDER BY search.similarity_order ASC
     ) row
     INTO __result;
 
