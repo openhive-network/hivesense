@@ -7,7 +7,7 @@ SET ROLE hivesense_owner;
       - AI
     summary: List of posts semantic similar to a given pattern
     description: |
-      Make a semantic search for a posts similar to a pattern text given as a parameter. Returns first 50 most similar posts.
+      Make a semantic search for a posts similar to a pattern text given as a parameter. Returns max first 50 most similar posts.
 
       SQL example
       * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`

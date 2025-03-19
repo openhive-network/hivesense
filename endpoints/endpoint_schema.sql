@@ -75,7 +75,7 @@ DO $__$
           "AI"
         ],
         "summary": "List of posts semantic similar to a given pattern",
-        "description": "Make a semantic search for a posts similar to a pattern text given as a parameter. Returns first 50 most similar posts.\n\nSQL example\n* `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`\n\nREST call example\n* `GET ''https://%1$s/hivesense-api/similarposts/''`\n",
+        "description": "Make a semantic search for a posts similar to a pattern text given as a parameter. Returns max first 50 most similar posts.\n\nSQL example\n* `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`\n\nREST call example\n* `GET ''https://%1$s/hivesense-api/similarposts/''`\n",
         "operationId": "hivesense_endpoints.get_similar_posts",
         "parameters": [
           {
@@ -86,6 +86,68 @@ DO $__$
               "type": "string"
             },
             "description": "pattern to search in posts"
+          },
+          {
+            "in": "query",
+            "name": "tr_body",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "0 means no truncate, other return post shrinked to given value"
+          },
+          {
+            "in": "query",
+            "name": "posts_limit",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "limit for number of posts, cannot be grater than 50"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "* Returns  JSON\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "x-sql-datatype": "JSON"
+                },
+                "example": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/similarpostsbypost": {
+      "get": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "List of posts semantic similar to a given post described by author and permlink",
+        "description": "Make a semantic search for a posts similar to a given post as a parameter. Returns max. first 50 most similar posts.\n\nSQL example\n* `SELECT * FROM hivesense_endpoints.get_similar_posts_by_post(''bue-witness'',''bue-witness-post'', 20, 10);`\n\nREST call example\n* `GET ''https://%1$s/hivesense-api/similarpoststsbypost/''`\n",
+        "operationId": "hivesense_endpoints.get_similar_posts_by_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "author",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "post author name"
+          },
+          {
+            "in": "query",
+            "name": "permlink",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "permlink of a post"
           },
           {
             "in": "query",
