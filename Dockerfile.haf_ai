@@ -1,0 +1,20 @@
+ARG HAF_TAG=70974c14
+ARG REGISTRY_IMAGE=registry.gitlab.syncad.com/hive/haf/
+
+FROM ${REGISTRY_IMAGE}base_instance:${HAF_TAG} AS ai-instance
+
+SHELL ["/bin/bash", "-c"]
+
+USER root
+WORKDIR /usr/local/src
+COPY ./scripts/setup_ubuntu.sh /usr/local/src/scripts/
+
+RUN apt-get update && \
+  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && \
+  apt-get install postgresql-17-pgvector
+
+RUN apt-get install -y postgresql-plpython3-17
+
+RUN bash -x ./scripts/setup_ubuntu.sh
+
+USER haf_admin

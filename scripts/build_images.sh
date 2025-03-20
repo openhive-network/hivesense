@@ -11,8 +11,8 @@ cat <<-EOF
 
   Exports data from a Docker image to a local directory
   OPTIONS:
-    --image-path=PATH         Path inside the Docker image that is to be exported (default: /home/hived/bin/).
-    --help,-h,-?              Display this help screen and exit
+    --tag=TAG_NAME         Name of tag used for hivesense and hivesense_rewriter images
+    --help,-h,-?           Display this help screen and exit
 EOF
 }
 
