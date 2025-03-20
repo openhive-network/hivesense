@@ -204,7 +204,7 @@ BEGIN
 
     IF _start_block != 0 THEN
         SELECT hir.consistent_block INTO __head_of_irreversible_block
-        FROM hafd.irreversible_data hir;
+        FROM hafd.hive_state hir;
 
         IF _start_block > __head_of_irreversible_block THEN
             PERFORM pg_sleep( 5 );
