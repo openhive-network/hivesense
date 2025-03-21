@@ -41,6 +41,16 @@ sudo apt-get install postgresql-plpython3-17 postgresql-17-pgvector
 | **submodules/**         | git submodules                                                           |
 | **tests/**              | Tests                                                                    |
 
+### Advantages of Using Ollama
+Ollama simplifies the deployment of large language models by exposing them through a
+lightweight REST API. Its minimal setup and support for GGUF-formatted models make it ideal
+for building scalable, distributed vectorization systems. With Ollama, each node can run
+independently, requiring no additional orchestration beyond standard container or process
+management. This enables effortless horizontal scaling—just add more nodes and place them
+behind a load balancer. Ollama internally handles batching and GPU scheduling, allowing
+high-throughput inference without the need to implement complex worker queues or embedding
+pipelines manually.
+
 ### Database
 #### PostgreSQL roles
 - **hivesense_owner** is able to modify the database tables, their content and modify schema. If used to start HiveSense
@@ -82,6 +92,32 @@ then retries.
 
 
 ## Installation
+
+### Dockerized setup
+1. Build HAF docker image with AI support
+   A version of HAF is added as submodule to the project, and corresponding base_instance HAF docker image
+   is used as a base layer for HAF wit AI support (see [Dockerfile.haf_ai](./Dockerfile.haf_ai). Use 'scripts/build_haf_ai_image.sh':
+   ```
+   ./scripts/build_haf_ai_image.sh
+   ```
+   The script will build an image `registry.gitlab.syncad.com/hive/haf/ai-instance:<HAF image tag>`. THe HiveSense can
+   be deployed only on `ai-instance` HAF.
+2. Build HiveSense docker image.
+   ```bash
+   ./scripts/build_images.sh
+   ```                                                                                                           
+   The script will build hivesense and its query rewriter images:
+   ```
+   registry.gitlab.syncad.com/ickiewicz/hivesens:<8 digit git sha>
+   registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:<8 digit git sha>
+   ```
+   With using switch '--push' new images will also be pushed to registry
+3. Run hivesense container
+   ```
+   docker run registry.gitlab.syncad.com/ickiewicz/hivesens:<8 digit git sha> (install_app|process_blocks|uninstall_app)
+   ```
+   Possible options starts scripts explained  in the pragraph below
+### On host installation
 
 It must be installed alongside HAF and an already synced Hivemind.
 

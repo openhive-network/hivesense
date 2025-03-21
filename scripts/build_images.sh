@@ -11,6 +11,7 @@ cat <<-EOF
 
   Exports data from a Docker image to a local directory
   OPTIONS:
+    --push                 Push built images to registry
     --tag=TAG_NAME         Name of tag used for hivesense and hivesense_rewriter images
     --help,-h,-?           Display this help screen and exit
 EOF
@@ -20,6 +21,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --tag=*)
         TAG="${1#*=}"
+        ;;
+    --push)
+        PUSH=1
         ;;
     --help|-h|-\?)
         print_help
@@ -51,10 +55,15 @@ SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 docker build -t registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG} ${SCRIPTPATH}/..
 docker build -t registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG} -f Dockerfile.rewriter  ${SCRIPTPATH}/..
 
-docker push registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG}
-docker push registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG}
+echo "Build images tag ${TAG}"
 
-echo "Pushed images tag ${TAG}"
+if [ -n "${PUSH:-}" ]; then
+  docker push registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG}
+  docker push registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG}
+  echo "Pushed images tag ${TAG}"
+fi
+
+
 
 
 
