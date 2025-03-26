@@ -54,8 +54,7 @@ EXECUTE format($$
             CREATE TABLE IF NOT EXISTS posts_vectors
             (
                 post_id INT NOT NULL,
-                embedding vector( %s ) NOT NULL,
-                CONSTRAINT PK_posts_vectors PRIMARY KEY (post_id)
+                embedding vector( %s ) NOT NULL
             );
             $$, __vector_size
 );

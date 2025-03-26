@@ -49,7 +49,7 @@ GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT
 GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
 
 CREATE OR REPLACE FUNCTION preprocess_post(_post_body text)
-    RETURNS TEXT --NULL means that post was rejected
+    RETURNS TEXT[] --NULL means that post was rejected
     LANGUAGE 'plpgsql'
     IMMUTABLE
     PARALLEL SAFE
@@ -71,7 +71,7 @@ BEGIN
 
     SELECT chunk_post( __result ) INTO __chunks;
 
-    RETURN __chunks[1];
+    RETURN __chunks;
 END;
 $BODY$;
 

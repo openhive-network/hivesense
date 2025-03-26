@@ -1,7 +1,7 @@
 DROP TYPE iF EXISTS hivesense_app.id_and_post CASCADE;
 CREATE TYPE hivesense_app.id_and_post AS(
       post_id INTEGER
-    , body TEXT
+    , body TEXT[] -- chunked post body
 );
 
 
@@ -55,9 +55,10 @@ AS $BODY$
 
     embeddings = []
     for post in posts:
-        resp = client.embeddings(model, post['body'], options=embedding_options_1, keep_alive=keep_alive)
-        embedding = resp.get("embedding")
-        if embedding is not None:
+        for chunk in post['body']:
+          resp = client.embeddings(model, chunk, options=embedding_options_1, keep_alive=keep_alive)
+          embedding = resp.get("embedding")
+          if embedding is not None:
             embeddings.append((post['post_id'], embedding))
     return embeddings;
 $BODY$;

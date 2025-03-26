@@ -86,16 +86,16 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post( hpd.body ) as body
+        SELECT hp.id as post_id, preprocess_post( hpd.body ) as bodies
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id
         AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
         AND __number_of_workers - (hp.id % __number_of_workers )  = _worker
     ), id_and_body_agg AS (
-        SELECT ARRAY_AGG( (p.post_id, p.body)::hivesense_app.id_and_post ) as id_and_body
+        SELECT ARRAY_AGG( (p.post_id, p.bodies)::hivesense_app.id_and_post ) as id_and_body
         FROM posts p
-        WHERE p.body IS NOT NULL
+        WHERE p.bodies IS NOT NULL
     ), embeddings AS (
         SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding
         FROM (
@@ -107,7 +107,7 @@ BEGIN
         INSERT INTO hivesense_app.posts_vectors (post_id, embedding)
             SELECT emb.post_id, emb.embedding
             FROM embeddings emb
-    ) SELECT COUNT(*) FROM embeddings INTO __number_of_posts;
+    ) SELECT COUNT(*) FROM id_and_body_agg INTO __number_of_posts;
 
     __number_of_posts = COALESCE( __number_of_posts, 0 );
 
