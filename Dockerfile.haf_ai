@@ -15,6 +15,7 @@ RUN apt-get update && \
 
 RUN apt-get install -y postgresql-plpython3-17
 
+
 RUN bash -x ./scripts/setup_ubuntu.sh
 
 USER haf_admin

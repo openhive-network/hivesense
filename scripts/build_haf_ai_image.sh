@@ -7,10 +7,11 @@ SCRIPTSDIR="$SCRIPTPATH/.."
 
 BUILD_IMAGE_TAG=""
 IMAGE_TAG_PREFIX=""
-SRCROOTDIR=""
+SRCROOTDIR="${SCRIPTSDIR}"
 REGISTRY="registry.gitlab.syncad.com/hive/haf/"
 
-HAF_SUBMODULE_SHA=$(git rev-parse --short=8 HEAD:my-submodule)
+HAF_SUBMODULE_SHA=$(git rev-parse --short=8 HEAD:submodules/haf)
+BUILD_IMAGE_TAG=${HAF_SUBMODULE_SHA}
 
 print_help () {
 cat <<-EOF

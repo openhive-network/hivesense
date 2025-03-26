@@ -14,4 +14,9 @@ install_pgai() {
     popd
 }
 
+install_langchain() {
+  python3.10 -m pip install langchain
+}
+
 install_pgai
+install_langchain
