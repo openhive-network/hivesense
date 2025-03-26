@@ -91,12 +91,11 @@ BEGIN
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id
         AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-        ORDER by hp.id
+        AND __number_of_workers - (hp.id % __number_of_workers )  = _worker
     ), id_and_body_agg AS (
         SELECT ARRAY_AGG( (p.post_id, p.body)::hivesense_app.id_and_post ) as id_and_body
         FROM posts p
         WHERE p.body IS NOT NULL
-        AND __number_of_workers - (p.post_id % __number_of_workers )  = _worker
     ), embeddings AS (
         SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding
         FROM (
