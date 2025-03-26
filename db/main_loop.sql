@@ -52,6 +52,7 @@ DECLARE
     __start_ts timestamptz;
     __end_ts   timestamptz;
     __number_of_posts INT;
+    __number_of_chunks INT;
     __number_of_workers INT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
@@ -107,14 +108,15 @@ BEGIN
         INSERT INTO hivesense_app.posts_vectors (post_id, embedding)
             SELECT emb.post_id, emb.embedding
             FROM embeddings emb
-    ) SELECT COUNT(*) FROM id_and_body_agg INTO __number_of_posts;
+    ) SELECT (SELECT COUNT(*) FROM id_and_body_agg ), (SELECT COUNT(*) FROM embeddings) INTO __number_of_posts, __number_of_chunks;
 
     __number_of_posts = COALESCE( __number_of_posts, 0 );
+    __number_of_chunks = COALESCE( __number_of_chunks, 0 );
 
     IF _logs THEN
         __end_ts := clock_timestamp();
-        RAISE NOTICE 'Hivesense % processed block range: <%, %> with % roots posts successfully in % s
-    ', _worker, _first_block_num, _last_block_num, __number_of_posts, (extract(epoch FROM __end_ts - __start_ts));
+        RAISE NOTICE 'Hivesense % processed block range: <%, %> with % roots posts and % total chunks successfully in % s
+    ', _worker, _first_block_num, _last_block_num, __number_of_posts, __number_of_chunks, (extract(epoch FROM __end_ts - __start_ts));
     END IF;
 
     RETURN __number_of_posts;
