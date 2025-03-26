@@ -72,3 +72,26 @@ BEGIN
 END;
 $BODY$;
 
+CREATE OR REPLACE FUNCTION chunk_post(
+    _body TEXT,
+    _chunk_size INTEGER DEFAULT 500,
+    _chunk_overlap INTEGER DEFAULT 50
+)
+RETURNS TEXT[] -- array with chunks
+LANGUAGE plpython3u
+IMMUTABLE
+AS
+$$
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=chunk_size,
+    chunk_overlap=chunk_overlap,
+    separators=["\n\n", "\n", ". ", " ", ""]
+)
+
+chunks = text_splitter.split_text(input_text)
+
+return chunks
+$$;
+
