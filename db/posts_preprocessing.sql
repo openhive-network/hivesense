@@ -58,6 +58,7 @@ $BODY$
 DECLARE
     __words_limit INT := 50;
     __result TEXT;
+    __chunks TEXT[];
 BEGIN
     __result := post_clean_content( _post_body );
     IF __result IS NULL THEN
@@ -68,7 +69,9 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    RETURN __result;
+    SELECT chunk_post( __result ) INTO __chunks;
+
+    RETURN __chunks[1];
 END;
 $BODY$;
 
@@ -85,12 +88,12 @@ $$
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=chunk_size,
-    chunk_overlap=chunk_overlap,
+    chunk_size=_chunk_size,
+    chunk_overlap=_chunk_overlap,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
 
-chunks = text_splitter.split_text(input_text)
+chunks = text_splitter.split_text(_body)
 
 return chunks
 $$;
