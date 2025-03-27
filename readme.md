@@ -58,13 +58,14 @@ pipelines manually.
 - **hivesense_user** has only read access to the HiveSense tables, used to execute queries started by REST API server 
 
 #### Index
-For searching among vectorized posts IVFFLAT index is used with 4000 centroids and 4 probes. The numbers are
-chosen experimentally od table with 14M vectors.
+For searching among vectorized posts HNSW index is used.
 
 ### Vectorization
 - Only root posts are vectorized
 - Posts are cleaned from links and other tags
 - Posts which contain less than 50 words after cleanup are discarded
+- Posts are chunking: 1000 words per chunk with 100 overlap with previous chunk
+- Only first 3 chunks from a post are vectorized
 - there is a limit to find only first 1000 of nearest posts (searching performance reason)
 
 #### HAF application(s)
