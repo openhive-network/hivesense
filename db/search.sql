@@ -18,27 +18,33 @@ CREATE FUNCTION find_nearest_posts_with_embedding(
     STABLE PARALLEL SAFE
 AS $BODY$
 DECLARE
-    __total_limit INT = 50; -- no more than 50 of post can be returned
-    -- TODO(mickiewicz@syncad.com): change limit for 1000 after first demo
+    __total_limit INT = 3000; -- because there are max 3 chunks per post we are sure to  check min. 1000 posts
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
     PERFORM set_config('ivfflat.probes', '4', true);
 
-    RETURN QUERY WITH similar_posts AS MATERIALIZED (
+    RETURN QUERY WITH similar_posts AS MATERIALIZED ( -- materialized to fore use index for searching among vectors
         SELECT
                hpv.post_id as post_id
-             , ROW_NUMBER() OVER()::INTEGER as similarity_order
              , embedding <=> _embedding AS similarity
         FROM posts_vectors hpv
-        WHERE _exclude_post_id IS NULL OR  hpv.post_id != _exclude_post_id
         ORDER BY similarity ASC
         LIMIT __total_limit
+    ), unique_posts AS (
+        SELECT DISTINCT ON (post_id) po.post_id as post_id, po.similarity as similarity
+        FROM similar_posts po
+        ORDER BY po.post_id, po.similarity
+    ), ordered_posts AS (
+        SELECT up.post_id
+             , ROW_NUMBER() OVER (ORDER BY up.similarity)::INTEGER as similarity_order
+             , up.similarity
+        FROM unique_posts up
     )
-                 SELECT po.similarity_order, po.post_id as post_id
-                 FROM similar_posts po
-                 WHERE po.similarity_order > _from_order
-                 ORDER BY po.similarity_order ASC
-                 LIMIT _limit;
+    SELECT op.similarity_order, op.post_id as post_id
+    FROM ordered_posts op
+    WHERE op.similarity_order > _from_order
+    ORDER BY op.similarity_order ASC
+    LIMIT _limit;
 END;
 $BODY$;
 
