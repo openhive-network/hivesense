@@ -75,10 +75,11 @@ BEGIN
 END;
 $BODY$;
 
+-- TODO(mickiewicz@syncad.com) only fist 3 chunks are returned
 CREATE OR REPLACE FUNCTION chunk_post(
     _body TEXT,
-    _chunk_size INTEGER DEFAULT 500,
-    _chunk_overlap INTEGER DEFAULT 50
+    _chunk_size INTEGER DEFAULT 1000,
+    _chunk_overlap INTEGER DEFAULT 100
 )
 RETURNS TEXT[] -- array with chunks
 LANGUAGE plpython3u
@@ -90,11 +91,11 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=_chunk_size,
     chunk_overlap=_chunk_overlap,
-    separators=["\n\n", "\n", ". ", " ", ""]
+    separators=[]
 )
 
 chunks = text_splitter.split_text(_body)
 
-return chunks
+return chunks[:3]
 $$;
 
