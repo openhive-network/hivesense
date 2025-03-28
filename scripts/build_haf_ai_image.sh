@@ -10,7 +10,7 @@ IMAGE_TAG_PREFIX=""
 SRCROOTDIR="${SCRIPTSDIR}"
 REGISTRY="registry.gitlab.syncad.com/hive/haf/"
 
-HAF_SUBMODULE_SHA=$(git rev-parse --short=8 HEAD:submodules/haf)
+HAF_SUBMODULE_SHA=$(git -C submodules/haf describe --tags --exact-match HEAD 2>/dev/null || git -C submodules/haf rev-parse --short=8 HEAD)
 BUILD_IMAGE_TAG=${HAF_SUBMODULE_SHA}
 
 print_help () {
