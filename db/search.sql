@@ -22,6 +22,7 @@ DECLARE
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
     PERFORM set_config('ivfflat.probes', '4', true);
+    PERFORM set_config('hnsw.ef_search', '1000', true);
 
     RETURN QUERY WITH similar_posts AS MATERIALIZED ( -- materialized to fore use index for searching among vectors
         SELECT
