@@ -62,4 +62,15 @@ END IF;
 END
 $$;
 
+CREATE OR REPLACE PROCEDURE ensure_indexes_are_created()
+    LANGUAGE 'plpgsql'
+AS
+$$
+BEGIN
+    RAISE NOTICE 'Create index hivensense_vectors_embed_hnsw_idxs for searching for embeddings';
+    CREATE INDEX IF NOT EXISTS hivensense_vectors_embed_hnsw_idxs ON posts_vectors USING hnsw (embedding public.vector_cosine_ops);
+END
+$$;
+
+
 RESET ROLE;

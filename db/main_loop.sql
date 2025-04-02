@@ -150,12 +150,18 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE FUNCTION continueProcessingLoop(
+DROP TYPE IF EXISTS break_reason;
+CREATE TYPE break_reason AS ENUM(
+      'BLOCK_LIMIT_REACHED'
+    , 'BREAK_ON_USER_REQUEST'
+);
+
+CREATE OR REPLACE FUNCTION isBreakingPending(
     _appContext hive.context_name,
     _maxBlockLimit INT,
     _blocks_range hive.blocks_range
 )
-RETURNS BOOLEAN
+RETURNS break_reason -- NULL means no break
 LANGUAGE 'plpgsql'
 PARALLEL SAFE
 AS
@@ -164,16 +170,16 @@ BEGIN
     IF _blocks_range IS NULL AND _maxBlockLimit IS NOT NULL THEN
         IF hive.app_get_current_block_num(_appContext) >= _maxBlockLimit THEN
             RAISE NOTICE 'Worker % reached blocks limit. Exiting application main loop at processed block: %.', _appContext, hive.app_get_current_block_num(_appContext);
-            RETURN FALSE;
+            RETURN 'BLOCK_LIMIT_REACHED';
         END IF;
     END IF;
 
     IF NOT continueProcessing() THEN
         RAISE NOTICE 'Worker % exiting application main loop at processed block: %.', _appContext, hive.app_get_current_block_num(_appContext);
-        RETURN FALSE;
+        RETURN 'BREAK_ON_USER_REQUEST';
     END IF;
 
-    RETURN TRUE;
+    RETURN NULL;
 END
 $$;
 
@@ -239,6 +245,7 @@ DECLARE
   __number_of_posts INT;
   __context_name hive.context_name := _appContextBaseName || _worker;
   __start_block INT := 0;
+  __breaking_reason break_reason := NULL;
 BEGIN
   SELECT start_block INTO __start_block
   FROM hivesense_app_status;
@@ -269,16 +276,31 @@ BEGIN
       _override_max_batch => NULL, 
       _limit => _maxBlockLimit);
 
-    IF NOT continueProcessingLoop( __context_name, _maxBlockLimit, _blocks_range ) THEN
+    __breaking_reason = isBreakingPending( __context_name, _maxBlockLimit, _blocks_range );
+    IF __breaking_reason IS NOT NULL THEN
         ROLLBACK;
+        IF __breaking_reason = 'BLOCK_LIMIT_REACHED' THEN
+            IF _worker = 1 AND _maxBlockLimit IS NOT NULL AND hive.app_get_current_block_num(__context_name) >= _maxBlockLimit THEN
+                CALL ensure_indexes_are_created();
+            END IF;
+        END IF;
         RETURN;
     END IF;
 
-    IF _blocks_range IS NULL THEN
-        IF _worker = 1 THEN -- avoid logging from all workers because it is to verbose
+    -- some global actions are reserved only for the first worker
+    IF _worker = 1 THEN
+        IF hive.get_current_stage_name(__context_name) = 'live'  THEN
+            CALL ensure_indexes_are_created();
+        END IF;
+
+        IF _blocks_range IS NULL THEN
+            -- avoid logging from all workers because it is to verbose
             RAISE INFO 'Waiting for next block...';
         END IF;
-      CONTINUE;
+    END IF;
+
+    IF _blocks_range IS NULL THEN
+        CONTINUE;
     END IF;
 
     CALL hivesense_process_blocks(__context_name, _blocks_range, _worker, __number_of_posts);
