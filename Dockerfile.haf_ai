@@ -1,7 +1,7 @@
 ARG HAF_TAG=70974c14
 ARG REGISTRY_IMAGE=registry.gitlab.syncad.com/hive/haf/
 
-FROM ${REGISTRY_IMAGE}base_instance:${HAF_TAG} AS ai-instance
+FROM ${REGISTRY_IMAGE}instance:${HAF_TAG} AS ai-instance
 
 SHELL ["/bin/bash", "-c"]
 

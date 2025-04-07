@@ -7,6 +7,7 @@ install_pgai() {
       git clone https://github.com/timescale/pgai.git --branch extension-0.8.0
       pushd pgai
         python3.12 -m venv venv/
+        # shellcheck disable=SC1091
         . venv/bin/activate
         python3.12 -m pip install --upgrade pip
         projects/extension/build.py install

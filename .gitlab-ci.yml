@@ -1,0 +1,215 @@
+stages:
+- lint
+- build
+- sync
+- test
+- publish
+- cleanup
+
+variables:
+  # Variables required by Common CI jobs
+  CI_COMMON_JOB_VERSION: "6b9e9e75ec5263939450936a4f8348dfbca3666d"
+  DOCKER_BUILDER_TAG: "$CI_COMMON_JOB_VERSION"
+  DOCKER_DIND_TAG: "$CI_COMMON_JOB_VERSION"
+  IMAGE_REMOVER_TAG: "$CI_COMMON_JOB_VERSION"
+  # Git configuration
+  GIT_STRATEGY: clone
+  GIT_SUBMODULE_STRATEGY: recursive
+  GIT_DEPTH: 1
+  GIT_SUBMODULE_DEPTH: 1
+  GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
+  # HAF configuration
+  DATA_CACHE_HAF_PREFIX: "/cache/replay_data_haf"
+  BLOCK_LOG_SOURCE_DIR_5M: /blockchain/block_log_5m
+  FF_NETWORK_PER_BUILD: 1
+  PYTEST_NUMBER_OF_PROCESSES: 8
+  BUILDER_IMAGE_TAG: "@sha256:834e666ee84fb78d66a695b274b87f75535f96fda98e51726a23eab60812813b"
+  BUILDER_IMAGE_PATH: "registry.gitlab.syncad.com/hive/haf/ci-base-image${BUILDER_IMAGE_TAG}"
+
+include:
+- template: Workflows/Branch-Pipelines.gitlab-ci.yml
+- project: hive/haf
+  ref: b1d8f2623bad9300464739e132764527dceab095   # develop
+  file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
+- project: 'hive/common-ci-configuration'
+  ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
+  file:
+  - '/templates/test_jobs.gitlab-ci.yml'
+  - '/templates/python_projects.gitlab-ci.yml'
+  - '/templates/docker_image_jobs.gitlab-ci.yml'
+  - '/templates/cache_cleanup.gitlab-ci.yml'
+  - '/templates/npm_projects.gitlab-ci.yml'
+
+.lint_job:
+  extends: .job-defaults
+  stage: lint
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  artifacts:
+    name: lint-results
+    when: always
+  tags:
+  - public-runner-docker
+
+lint_bash_scripts:
+  extends: .lint_job
+  image: koalaman/shellcheck-alpine:latest
+  before_script:
+  - apk add xmlstarlet
+  script:
+  - find . -name .git -type d -prune -o -type f -name \*.sh -exec shellcheck -f checkstyle
+    {} + | tee shellcheck-checkstyle-result.xml
+  after_script:
+  - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > shellcheck-junit-result.xml
+  artifacts:
+    paths:
+    - shellcheck-checkstyle-result.xml
+    - shellcheck-junit-result.xml
+    reports:
+      junit: shellcheck-junit-result.xml
+
+lint_sql_scripts:
+  extends: .lint_job
+  image:
+    name: sqlfluff/sqlfluff:2.1.4
+    entrypoint: [""]
+  script:
+  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres
+  artifacts:
+    paths:
+    - sql-lint.yaml
+
+prepare_haf_image:
+  stage: build
+  extends: .prepare_haf_image
+  variables:
+    SUBMODULE_DIR: "$CI_PROJECT_DIR/submodules/haf"
+    REGISTRY_USER: "$CI_REGISTRY_USER"
+    REGISTRY_PASS: "$CI_REGISTRY_PASSWORD"
+  before_script:
+    - git config --global --add safe.directory $CI_PROJECT_DIR/submodules/haf
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  tags:
+    - public-runner-docker
+    - hived-for-tests
+
+
+build_images:
+  extends: .docker_image_builder_job_template
+  stage: build
+  before_script:
+    - !reference [.docker_image_builder_job_template, before_script]
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  script:
+    - $CI_PROJECT_DIR/scripts/build_images.sh --push
+  needs:
+    - job: prepare_haf_image
+  tags:
+    - public-runner-docker
+
+build_haf_ai_images:
+  extends: .docker_image_builder_job_template
+  stage: build
+  before_script:
+    - !reference [.docker_image_builder_job_template, before_script]
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  script:
+    - $CI_PROJECT_DIR/scripts/build_haf_ai_image.sh --push
+  needs:
+    - job: prepare_haf_image
+  tags:
+    - public-runner-docker
+
+sync:
+  extends: .docker_image_builder_job_template
+  stage: sync
+  image: registry.gitlab.syncad.com/hive/haf_api_node/dind:1.27.11rc2
+  needs:
+    - build_images
+    - build_haf_ai_images
+  variables:
+    DOCKER_COMPOSE_VERSION: 2.27.1
+    DATA_SOURCE: ${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}
+    POOL_DIR: ${CI_PROJECT_DIR}/${CI_JOB_ID}/
+    DATADIR: ${POOL_DIR}/haf-datadir
+    SHM_DIR: ${POOL_DIR}/haf-datadir/shared_memory
+    HAF_DATA_DIRECTORY: ${DATADIR}
+    HAF_SHM_DIRECTORY: ${SHM_DIR}
+    BACKEND_VERSION: "$CI_COMMIT_SHORT_SHA"
+    HAF_COMMIT: "$HAF_COMMIT"
+    POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
+    PUBLIC_HOSTNAME: "localhost"
+  timeout: 1 hours
+  before_script:
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+      echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
+      git config --global --add safe.directory "$CI_PROJECT_DIR"
+      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
+      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
+      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
+      echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
+  script:
+    - docker compose version
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting the test environment..."
+      scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_5M}
+      echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
+      
+      echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for Hivesense sync..."
+      scripts/ci-helpers/wait-for-hivesense-startup.sh
+      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+      
+      echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KTest hivesense sync..."
+      netstat -tuln
+      tests/integration/api_node/hivesense_synced_api_node_test.sh
+      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  after_script:
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
+      
+      ls -la $(pwd)
+      OLDPWD=$(pwd)
+      cd submodules/haf_api_node || exit 1
+      docker logs haf-world-haf-1 > ${OLDPWD}/docker/haf.log
+      docker logs haf-world-haproxy-1 > ${OLDPWD}/docker/haproxy.log
+      docker logs haf-world-hivesense-install-schema-1 > ${OLDPWD}/docker/hivesense-install.log
+      docker logs haf-world-hivesense-block-processing-1 > ${OLDPWD}/docker/hivesense-block-processing.log
+      docker logs haf-world-hivesense-postgrest-1 > ${OLDPWD}/docker/hivesense-postgrest.log
+      docker logs haf-world-hivesense-swagger-1 > ${OLDPWD}/docker/hivesense-swagger.log
+      docker logs haf-world-hivesense-postgrest-rewriter-1 > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log
+      docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log
+      cd "$OLDPWD" || exit 1
+      
+      tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
+      
+      mkdir -p "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
+      sudo cp -a "${POOL_DIR}" "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
+      
+      ls -lah "${POOL_DIR}"
+      ls -lah "${POOL_DIR}/blockchain"
+      ls -lah "${POOL_DIR}/shm_dir"
+      
+      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
+      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}/blockchain"
+      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}/shm_dir"
+      
+      # Manually remove the copy of the replay data to preserve disk space on the replay server
+      sudo rm -rf ${POOL_DIR}
+      
+      echo -e "\e[0Ksection_end:$(date +%s):compose2\r\e[0K"
+  artifacts:
+    paths:
+      - docker/container-logs.tar.gz
+    expire_in: 1 week
+    when: always
+  tags:
+    - data-cache-storage

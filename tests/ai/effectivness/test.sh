@@ -29,11 +29,6 @@ POSTGRES_URL=${POSTGRES_URL:-""}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
 SWAGGER_URL=${SWAGGER_URL:-"{hivesense-host}"}
 POSTGRES_APP_NAME=hivesense_install
-LLM='bge-m3:latest'
-OLLAMA_HOST='http://192.168.6.17:11434'
-VECTOR_SIZE=1024
-PARALLEL_WORKERS=1
-
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -71,5 +66,5 @@ done
 
 POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=${POSTGRES_APP_NAME}"}
 
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -v HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA} -q -t -f "${SQL_FILE}" | jq
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -q -t -f "${SQL_FILE}" | jq
 

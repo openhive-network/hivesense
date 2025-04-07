@@ -5,7 +5,7 @@ FROM ghcr.io/alphagov/paas/psql:${PAAS_PSQL_VERSION} AS psql_client
 
 RUN <<EOF
   set -e
-  apk add --no-cache bash
+  apk add --no-cache bash curl
   adduser -s /bin/bash -G users -D "haf_admin"
 EOF
 

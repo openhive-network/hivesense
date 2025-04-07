@@ -2,20 +2,20 @@ SET ROLE hivesense_owner;
 
 DROP TYPE IF EXISTS similar_post_result CASCADE;
 CREATE TYPE similar_post_result AS (
-      similarity_order INT
-    , post_id INT
+    similarity_order INT,
+    post_id INT
 );
 
 DROP FUNCTION IF EXISTS find_nearest_posts_with_embedding;
 CREATE FUNCTION find_nearest_posts_with_embedding(
     _embedding public.vector,
     _limit integer DEFAULT 1,
-    _from_order INT = 0,
-    _exclude_post_id INT = NULL
+    _from_order int = 0,
+    _exclude_post_id int = NULL
 )
-    RETURNS SETOF similar_post_result
-    LANGUAGE 'plpgsql'
-    STABLE PARALLEL SAFE
+RETURNS SETOF similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
 AS $BODY$
 DECLARE
     __total_limit INT = 3000; -- because there are max 3 chunks per post we are sure to  check min. 1000 posts
@@ -54,11 +54,11 @@ DROP FUNCTION IF EXISTS find_nearest_posts;
 CREATE FUNCTION find_nearest_posts(
     _query text,
     _limit integer DEFAULT 1,
-    _from_order INT = 0
+    _from_order int = 0
 )
-    RETURNS SETOF similar_post_result
-    LANGUAGE 'plpgsql'
-    STABLE PARALLEL SAFE
+RETURNS SETOF similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
 AS $BODY$
 BEGIN
 
@@ -76,11 +76,11 @@ CREATE FUNCTION find_nearest_posts_to_post(
     _author text,
     _permlink text,
     _limit integer DEFAULT 1,
-    _from_order INT = 0
+    _from_order int = 0
 )
-    RETURNS SETOF similar_post_result
-    LANGUAGE 'plpgsql'
-    STABLE PARALLEL SAFE
+RETURNS SETOF similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
 AS $BODY$
 DECLARE
     __post_id INT := hivemind_app.find_comment_id( _author, _permlink, True );
@@ -108,4 +108,3 @@ END;
 $BODY$;
 
 RESET ROLE
-

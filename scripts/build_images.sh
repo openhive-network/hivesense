@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 
-GIT_COMMIT_SHA="$(git rev-parse HEAD || true)"
+GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
 if [ -z "$GIT_COMMIT_SHA" ]; then
   GIT_COMMIT_SHA="[unknown]"
 fi
@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-TAG=${TAG:-${GIT_COMMIT_SHA:0:8}}
+TAG=${TAG:-$(echo "$GIT_COMMIT_SHA" | cut -c1-8)}
 
 if [ -z "$TAG" ]; then
   echo "No tag, please pass it at first argument" >&2
@@ -48,22 +48,15 @@ fi
 
 set -eu pipefail
 
-LOG_FILE=build.log
-
 SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
-docker build -t registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG} ${SCRIPTPATH}/..
-docker build -t registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG} -f Dockerfile.rewriter  ${SCRIPTPATH}/..
+docker build -t "registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG}" "${SCRIPTPATH}/.."
+docker build -t "registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
 
 echo "Build images tag ${TAG}"
 
 if [ -n "${PUSH:-}" ]; then
-  docker push registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG}
-  docker push registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG}
+  docker push "registry.gitlab.syncad.com/ickiewicz/hivesens:${TAG}"
+  docker push "registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:${TAG}"
   echo "Pushed images tag ${TAG}"
 fi
-
-
-
-
-

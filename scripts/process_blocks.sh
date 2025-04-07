@@ -1,4 +1,4 @@
-#! /bin/bash
+#! /bin/bash -x
 set -e
 set -o pipefail
 
@@ -21,7 +21,6 @@ POSTGRES_PORT=${POSTGRES_PORT:-5432}
 POSTGRES_URL=${POSTGRES_URL:-""}
 PROCESS_BLOCK_LIMIT=${PROCESS_BLOCK_LIMIT:-null}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
-PARALLEL_WORKERS=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,6 +63,70 @@ while [ $# -gt 0 ]; do
 done
 
 POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=hivesense_block_processing"}
+NUMBER_OF_WORKERS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+LLM="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT llm FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+OLLAMA_ADDRESS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT ollama FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+
+
+initialize_ollama() {
+  local max_retries=60
+  local delay=2
+  local attempt=0
+  local http_code=""
+  local response=""
+  local curl_exit=0
+  local llm_pull_request_sent=0
+
+  echo "Checking if Ollama at ${OLLAMA_ADDRESS} has pulled model: ${LLM}"
+
+  while [ "$attempt" -lt "$max_retries" ]; do
+    if [ "$attempt" -gt 0 ]; then
+      echo "Waiting for ollama to finish pulling model, attempt ${attempt}"
+      sleep "$delay"
+    fi
+    set +e
+    response=$(curl -s -w "%{http_code}" -X POST "${OLLAMA_ADDRESS}/api/show" \
+      -H "Content-Type: application/json" \
+      -d "{\"name\": \"${LLM}\"}")
+    curl_exit=$?
+    set -e
+
+    http_code="${response: -3}"
+
+    if [ "$curl_exit" -ne 0 ]; then
+      echo "curl failed (exit code $curl_exit), retrying..."
+    elif [ "$http_code" = "404" ]; then
+      if [ "$llm_pull_request_sent" -eq 0 ]; then
+        llm_pull_request_sent=1
+        echo "Model not found. Sending pull request for ${LLM} ..."
+        set +e
+        response=$(curl -s -w "%{http_code}" -X POST "${OLLAMA_ADDRESS}/api/pull" \
+          -H "Content-Type: application/json" \
+          -d "{\"name\": \"${LLM}\"}")
+        curl_exit=$?
+        http_code="${response: -3}"
+        set -e
+        if [  "$curl_exit" -ne 0 ] || [ "${http_code}" -ne 200 ]; then
+          llm_pull_request_sent=0
+          echo "Sending pull request failed"
+        fi
+        echo "Pull status: ${http_code}"
+      fi
+    elif [ "$http_code" = "200" ]; then
+      echo "Model ${LLM} is fully pulled and ready."
+      return 0
+    else
+      echo "Unexpected HTTP code: $http_code — retrying..."
+    fi
+
+    attempt=$((attempt + 1))
+  done
+
+  echo "Timed out waiting for Ollama at ${OLLAMA_ADDRESS} to pull model ${LLM}."
+  return 1
+}
+
+
 
 process_blocks() {
     local n_blocks="${2:-null}"
@@ -71,17 +134,16 @@ process_blocks() {
 
     trap '' SIGINT SIGTERM  # Child ignores signals
 
-    log_file="hivesense_sync.log"
     # record the startup time for use in health checks
     date -uIseconds > /tmp/block_processing_startup_time.txt
 
-    setsid psql "${POSTGRES_ACCESS}${worker}" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1  | tee -i $log_file
+    setsid psql "${POSTGRES_ACCESS}${worker}" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1 | tee -i /dev/null
     echo "Worker ${worker} stopped"
 }
 
-# gen number of workers
-NUMBER_OF_WORKERS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+initialize_ollama
 
+# gen number of workers
 i=1
 while [ "$i" -le "$NUMBER_OF_WORKERS" ]; do
     process_blocks "$i" "$PROCESS_BLOCK_LIMIT" &
@@ -89,7 +151,7 @@ while [ "$i" -le "$NUMBER_OF_WORKERS" ]; do
 done
 
 terminate_jobs() {
-    echo "Breaking HiveSense workers ${pids[@]}";
+    echo "Breaking HiveSense workers";
     psql "${POSTGRES_ACCESS}breaker" -v "ON_ERROR_STOP=on" -t -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.stopProcessing()";
     wait
 }

@@ -59,9 +59,9 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_by_post(
     "tr_body" INT,
     "posts_limit" INT
 )
-RETURNS JSON 
+RETURNS JSON
 -- openapi-generated-code-end
-    LANGUAGE 'plpgsql' STABLE
+LANGUAGE plpgsql STABLE
 AS
 $$
 DECLARE

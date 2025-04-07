@@ -42,10 +42,10 @@ CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _logs BOOLEAN,
     _worker INT
 )
-    RETURNS INT  -- NULL need to wait for hivemind, otherwise number of vectorized posts
-    LANGUAGE 'plpgsql'
-    VOLATILE
-    PARALLEL SAFE
+RETURNS INT  -- NULL need to wait for hivemind, otherwise number of vectorized posts
+LANGUAGE plpgsql
+VOLATILE
+PARALLEL SAFE
 AS $$
 DECLARE
     __hivemind_current_block INT;
@@ -128,7 +128,7 @@ $$;
 CREATE OR REPLACE PROCEDURE hivesense_massive_processing(
     IN _from INT, IN _to INT, IN _logs BOOLEAN, IN _worker INT, OUT _done INT
 )
-LANGUAGE 'plpgsql'
+LANGUAGE plpgsql
 AS
 $$
 BEGIN
@@ -139,8 +139,9 @@ END
 $$;
 
 CREATE OR REPLACE PROCEDURE hivesense_single_processing(
-    in _from INT, in _to INT, IN _logs BOOLEAN,  IN _worker INT, _done OUT INT)
-LANGUAGE 'plpgsql'
+    IN _from INT, IN _to INT, IN _logs BOOLEAN, IN _worker INT, _done OUT INT
+)
+LANGUAGE plpgsql
 AS
 $$
 BEGIN
@@ -150,19 +151,19 @@ BEGIN
 END
 $$;
 
-DROP TYPE IF EXISTS break_reason CASCADE;
-CREATE TYPE break_reason AS ENUM(
-      'BLOCK_LIMIT_REACHED'
-    , 'BREAK_ON_USER_REQUEST'
+DROP TYPE IF EXISTS BREAK_REASON CASCADE;
+CREATE TYPE break_reason AS ENUM (
+    'BLOCK_LIMIT_REACHED',
+    'BREAK_ON_USER_REQUEST'
 );
 
-CREATE OR REPLACE FUNCTION isBreakingPending(
-    _appContext hive.context_name,
+CREATE OR REPLACE FUNCTION isbreakingpending(
+    _appContext hive.CONTEXT_NAME,
     _maxBlockLimit INT,
-    _blocks_range hive.blocks_range
+    _blocks_range hive.BLOCKS_RANGE
 )
-RETURNS break_reason -- NULL means no break
-LANGUAGE 'plpgsql'
+RETURNS BREAK_REASON -- NULL means no break
+LANGUAGE plpgsql
 PARALLEL SAFE
 AS
 $$
@@ -183,8 +184,8 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.context_name, _block_range hive.blocks_range,  IN _worker INT, OUT _done INT, _logs BOOLEAN = true)
-    LANGUAGE 'plpgsql'
+CREATE OR REPLACE PROCEDURE hivesense_process_blocks(_context_name hive.CONTEXT_NAME, _block_range hive.BLOCKS_RANGE, IN _worker INT, OUT _done INT, _logs BOOLEAN = true)
+LANGUAGE plpgsql
 AS
 $$
 BEGIN
@@ -197,11 +198,11 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE FUNCTION wait_for_start_block( _start_block INT, _worker INT, _context hafd.context_name )
-    RETURNS BOOLEAN -- true: not waiting, false: waiting
-    LANGUAGE 'plpgsql'
-    PARALLEL SAFE
-    STABLE
+CREATE OR REPLACE FUNCTION wait_for_start_block(_start_block INT, _worker INT, _context hafd.CONTEXT_NAME)
+RETURNS BOOLEAN -- true: not waiting, false: waiting
+LANGUAGE plpgsql
+PARALLEL SAFE
+STABLE
 AS
 $$
 DECLARE
@@ -229,15 +230,15 @@ $$;
 /** Application entry point, which:
   - defines its data schema,
   - creates HAF application context,
-  - starts application main-loop (which iterates infinitely). 
+  - starts application main-loop (which iterates infinitely).
   - To stop it call `stopProcessing();` from another session and commit its trasaction.
 */
 CREATE OR REPLACE PROCEDURE main(
-    IN _appContextBaseName hive.context_name,
+    IN _appContextBaseName hive.CONTEXT_NAME,
     IN _worker INT,
-    IN _maxBlockLimit INT = NULL
+    IN _maxBlockLimit INT = null
 )
-LANGUAGE 'plpgsql'
+LANGUAGE plpgsql
 AS
 $$
 DECLARE

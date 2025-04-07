@@ -8,6 +8,8 @@ SRCPATH="${SCRIPTPATH}/../"
 
 # Script reponsible for execution of all actions required to finish configuration of the database holding a HAF database to work correctly with hivemind.
 
+echo "All arguments: $*"
+
 print_help () {
     echo "Usage: $0 [OPTION[=VALUE]]..."
     echo
@@ -37,9 +39,9 @@ POSTGRES_URL=${POSTGRES_URL:-""}
 HIVESENSE_SCHEMA=${HIVESENSE_SCHEMA:-"hivesense_app"}
 SWAGGER_URL=${SWAGGER_URL:-"{hivesense-host}"}
 POSTGRES_APP_NAME=hivesense_install
-LLM='all-minilm:l6-v2'
+LLM='yxchia/multilingual-e5-base:F16'
 OLLAMA_HOST='http://192.168.6.17:11434'
-VECTOR_SIZE=384
+VECTOR_SIZE=768
 PARALLEL_WORKERS=16
 START_BLOCK=1
 
@@ -104,7 +106,8 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
 
 
   echo "Installing app..."
-
+  echo "Number of workers: ${PARALLEL_WORKERS}"
+  echo "Model: ${LLM}"
 
   psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -f "$SRCPATH/db/builtin_roles.sql"
 

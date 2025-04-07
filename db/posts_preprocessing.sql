@@ -1,7 +1,7 @@
 CREATE OR REPLACE FUNCTION post_clean_content(_text_input TEXT)
-    RETURNS TEXT
-    LANGUAGE plpython3u
-    IMMUTABLE
+RETURNS TEXT
+LANGUAGE plpython3u
+IMMUTABLE
 AS $$
 import re
 
@@ -34,9 +34,9 @@ GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
 
-CREATE OR REPLACE FUNCTION post_count_words(_post_body text)
+CREATE OR REPLACE FUNCTION post_count_words(_post_body TEXT)
 RETURNS INTEGER
-LANGUAGE 'plpython3u'
+LANGUAGE plpython3u
 IMMUTABLE
 PARALLEL SAFE
 AS
@@ -48,11 +48,11 @@ GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
 GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
 
-CREATE OR REPLACE FUNCTION preprocess_post(_post_body text)
-    RETURNS TEXT[] --NULL means that post was rejected
-    LANGUAGE 'plpgsql'
-    IMMUTABLE
-    PARALLEL SAFE
+CREATE OR REPLACE FUNCTION preprocess_post(_post_body TEXT)
+RETURNS TEXT [] --NULL means that post was rejected
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
 AS
 $BODY$
 DECLARE
@@ -75,13 +75,12 @@ BEGIN
 END;
 $BODY$;
 
--- TODO(mickiewicz@syncad.com) only fist 3 chunks are returned
 CREATE OR REPLACE FUNCTION chunk_post(
     _body TEXT,
     _chunk_size INTEGER DEFAULT 1000,
     _chunk_overlap INTEGER DEFAULT 100
 )
-RETURNS TEXT[] -- array with chunks
+RETURNS TEXT [] -- array with chunks
 LANGUAGE plpython3u
 IMMUTABLE
 AS
@@ -98,4 +97,3 @@ chunks = text_splitter.split_text(_body)
 
 return chunks[:3]
 $$;
-

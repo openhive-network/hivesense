@@ -209,10 +209,71 @@ then retries.
 - context schema(default): **hivesense_app**
 
 ##### Stages
+1.  **MASSIVE_PROCESSING** started when the context is more than 10 blocks after hive head. Max. 100 blocks in a one batch
 
-1. **MASSIVE_PROCESSING** started when the context is more than 10 blocks after hive head. Max. 100 blocks in a one batch
+### Continuous Integration (CI) Overview
+
+The CI pipeline includes several key steps to ensure quality, build consistency, and up-to-date images for all critical components.
+
+#### Linters
+- **Shell scripts** and **SQL scripts** are automatically checked with linters to enforce coding standards and catch errors early.
+
+#### Docker Image Builds
+- Builds Docker images based on the current submodule versions for:
+   - `haf ai-instance` (with AI-related tools see  [`/scripts/setup_ubuntu.sh`](./scripts/setup_ubuntu.sh) used by [`Dockerfile.haf_ai`](./Dockerfile.haf_ai) ) 
+   - `hivemind`
+   - `haf_api_node`
+   - `hivesense`
+   - `hivesense/rewriter`
+
+#### Sync Job
+- The sync job starts `haf_api_node` with:
+   - `hivesense`
+   - A local **Ollama** server
+
+- It performs a blockchain sync for:
+   - `haf`
+   - `hivemind`
+   - `hivesense`
+   - Up to **1 million blocks**
+
+### Start CI Tasks on Host
+To reproduce CI-related issues on your local machine, you can replicate the environment using the following steps:
+
+1. **Build Docker Images**
+   ```bash
+   ./scripts/build_haf_ai_image.sh       # Builds the HAF Docker image with AI support. Uses the HAF submodule version as the base.
+   ./scripts/build_images.sh             # Builds Docker images for hivesense and the PostgREST rewriter.
+   ```
+
+2. **Download a Blocklog**
+   - Download a `blocklog` file containing **at least 1 million blocks** and place it in a local directory.
+
+3. **Start the Test Environment**
+   ```bash
+   ./scripts/ci-helpers/start-ci-test-environment.sh \
+     --block-log-directory=<path_to_blocklog_directory> \
+     --haf-data-directory=<path_to_haf_api_node_data_directory>
+   ```
+
+4. **Wait for Hivesense to Sync**
+   ```bash
+   ./scripts/ci-helpers/wait-for-hivesense-startup.sh
+   ```
+
+Once the environment is up and synced, you can reproduce, debug, and test changes as they would occur during CI execution.
 
 ## Installation
+
+### API Node
+   The Hivesense is intended to run as a part of [HAF_API_NODE](https://gitlab.syncad.com/hive/haf_api_node), you must
+   add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize setup set variables:
+   . `HIVESENSE_SYNC_ARGS`
+   . `HIVESENSE_OLLAMA` - Ollama endpoint address
+   . `HIVESENSE_MODEL` - LLM used to vectorization
+   . `HIVESENSE_VECTOR_SIZE` - LLM vector size
+   . `HIVESENSE_START_BLOCK` - From which block start vectorization 
+   . `HIVESENSE_WORKERS` - How many vectorization workers use 
 
 ### Dockerized setup
 

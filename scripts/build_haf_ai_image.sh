@@ -8,7 +8,11 @@ SCRIPTSDIR="$SCRIPTPATH/.."
 BUILD_IMAGE_TAG=""
 IMAGE_TAG_PREFIX=""
 SRCROOTDIR="${SCRIPTSDIR}"
-REGISTRY="registry.gitlab.syncad.com/hive/haf/"
+REGISTRY="${CI_REGISTRY:-registry.gitlab.syncad.com}"
+REGISTRY="${REGISTRY}/hive/haf/"
+
+HAF_AI_INSTANCE_REGISTRY="registry.gitlab.syncad.com/ickiewicz/hivesens/haf/"
+
 
 HAF_SUBMODULE_SHA=$(git -C submodules/haf describe --tags --exact-match HEAD 2>/dev/null || git -C submodules/haf rev-parse --short=8 HEAD)
 BUILD_IMAGE_TAG=${HAF_SUBMODULE_SHA}
@@ -19,6 +23,7 @@ cat <<-EOF
 
   Builds docker image containing Hived installation
   OPTIONS:
+      --push                    Push built images to registry
       --network-type=TYPE       Allows to specify type of blockchain network supported by built hived. Allowed values: mainnet, testnet, mirrornet
       --help|-h|-?              Display this help screen and exit
 EOF
@@ -26,6 +31,9 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --push)
+          PUSH=1
+          ;;
     --network-type=*)
         type="${1#*=}"
 
@@ -64,8 +72,16 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+AI_INSTANCE_IMAGE_PATH="${HAF_AI_INSTANCE_REGISTRY}${IMAGE_TAG_PREFIX}ai-instance:${BUILD_IMAGE_TAG}"
+
 docker build --progress=plain --target=ai-instance \
   --build-arg REGISTRY_IMAGE="${REGISTRY}" \
   --build-arg HAF_TAG="${BUILD_IMAGE_TAG}" \
-  --tag "${REGISTRY}${IMAGE_TAG_PREFIX}ai-instance:${BUILD_IMAGE_TAG}" \
+  --tag "${AI_INSTANCE_IMAGE_PATH}" \
   --file Dockerfile.haf_ai "${SRCROOTDIR}"
+
+if [ -n "${PUSH:-}" ]; then
+  echo "Pushing image ${AI_INSTANCE_IMAGE_PATH}..."
+  docker push "${AI_INSTANCE_IMAGE_PATH}"
+  echo "Pushed image ${AI_INSTANCE_IMAGE_PATH}"
+fi

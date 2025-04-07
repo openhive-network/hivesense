@@ -4,8 +4,8 @@ SET ROLE hivesense_owner;
 DO $BODY$
 DECLARE 
   __schema_name VARCHAR;
-  __vector_size INT := current_setting('pg_temp.VECTOR_SIZE', TRUE)::INT;
-  __parallel_workers INT := current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT;
+  __vector_size INT := current_setting('PG_TEMP.VECTOR_SIZE', TRUE)::INT;
+  __parallel_workers INT := current_setting('PG_TEMP.PARALLEL_WORKERS', TRUE)::INT;
   synchronization_stages hive.application_stages;
   __worker INT;
 BEGIN
@@ -70,22 +70,17 @@ INSERT INTO hivesense_app_status
 (id, continue_processing, parallel_workers, llm, ollama, start_block)
 VALUES
 (
- 1,
- True,
- current_setting('pg_temp.PARALLEL_WORKERS', TRUE)::INT,
- current_setting('pg_temp.LLM', TRUE)::TEXT,
- current_setting('pg_temp.OLLAMA_HOST', TRUE)::TEXT,
- current_setting('pg_temp.START_BLOCK', TRUE)::INT
+    1,
+    TRUE,
+    current_setting('PG_TEMP.PARALLEL_WORKERS', TRUE)::INT,
+    current_setting('PG_TEMP.LLM', TRUE)::TEXT,
+    current_setting('PG_TEMP.OLLAMA_HOST', TRUE)::TEXT,
+    current_setting('PG_TEMP.START_BLOCK', TRUE)::INT
 )
-ON CONFLICT(id)
+ON CONFLICT (id)
 DO UPDATE SET
-    ollama = EXCLUDED.ollama
-;
+ollama = excluded.ollama;
 -- only ollama host can be overridden by subsequent install
 -- changing llm model or number of host requires resync
-
-
-
-
 
 RESET ROLE;
