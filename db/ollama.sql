@@ -54,13 +54,24 @@ AS $BODY$
         import json
         embedding_options_1 = {k: v for k, v in json.loads(embedding_options).items()}
 
+    import time
     embeddings = []
+    max_retries = 120 # 10 minutes
+    resp = None
     for post in posts:
         for chunk in post['body']:
-          resp = client.embeddings(model, chunk, options=embedding_options_1, keep_alive=keep_alive)
-          embedding = resp.get("embedding")
-          if embedding is not None:
-            embeddings.append((post['post_id'], embedding))
+            for attempt in range(max_retries):
+                try:
+                    resp = client.embeddings(model, chunk, options=embedding_options_1, keep_alive=keep_alive)
+                    break
+                except Exception as error:
+                    plpy.notice(f"[Attempt {attempt + 1}] Embedding failed: {error}")
+                    time.sleep(5)
+            else:
+                plpy.error(f"Could not compute embeding for post {post['post_id']}")
+            embedding = resp.get("embedding")
+            if embedding is not None:
+                embeddings.append((post['post_id'], embedding))
     return embeddings;
 $BODY$;
 
