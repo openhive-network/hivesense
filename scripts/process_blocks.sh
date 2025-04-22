@@ -1,4 +1,4 @@
-#! /bin/bash -x
+#! /bin/bash
 set -e
 set -o pipefail
 
@@ -137,7 +137,21 @@ process_blocks() {
     # record the startup time for use in health checks
     date -uIseconds > /tmp/block_processing_startup_time.txt
 
-    setsid psql "${POSTGRES_ACCESS}${worker}" -v "ON_ERROR_STOP=on" -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" -c "\timing" -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, $n_blocks );" 2>&1 | tee -i /dev/null
+    setsid bash <<EOF
+    psql "${POSTGRES_ACCESS}${worker}" \
+      -v ON_ERROR_STOP=on \
+      -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
+      -c "\\timing" \
+      -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
+      -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, ${n_blocks});" \
+    || \
+    psql "${POSTGRES_ACCESS}${worker}" \
+      -v ON_ERROR_STOP=on \
+      -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
+      -c "\\timing" \
+      -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
+      -c "SELECT ${HIVESENSE_SCHEMA}.STOPPROCESSING();"
+EOF
     echo "Worker ${worker} stopped"
 }
 
