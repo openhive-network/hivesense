@@ -6,10 +6,10 @@ SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 SCRIPTSDIR="$SCRIPTPATH/.."
 
 BUILD_IMAGE_TAG=""
-IMAGE_TAG_PREFIX=""
+NETWORK=""
 SRCROOTDIR="${SCRIPTSDIR}"
 REGISTRY="${CI_REGISTRY:-registry.gitlab.syncad.com}"
-REGISTRY="${REGISTRY}/hive/haf/"
+REGISTRY="${REGISTRY}/hive/"
 
 HAF_AI_INSTANCE_REGISTRY="registry.gitlab.syncad.com/ickiewicz/hivesens/haf/"
 
@@ -39,13 +39,13 @@ while [ $# -gt 0 ]; do
 
         case $type in
           "testnet"*)
-            IMAGE_TAG_PREFIX=testnet-
+            NETWORK=testnet
             ;;
           "mirrornet"*)
-            IMAGE_TAG_PREFIX=mirrornet-
+            NETWORK=mirrornet
             ;;
           "mainnet"*)
-            IMAGE_TAG_PREFIX=
+            NETWORK=""
             ;;
            *)
             echo "ERROR: '$type' is not a valid network type"
@@ -72,10 +72,11 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-AI_INSTANCE_IMAGE_PATH="${HAF_AI_INSTANCE_REGISTRY}${IMAGE_TAG_PREFIX}ai-instance:${BUILD_IMAGE_TAG}"
+AI_INSTANCE_IMAGE_PATH="${HAF_AI_INSTANCE_REGISTRY}${NETWORK}ai-instance:${BUILD_IMAGE_TAG}"
 
 docker build --progress=plain --target=ai-instance \
   --build-arg REGISTRY_IMAGE="${REGISTRY}" \
+  --build-arg NETWORK="${NETWORK:-"haf"}" \
   --build-arg HAF_TAG="${BUILD_IMAGE_TAG}" \
   --tag "${AI_INSTANCE_IMAGE_PATH}" \
   --file Dockerfile.haf_ai "${SRCROOTDIR}"

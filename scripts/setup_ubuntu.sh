@@ -24,8 +24,12 @@ install_langchain() {
 install_packages() {
   apt-get update
   /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+  apt-get install -y git
+  apt-get install -y python3.12 python3.12-venv python3.12-dev
+  apt-get install -y python3-pip
   apt-get install postgresql-17-pgvector
   apt-get install -y postgresql-plpython3-17
+  apt-get install -y curl
 }
 
 install_packages
