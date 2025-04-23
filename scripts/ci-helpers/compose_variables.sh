@@ -3,6 +3,8 @@
 # source the file to get environment set for docker compose, i.e when You want to call docker compose down
 # with exact the same environment like when starting with start-ci-test-environment
 
+NUMBER_OF_BLOCKS_TO_SYNC=1000000
+
 ROOT_SRC_PATH="$(git rev-parse --show-superproject-working-tree || git rev-parse --show-toplevel)"
 ROOT_SRC_PATH="${CI_PROJECT_DIR:-$ROOT_SRC_PATH}"
 
@@ -26,16 +28,16 @@ PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 # HAF and Hivemind
 HAF_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens/haf/ai-instance"
 HAF_VERSION="$HAF_SUBMODULE_SHA"
-ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=1000000"
+ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
-HIVEMIND_SYNC_ARGS="--test-max-block=1000000"
+HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 # Hivesense
 HIVESENSE_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens"
 HIVESENSE_VERSION="$HIVESENSE_TAG"
 HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter"
 
-HIVESENSE_SYNC_ARGS=--stop-at-block=1000000
+HIVESENSE_SYNC_ARGS="--stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 HIVESENSE_OLLAMA=http://hivesense-ollama:11434
 HIVESENSE_MODEL=yxchia/multilingual-e5-base:F16
