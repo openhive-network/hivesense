@@ -34,6 +34,12 @@ SET ROLE hivesense_owner;
         schema:
           type: integer
         description: limit for number of posts, cannot be grater than 50
+      - in: query
+        name: observer
+        required: false
+        schema:
+          type: string
+        description: account name to use its blacklists
     responses:
       '200':
         description: |
@@ -50,7 +56,8 @@ DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "pattern" TEXT,
     "tr_body" INT,
-    "posts_limit" INT
+    "posts_limit" INT,
+    "observer" TEXT = ''
 )
 RETURNS JSON
 -- openapi-generated-code-end
@@ -59,11 +66,17 @@ AS
 $$
 DECLARE
     __result JSON;
+    __observer_id INT := 0;
 BEGIN
     IF posts_limit > 50 THEN
         RAISE EXCEPTION 'Limit of posts: % is grater than allowed maximum: 50', posts_limit;
     END IF;
 
+    IF observer != '' THEN
+        __observer_id = hivemind_postgrest_utilities.find_account_id(
+                hivemind_postgrest_utilities.valid_account( observer ),
+                True);
+    END IF;
 
     SELECT jsonb_agg (
             hivemind_postgrest_utilities.create_bridge_post_object(row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order ASC
