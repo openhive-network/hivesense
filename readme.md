@@ -266,14 +266,14 @@ Once the environment is up and synced, you can reproduce, debug, and test change
 ## Installation
 
 ### API Node
-   The Hivesense is intended to run as a part of [HAF_API_NODE](https://gitlab.syncad.com/hive/haf_api_node), you must
-   add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize setup set variables:
-   . `HIVESENSE_SYNC_ARGS`
-   . `HIVESENSE_OLLAMA` - Ollama endpoint address
-   . `HIVESENSE_MODEL` - LLM used to vectorization
-   . `HIVESENSE_VECTOR_SIZE` - LLM vector size
-   . `HIVESENSE_START_BLOCK` - From which block start vectorization 
-   . `HIVESENSE_WORKERS` - How many vectorization workers use 
+The Hivesense is intended to run as a part of [HAF_API_NODE](https://gitlab.syncad.com/hive/haf_api_node), you must
+add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize setup set variables:
+- `HIVESENSE_SYNC_ARGS` - process_blocks.sh parameters
+- `HIVESENSE_OLLAMA` - Ollama endpoint address
+- `HIVESENSE_MODEL` - LLM used to vectorization
+- `HIVESENSE_VECTOR_SIZE` - LLM vector size
+- `HIVESENSE_START_BLOCK` - From which block start vectorization 
+- `HIVESENSE_WORKERS` - How many vectorization workers use 
 
 ### Dockerized setup
 
@@ -285,7 +285,7 @@ Once the environment is up and synced, you can reproduce, debug, and test change
    ./scripts/build_haf_ai_image.sh
    ```
 
-   The script will build an image `registry.gitlab.syncad.com/hive/haf/ai-instance:<HAF image tag>`. THe HiveSense can
+   The script will build an image `registry.gitlab.syncad.com/ickiewicz/hivesens/haf/ai-instance:<HAF image tag>`. THe HiveSense can
    be deployed only on `ai-instance` HAF.
 2. Build HiveSense docker image.
 
