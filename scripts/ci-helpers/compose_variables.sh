@@ -26,16 +26,16 @@ HIVE_API_NODE_REGISTRY="registry.gitlab.syncad.com/hive"
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
-HAF_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens/haf/ai-instance"
+HAF_IMAGE="registry.gitlab.syncad.com/hive/hivesense/haf/ai-instance"
 HAF_VERSION="$HAF_SUBMODULE_SHA"
 ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
 HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 # Hivesense
-HIVESENSE_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens"
+HIVESENSE_IMAGE="registry.gitlab.syncad.com/hive/hivesense"
 HIVESENSE_VERSION="$HIVESENSE_TAG"
-HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter"
+HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/hive/hivesense/rewiter"
 
 HIVESENSE_SYNC_ARGS="--stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 

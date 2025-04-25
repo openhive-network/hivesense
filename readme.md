@@ -285,7 +285,7 @@ add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize set
    ./scripts/build_haf_ai_image.sh
    ```
 
-   The script will build an image `registry.gitlab.syncad.com/ickiewicz/hivesens/haf/ai-instance:<HAF image tag>`. THe HiveSense can
+   The script will build an image `registry.gitlab.syncad.com/hive/hivesense/haf/ai-instance:<HAF image tag>`. THe HiveSense can
    be deployed only on `ai-instance` HAF.
 2. Build HiveSense docker image.
 
@@ -296,15 +296,15 @@ add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize set
    The script will build hivesense and its query rewriter images:
 
    ```bash
-   registry.gitlab.syncad.com/ickiewicz/hivesens:<8 digit git sha>
-   registry.gitlab.syncad.com/ickiewicz/hivesens/rewiter:<8 digit git sha>
+   registry.gitlab.syncad.com/hive/hivesense:<8 digit git sha>
+   registry.gitlab.syncad.com/hive/hivesense/rewiter:<8 digit git sha>
    ```
 
    With using switch '--push' new images will also be pushed to registry
 3. Run hivesense container
 
    ```bash
-   docker run registry.gitlab.syncad.com/ickiewicz/hivesens:<8 digit git sha> (install_app|process_blocks|uninstall_app)
+   docker run registry.gitlab.syncad.com/hive/hivesense:<8 digit git sha> (install_app|process_blocks|uninstall_app)
    ```
 
    Possible options starts scripts explained  in the pragraph below

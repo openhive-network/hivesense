@@ -11,7 +11,7 @@ SRCROOTDIR="${SCRIPTSDIR}"
 REGISTRY="${CI_REGISTRY:-registry.gitlab.syncad.com}"
 REGISTRY="${REGISTRY}/hive/"
 
-HAF_AI_INSTANCE_REGISTRY="registry.gitlab.syncad.com/ickiewicz/hivesens/haf/"
+HAF_AI_INSTANCE_REGISTRY="registry.gitlab.syncad.com/hive/hivesense/haf/"
 
 
 HAF_SUBMODULE_SHA=$(git -C submodules/haf describe --tags --exact-match HEAD 2>/dev/null || git -C submodules/haf rev-parse --short=8 HEAD)
