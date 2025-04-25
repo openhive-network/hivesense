@@ -12,7 +12,7 @@ info:
   version: 1.27.8
 externalDocs:
   description: Hivesense gitlab repository
-  url: https://gitlab.syncad.com/Ickiewicz/hivesens
+  url: https://gitlab.syncad.com/hive/hivesense
 tags:
   - name: AI
     description: AI methods to browse Hive social data
@@ -51,7 +51,7 @@ DO $__$
   },
   "externalDocs": {
     "description": "Hivesense gitlab repository",
-    "url": "https://gitlab.syncad.com/Ickiewicz/hivesens"
+    "url": "https://gitlab.syncad.com/hive/hivesense"
   },
   "tags": [
     {
