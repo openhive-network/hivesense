@@ -40,6 +40,13 @@ SET ROLE hivesense_owner;
         schema:
           type: integer
         description: limit for number of posts, cannot be grater than 50
+      - in: query
+        name: observer
+        required: false
+        schema:
+          type: string
+          default: ''
+        description: account name to use its blacklists
     responses:
       '200':
           description: |
@@ -57,9 +64,10 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_by_post(
     "author" TEXT,
     "permlink" TEXT,
     "tr_body" INT,
-    "posts_limit" INT
+    "posts_limit" INT,
+    "observer" TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS
@@ -67,9 +75,16 @@ $$
 DECLARE
     __result JSON;
     __post_id INT;
+    __observer_id INT := 0;
 BEGIN
     IF posts_limit > 50 THEN
         RAISE EXCEPTION 'Limit of posts: % is grater than allowed maximum: 50', posts_limit;
+    END IF;
+
+    IF observer != '' THEN
+        __observer_id = hivemind_postgrest_utilities.find_account_id(
+                hivemind_postgrest_utilities.valid_account( observer ),
+                True);
     END IF;
 
     __post_id = hivemind_app.find_comment_id( author, permlink, True );
@@ -117,8 +132,8 @@ BEGIN
                           hp.source AS blacklists,
                           hp.muted_reasons,
                           search.similarity_order
-                      FROM find_nearest_posts_to_post(author, permlink, posts_limit, 0) as search,
-                        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, NULL) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
+                      FROM find_nearest_posts_to_post(author, permlink, posts_limit, 0, _observer_id => __observer_id) as search,
+                        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
                   ) row
     INTO __result;
 

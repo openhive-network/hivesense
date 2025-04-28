@@ -39,6 +39,7 @@ SET ROLE hivesense_owner;
         required: false
         schema:
           type: string
+          default: ''
         description: account name to use its blacklists
     responses:
       '200':
@@ -59,7 +60,7 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "posts_limit" INT,
     "observer" TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS
@@ -121,8 +122,8 @@ BEGIN
            hp.source AS blacklists,
            hp.muted_reasons,
            search.similarity_order
-        FROM find_nearest_posts(pattern, posts_limit, 0) as search,
-        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, NULL) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
+        FROM find_nearest_posts(pattern, posts_limit, 0, _observer_id => __observer_id) as search,
+        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp
     ) row
     INTO __result;
 

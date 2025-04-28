@@ -104,6 +104,15 @@ DO $__$
               "type": "integer"
             },
             "description": "limit for number of posts, cannot be grater than 50"
+          },
+          {
+            "in": "query",
+            "name": "observer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "account name to use its blacklists"
           }
         ],
         "responses": {
@@ -166,6 +175,15 @@ DO $__$
               "type": "integer"
             },
             "description": "limit for number of posts, cannot be grater than 50"
+          },
+          {
+            "in": "query",
+            "name": "observer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "account name to use its blacklists"
           }
         ],
         "responses": {
