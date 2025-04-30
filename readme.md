@@ -175,7 +175,9 @@ launches an endpoint on port 11434, which will distribute traffic among several 
 
 #### Index
 
-For searching among vectorized posts HNSW index is used.
+For searching among vectorized posts, an HNSW index is used. This index requires a large amount of shared memory 
+to be available to the PostgreSQL server. Therefore, the HAF container must be configured
+with at least 8 GB of shared memory, which can be set using the --shm-size option when running the container
 
 ### Vectorization
 
