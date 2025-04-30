@@ -21,6 +21,7 @@ AS $BODY$
 DECLARE
     __total_limit INT = 3000; -- because there are max 3 chunks per post we are sure to  check min. 1000 posts
 BEGIN
+    RETURN QUERY SELECT NULL;
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
     PERFORM set_config('ivfflat.probes', '4', true);
     PERFORM set_config('hnsw.ef_search', '1000', true);
@@ -75,7 +76,6 @@ LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $BODY$
 BEGIN
-    RETURN QUERY SELECT NULL;
     RETURN QUERY SELECT similarity_order, post_id FROM find_nearest_posts_with_embedding(
              hivesense_embed(_query)
          , _limit
