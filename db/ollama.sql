@@ -27,6 +27,8 @@ LANGUAGE plpython3u
 IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $BODY$
+    embeddings = []
+    return embeddings;
     if "ai.version" not in GD:
         r = plpy.execute("select coalesce(pg_catalog.current_setting('ai.python_lib_dir', true), '/usr/local/lib/pgai') as python_lib_dir")
         python_lib_dir = r[0]["python_lib_dir"]
