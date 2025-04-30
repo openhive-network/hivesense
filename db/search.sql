@@ -75,7 +75,7 @@ LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $BODY$
 BEGIN
-
+    RETURN QUERY SELECT NULL;
     RETURN QUERY SELECT similarity_order, post_id FROM find_nearest_posts_with_embedding(
              hivesense_embed(_query)
          , _limit
