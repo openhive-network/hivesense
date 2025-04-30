@@ -56,6 +56,7 @@ AS $BODY$
 
     import time
     embeddings = []
+    return embeddings;
     max_retries = 120 # 10 minutes
     resp = None
     for post in posts:
