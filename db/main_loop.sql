@@ -14,7 +14,7 @@ DO $BODY$
         AS
 		$BODY2$
         BEGIN
-            RETURN ai.ollama_embed('%s', _post, host => '%s');
+            RETURN hivesense_app.ollama_embed('%s', _post, host => '%s');
         END;
 		$BODY2$
 		$$, __llm, __ollama);
