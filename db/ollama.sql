@@ -1,5 +1,8 @@
 -- improves ai.ollama_embedd for reuse already initialized connection
 -- it ist 2x faster now than ai.ollama_embed
+-- It fits our needs, the ollama connection object is saved in python globals and will be destroyed together with postgres session
+-- In our architecture the postgres session is associated with a connection between postgrest server and postgresql server.
+-- These connections (postgrest<->postgresql) are held in a pool by the postgrest
 CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model text,
     input_text text,
