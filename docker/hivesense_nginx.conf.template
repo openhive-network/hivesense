@@ -1,7 +1,7 @@
 #
 # Homepage and endpoints of the API "Hivesense".
 #
-worker_processes  5;
+worker_processes  auto;
 error_log /dev/stdout info;
 worker_rlimit_nofile 8192;
 
