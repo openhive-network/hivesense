@@ -172,6 +172,10 @@ sync:
       netstat -tuln
       tests/integration/api_node/hivesense_synced_api_node_test.sh
       echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+      
+      echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KBenchmark hivesense sync..."
+      tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
+      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
   after_script:
     - |
       echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
@@ -189,18 +193,20 @@ sync:
       docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log
       cd "$OLDPWD" || exit 1
       
-      tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
+      # Create docker directory if it doesn't exist
+      mkdir -p docker
       
-      mkdir -p "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
-      sudo cp -a "${POOL_DIR}" "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
+      # Check if jmeter results exist and add them to the archive
+      if [ -d "jmeter_results" ]; then
+        echo "Adding JMeter benchmark results to container logs archive..."
+        # Add jmeter results to the tar file
+        tar -cf - $(pwd)/docker/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
+      else
+        # Just include the logs if no jmeter results
+        tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
+      fi
       
-      ls -lah "${POOL_DIR}"
-      ls -lah "${POOL_DIR}/blockchain"
-      ls -lah "${POOL_DIR}/shm_dir"
-      
-      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}"
-      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}/blockchain"
-      ls -lah "${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}_${CI_PIPELINE_ID}/shm_dir"
+
       
       # Manually remove the copy of the replay data to preserve disk space on the replay server
       sudo rm -rf ${POOL_DIR}
