@@ -10,9 +10,9 @@ DROP FUNCTION IF EXISTS find_nearest_posts_with_embedding;
 CREATE FUNCTION find_nearest_posts_with_embedding(
     _embedding public.vector,
     _limit integer DEFAULT 1,
-    _from_order int = 0,
     _exclude_post_id int = NULL,
-    _observer_id int = 0
+    _observer_id int = 0,
+    _start_post_id int = 0
 )
 RETURNS SETOF similar_post_result
 LANGUAGE plpgsql
@@ -53,10 +53,14 @@ BEGIN
              , ROW_NUMBER() OVER (ORDER BY nmp.similarity)::INTEGER as similarity_order
              , nmp.similarity
         FROM not_muted_posts nmp
+    ), upper_bound_limit AS (
+        SELECT similarity_order as from_order
+        FROM ordered_posts op
+        WHERE op.post_id = _start_post_id
     )
     SELECT op.similarity_order, op.post_id as post_id
     FROM ordered_posts op
-    WHERE op.similarity_order > _from_order
+    WHERE op.similarity_order > COALESCE( (SELECT from_order FROM upper_bound_limit), 0 )
     ORDER BY op.similarity_order ASC
     LIMIT _limit;
 END;
@@ -67,8 +71,8 @@ DROP FUNCTION IF EXISTS find_nearest_posts;
 CREATE FUNCTION find_nearest_posts(
     _query text,
     _limit integer DEFAULT 1,
-    _from_order int = 0,
-    _observer_id int = 0
+    _observer_id int = 0,
+    _start_post_id int = 0
 )
 RETURNS SETOF similar_post_result
 LANGUAGE plpgsql
@@ -79,8 +83,8 @@ BEGIN
     RETURN QUERY SELECT similarity_order, post_id FROM find_nearest_posts_with_embedding(
              hivesense_embed(_query)
          , _limit
-         , _from_order
          , _observer_id => _observer_id
+         ,  _start_post_id => _start_post_id
      );
 END;
 $BODY$;
@@ -91,7 +95,6 @@ CREATE FUNCTION find_nearest_posts_to_post(
     _author text,
     _permlink text,
     _limit integer DEFAULT 1,
-    _from_order int = 0,
     _observer_id int = 0
 )
 RETURNS SETOF similar_post_result
@@ -117,9 +120,9 @@ BEGIN
     RETURN QUERY SELECT similarity_order, post_id FROM find_nearest_posts_with_embedding(
          __post_embedding
         , _limit
-        , _from_order
         , __post_id
         , _observer_id => _observer_id
+        , _start_post_id => 0
     );
 END;
 $BODY$;

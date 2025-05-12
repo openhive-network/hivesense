@@ -7,13 +7,16 @@ SET ROLE hivesense_owner;
       - AI
     summary: List of posts semantic similar to a given pattern
     description: |
-      Make a semantic search for a posts similar to a pattern text given as a parameter. Returns max first 50 most similar posts.
+      Semantic search endpoint designed to find posts based on their semantic
+      similarity to a provided text pattern. It allows users to search for
+      content that is contextually and meaningfully similar to their search
+      query, going beyond simple keyword matching.
 
-      SQL example
-      * `SELECT * FROM hivesense_endpoints.get_similar_posts(''astronauts on moon'', 0);`
+      The API returns results in JSON format, containing comprehensive post information
+      including author details, title, body content, category, voting data, and various metadata.
+      Results are automatically ranked by their semantic relevance to the search pattern,
+      ensuring the most relevant content appears first.
 
-      REST call example
-      * `GET ''https://%1$s/hivesense-api/similarposts/''`
     operationId: hivesense_endpoints.get_similar_posts
     parameters:
       - in: query
@@ -21,26 +24,45 @@ SET ROLE hivesense_owner;
         required: true
         schema:
           type: string
-        description: pattern to search in posts
+        description: Text pattern used for semantic search. The query text (e.g., "astronauts on moon", "climate change") to find semantically similar posts.
       - in: query
         name: tr_body
         required: true
         schema:
           type: integer
-        description: 0 means no truncate, other return post shrinked to given value
+        description: Truncation length for post bodies. Use 0 for full content, or specify character limit.
       - in: query
         name: posts_limit
         required: true
         schema:
           type: integer
-        description: limit for number of posts, cannot be grater than 50
+        description: Specifies how many posts to return in the results.
       - in: query
         name: observer
         required: false
         schema:
           type: string
           default: ''
-        description: account name to use its blacklists
+        description: Observer (hive account name) whose settings (such as muted lists) are used to filter out excluded posts from the search results
+      - in: query
+        name: start_author
+        required: false
+        schema:
+          type: string
+          default: ''
+        description: |
+          Together with start_permlink, identifies the last post from the previous page. These two parameters combined
+          define the starting point for pagination when fetching the next set of results.
+      - in: query
+        name: start_permlink
+        required: false
+        schema:
+          type: string
+          default: ''
+        description: |
+          Together with start_author, identifies the last post from the previous page. The permlink is
+          the unique identifier (slug) of the post. These two parameters combined define the starting point
+          for pagination when fetching the next set of results.
     responses:
       '200':
         description: |
@@ -58,7 +80,9 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
     "pattern" TEXT,
     "tr_body" INT,
     "posts_limit" INT,
-    "observer" TEXT = ''
+    "observer" TEXT = '',
+    "start_author" TEXT = '',
+    "start_permlink" TEXT = ''
 )
 RETURNS JSON 
 -- openapi-generated-code-end
@@ -68,15 +92,17 @@ $$
 DECLARE
     __result JSON;
     __observer_id INT := 0;
+    __start_post_id INT := 0;
 BEGIN
-    IF posts_limit > 50 THEN
-        RAISE EXCEPTION 'Limit of posts: % is grater than allowed maximum: 50', posts_limit;
-    END IF;
-
     IF observer != '' THEN
         __observer_id = hivemind_postgrest_utilities.find_account_id(
                 hivemind_postgrest_utilities.valid_account( observer ),
                 True);
+    END IF;
+
+    IF start_author != '' OR start_permlink != '' THEN
+        __start_post_id = hivemind_postgrest_utilities.find_comment_id(
+            start_author, start_permlink, True);
     END IF;
 
     SELECT jsonb_agg (
@@ -122,7 +148,12 @@ BEGIN
            hp.source AS blacklists,
            hp.muted_reasons,
            search.similarity_order
-        FROM find_nearest_posts(pattern, posts_limit, 0, _observer_id => __observer_id) as search,
+        FROM find_nearest_posts(
+                   pattern
+                 , posts_limit
+                 , _observer_id => __observer_id
+                 , _start_post_id => __start_post_id
+             ) as search,
         LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp
     ) row
     INTO __result;

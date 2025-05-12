@@ -21,7 +21,7 @@ cat <<-EOF
   OPTIONS:
     --workers=NUMBER       Number of threads for each query. Default: 20
     --loops=NUMBER         Number of loops for each query. Default: 250
-    --test=TYPE            Test type to run. Options: all, pattern10, pattern20, pattern50,
+    --test=TYPE            Test type to run. Options: all, pattern10, pattern10_with_start_parameters, pattern20, pattern50,
                            pattern100, pattern200, pattern500, pattern1000, post1, post2, patternlength_10_observer,
                            getpostbypost2_observer
                            Default: all
@@ -88,6 +88,9 @@ if [ "$TEST_TYPE" != "all" ]; then
     case "$TEST_TYPE" in
         pattern10)
             sed -i 's/testname="PatternLength_10" enabled="false"/testname="PatternLength_10" enabled="true"/g' "$TEMP_JMX_FILE"
+            ;;
+        pattern10_with_start_parameters)
+            sed -i 's/testname="PatternLength_10_With_Start_Parameters" enabled="false"/testname="PatternLength_10_With_Start_Parameters" enabled="true"/g' "$TEMP_JMX_FILE"
             ;;
         pattern20)
             sed -i 's/testname="PatternLength_20" enabled="false"/testname="PatternLength_20" enabled="true"/g' "$TEMP_JMX_FILE"
