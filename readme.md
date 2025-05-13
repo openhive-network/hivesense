@@ -346,37 +346,71 @@ It must be installed alongside HAF and an already synced Hivemind.
    ```bash
    ./scripts/uninstall_app.sh
    ```
+## Hivesense API Reference
 
-## REST API
+The Hivesense API provides AI-powered semantic search capabilities for the Hive social network. Base URL: `/hivesense-api`
 
-**GET** `/similarposts`
+### API Documentation
 
-### Description
+#### Interactive Documentation
+Interactive API documentation is available at `/hivesense-swagger`, where you can:
+- Explore all endpoints in detail
+- Test API calls directly in the browser
+- View complete request/response schemas
+- Try out different parameter combinations
 
-Retrieves a list of posts that are semantically similar to the given pattern using a semantic search mechanism.
-It returns maximum 50 posts, which can be truncated to `truncate_body` size (0 means not to truncate)
+#### OpenAPI Definition
+The OpenAPI/Swagger definition is available in JSON format at:
+- `/hivesense-api/` - Raw OpenAPI specification
+This can be imported into API tools and used for generating client libraries.
 
-### Parameters
+### Endpoints
 
-| Parameter       | Type   | Required | Description                                           |
-| --------------- | ------ | -------- | ----------------------------------------------------- |
-| `pattern`       | string | Yes      | The pattern text used for semantic search in posts.   |
-| `truncate_body` | int    | Yes      | Truncate pos to given length. 0 means not to truncate |
+#### Semantic Search Endpoints
 
-### Example Request
+##### GET `/similarposts`
+Finds posts semantically similar to a text pattern.
 
-```http
-GET /similarposts?pattern=thailand%20beaches&tr_body=10
-```
+**Parameters:**
+- `pattern` (required): Text query to find similar posts (e.g. "astronauts on moon")
+- `tr_body` (required): Post body truncation length (0 for full content)
+- `posts_limit` (required): Number of posts to return
+- `observer` (optional): Hive account name for filtering results
+- `start_author`, `start_permlink` (optional): Pagination parameters
 
-### Example SQL Query
+**Example:**
+```bash
+curl -X 'GET' \
+  'https://localhost/hivesense-api/similarposts?pattern=astronauts%20on%20moon&tr_body=200&posts_limit=5' \
+  -H 'accept: application/json'
+````
 
-```sql
-SELECT * FROM hivesense_endpoints.get_similar_posts('thailand beaches', 10);
-```
+##### GET `/similarpostsbypost`
+Gets semantically similar posts to a given Hive post. Performs semantic similarity search to find posts that are contextually similar to a specified Hive post. The endpoint analyzes the content and context of the target post and returns up to 50 related posts, ranked by their similarity score.
 
-### REST Call Example
+Key features:
+- Semantic analysis considers post content and context
+- Results are ordered by similarity (most similar first)
+- Optional content filtering through observer blacklists
+- Configurable body length truncation for preview purposes
+- Maximum of 50 posts returned to ensure performance
 
-```http
-GET 'https://localhost/hivesense-api/similarposts?pattern=thailand%20beaches&tr_body=10'
+The similarity analysis takes into account:
+- Post content and context
+- Semantic relationships between posts
+- Topic relevance and contextual meaning
+
+**Parameters:**
+- `author` (required): The Hive username of the post author. This is the account name that created the original post for which you want to find similar content. Must be a valid Hive account name.
+- `permlink` (required): The unique permlink identifier of the post. This is the URL-friendly version of the post title that appears in the post URL on Hive. Together with the author name, it uniquely identifies the post.
+- `tr_body` (required): Controls the length of returned post bodies in the results. When set to 0, returns complete post content. Any other positive value will truncate the post body to that many characters. Useful for generating previews or reducing response size. Maximum value is 65535 characters.
+- `posts_limit` (required): Specifies the maximum number of similar posts to return. Must be between 1 and 50. The posts are returned in order of similarity, with the most similar posts first. Setting a lower limit can improve response times and reduce data transfer.
+- `observer` (optional): Optional Hive account name with blacklists that will be used to filter the results. When provided, any posts from authors in the observer blacklist will be excluded from the results. Leave empty to disable blacklist filtering. Useful for content moderation and personalization.
+
+**Example:**
+
+```bash
+curl -X 'GET' \
+  'https://localhost/hivesense-api/similarpostsbypost?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=10' \
+  -H 'accept: application/json'
 ```
