@@ -5,15 +5,30 @@ SET ROLE hivesense_owner;
   get:
     tags:
       - AI
-    summary: List of posts semantic similar to a given post described by author and permlink
+    summary: Get semantically similar posts to a given Hive post
     description: |
-      Make a semantic search for a posts similar to a given post as a parameter. Returns max. first 50 most similar posts.
+      Performs semantic similarity search to find posts that are contextually
+      similar to a specified Hive post. The endpoint analyzes the content and
+      context of the target post and returns up to 50 related posts, ranked by
+      their similarity score.
 
-      SQL example
-      * `SELECT * FROM hivesense_endpoints.get_similar_posts_by_post(''bue-witness'',''bue-witness-post'', 20, 10);`
+      Key features:
+      - Semantic analysis considers post content and context
+      - Results are ordered by similarity (most similar first)
+      - Optional content filtering through observer blacklists
+      - Configurable body length truncation for preview purposes
+      - Maximum of 50 posts returned to ensure performance
+    
+      The similarity analysis takes into account:
+      - Post content and context
+      - Semantic relationships between posts
+      - Topic relevance and contextual meaning
 
-      REST call example
-      * `GET ''https://%1$s/hivesense-api/similarpoststsbypost/''`
+      SQL example:
+      SELECT * FROM hivesense_endpoints.get_similar_posts_by_post(''bue-witness'', ''bue-witness-post'', 20, 10);
+
+      REST call example:
+      GET ''https://%1$s/hivesense-api/similarpostsbypost?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=10''
     operationId: hivesense_endpoints.get_similar_posts_by_post
     parameters:
       - in: query
@@ -21,42 +36,68 @@ SET ROLE hivesense_owner;
         required: true
         schema:
           type: string
-        description: post author name
+        description: |
+          The Hive username of the post author. This is the account name that
+          created the original post for which you want to find similar content.
+          Must be a valid Hive account name.
+        example: "bue-witness"
       - in: query
         name: permlink
         required: true
         schema:
           type: string
-        description: permlink of a post
+        description: |
+          The unique permlink identifier of the post. This is the URL-friendly
+          version of the post title that appears in the post URL on Hive.
+          Together with the author name, it uniquely identifies the post.
+        example: "my-blog-post"
       - in: query
         name: tr_body
         required: true
         schema:
           type: integer
-        description: 0 means no truncate, other return post shrinked to given value
+          minimum: 0
+          maximum: 65535
+        description: |
+          Controls the length of returned post bodies in the results. When set to 0,
+          returns complete post content. Any other positive value will truncate the
+          post body to that many characters. Useful for generating previews or
+          reducing response size. Maximum value is 65535 characters.
+        example: 20
       - in: query
         name: posts_limit
         required: true
         schema:
           type: integer
-        description: limit for number of posts, cannot be grater than 50
+          minimum: 1
+          maximum: 50
+        description: |
+          Specifies the maximum number of similar posts to return. Must be between
+          1 and 50. The posts are returned in order of similarity, with the most
+          similar posts first. Setting a lower limit can improve response times
+          and reduce data transfer.
+        example: 10
       - in: query
         name: observer
         required: false
         schema:
           type: string
           default: ''
-        description: account name to use its blacklists
+        description: |
+          Optional Hive account name with blacklists that will be used to filter the
+          results. When provided, any posts from authors in the observer
+          blacklist will be excluded from the results. Leave empty to disable
+          blacklist filtering. Useful for content moderation and personalization.
+        example: "hive.blog"
     responses:
       '200':
-          description: |
-            * Returns  JSON
-          content:
-            application/json:
-              schema:
-                type: string
-                x-sql-datatype: JSON
-              example: { }
+        description: Successful response with JSON that contains a list of similar posts
+        content:
+          application/json:
+            schema:
+              type: string
+              x-sql-datatype: JSON
+            example: {}
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_by_post;

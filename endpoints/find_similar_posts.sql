@@ -66,13 +66,13 @@ SET ROLE hivesense_owner;
     responses:
       '200':
         description: |
-          * Returns  JSON
+          * Returns  JSON with a sorted list of posts
         content:
           application/json:
             schema:
               type: string
               x-sql-datatype: JSON
-            example: { }
+            example: {}
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
