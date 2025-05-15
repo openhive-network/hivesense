@@ -145,6 +145,7 @@ sync:
     HAF_COMMIT: "$HAF_COMMIT"
     POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
     PUBLIC_HOSTNAME: "localhost"
+    GIT_SUBMODULE_STRATEGY: normal
   timeout: 1 hours
   before_script:
     - |
@@ -156,6 +157,7 @@ sync:
       git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
       git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
       git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
+      git submodule foreach --recursive 'git fetch --tags'
       echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
   script:
     - docker compose version
