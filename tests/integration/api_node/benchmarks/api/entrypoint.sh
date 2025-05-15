@@ -23,7 +23,7 @@ cat <<-EOF
     --loops=NUMBER         Number of loops for each query. Default: 250
     --test=TYPE            Test type to run. Options: all, pattern10, pattern10_with_start_parameters, pattern20, pattern50,
                            pattern100, pattern200, pattern500, pattern1000, post1, post2, patternlength_10_observer,
-                           getpostbypost2_observer
+                           getpostbypost2_observer, thematic, thematic_observer
                            Default: all
     --help,-h,-?           Display this help screen and exit
 EOF
@@ -122,6 +122,12 @@ if [ "$TEST_TYPE" != "all" ]; then
         getpostbypost2_observer)
             sed -i 's/testname="GetPostByPost2_Observer" enabled="false"/testname="GetPostByPost2_Observer" enabled="true"/g' "$TEMP_JMX_FILE"
             ;;
+        thematic)
+            sed -i 's/testname="ThematicContributors" enabled="false"/testname="ThematicContributors" enabled="true"/g' "$TEMP_JMX_FILE"
+            ;;
+        thematic_observer)
+            sed -i 's/testname="ThematicContributors_Observer" enabled="false"/testname="ThematicContributors_Observer" enabled="true"/g' "$TEMP_JMX_FILE"
+            ;;
         *)
             echo "ERROR: Unknown test type '$TEST_TYPE'"
             exit 1
@@ -179,7 +185,7 @@ echo "====================================================="
 echo "Benchmark completed with: WORKERS=$WORKERS, LOOPS=$LOOPS, TEST=$TEST_TYPE"
 TOTAL_TESTS=1
 if [ "$TEST_TYPE" = "all" ]; then
-    TOTAL_TESTS=9
+    TOTAL_TESTS=11
 fi
 echo "Total requests: $((WORKERS * LOOPS * TOTAL_TESTS))"
 echo "Open jmeter_results/html-report/index.html to view results"

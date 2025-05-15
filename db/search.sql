@@ -127,4 +127,70 @@ BEGIN
 END;
 $BODY$;
 
+DROP TYPE IF EXISTS contributors_result CASCADE;
+CREATE TYPE contributors_result AS (
+   rank INT,
+   author_id INT
+);
+
+CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(
+    _embedding vector, -- embedding for a thematic
+    _limit integer DEFAULT 1,
+    _observer_id integer DEFAULT 0)
+    RETURNS SETOF hivesense_app.contributors_result
+    LANGUAGE 'plpgsql'
+    COST 100
+    STABLE PARALLEL SAFE
+    ROWS 1000
+
+AS $BODY$
+DECLARE
+    __total_limit INT = 300000; -- because there are max 3 chunks per post we are sure to  check min. 100000 posts
+BEGIN
+    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
+    PERFORM set_config('hnsw.ef_search', '1000', true);
+
+    RETURN QUERY WITH similar_posts AS MATERIALIZED ( -- materialized to fore use index for searching among vectors
+        SELECT
+            hpv.post_id as post_id
+             , embedding <=> _embedding AS similarity
+        FROM posts_vectors hpv
+        ORDER BY similarity ASC
+        LIMIT __total_limit
+    ), unique_posts AS (SELECT DISTINCT ON (post_id) po.post_id as post_id, po.similarity as similarity
+                        FROM similar_posts po
+                        ORDER BY po.post_id, po.similarity
+    ), not_muted_posts AS (
+        SELECT up.post_id, up.similarity, hp.author_id
+        FROM unique_posts up
+                 JOIN hivemind_app.hive_posts hp ON hp.id = up.post_id
+            AND (
+                                                        _observer_id = 0
+                                                            OR NOT EXISTS (
+                                                            SELECT 1
+                                                            FROM hivemind_app.muted_accounts_by_id_view
+                                                            WHERE observer_id = _observer_id AND muted_id = hp.author_id
+                                                        )
+                                                        )
+    ), ordered_posts AS (
+        SELECT nmp.post_id
+             , nmp.author_id
+             , ROW_NUMBER() OVER (ORDER BY nmp.similarity)::INTEGER as similarity_order
+             , nmp.similarity
+        FROM not_muted_posts nmp
+    ), authors_rank AS (
+        SELECT
+            author_id
+             , RANK() OVER (ORDER BY SUM(1.0 / sqrt(similarity_order)) DESC) AS author_rank
+        FROM ordered_posts
+        GROUP BY author_id
+    )
+    SELECT
+     author_rank::INT, author_id
+    FROM authors_rank
+    ORDER BY author_rank
+    LIMIT _limit;
+END;
+$BODY$;
+
 RESET ROLE

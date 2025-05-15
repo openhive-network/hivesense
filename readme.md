@@ -414,3 +414,30 @@ curl -X 'GET' \
   'https://localhost/hivesense-api/similarpostsbypost?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=10' \
   -H 'accept: application/json'
 ```
+
+##### GET `/thematiccontributors`
+Identifies and ranks Hive authors who contribute significantly to specific topics or themes using semantic analysis. This endpoint leverages AI-powered embeddings to discover subject matter experts and thought leaders across different domains on the Hive blockchain.
+Key features:
+- Discovers content creators specializing in specific topics
+- Ranks authors based on semantic relevance and contribution volume
+- Optional content filtering through observer blacklists
+- Helps identify domain experts and thought leaders
+
+The contributor analysis considers:
+- Content relevance using semantic understanding
+- Author's contribution frequency in the topic area
+- Depth and quality of thematic content
+- Recent activity in the subject matter
+
+**Parameters:**
+- `thematic` (required): Text describing the thematic area to analyze. This can be a topic, concept, field of interest, or any subject matter (e.g., "blockchain technology", "sustainable farming"). Must be descriptive enough to capture the semantic context.
+- `authors_limit` (required): Maximum number of contributors to return.  
+- `observer` (optional): Hive account name with blacklists to filter results. When provided, authors in the observer's blacklist will be excluded. Leave empty to disable filtering.
+
+**Example:**
+``` bash
+curl -X 'GET' \
+  'https://localhost/hivesense-api/thematiccontributors?thematic=cryptocurrency%20mining&authors_limit=10' \
+  -H 'accept: application/json'
+```
+

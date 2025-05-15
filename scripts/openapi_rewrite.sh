@@ -17,7 +17,8 @@ OUTPUT="$SCRIPTDIR/output"
 ENDPOINTS_IN_ORDER="
 ../$endpoints/endpoint_schema.sql
 ../$endpoints/find_similar_posts.sql
-../$endpoints/get_similar_posts_by_post.sql"
+../$endpoints/get_similar_posts_by_post.sql
+../$endpoints/find_thematic_contributors.sql"
 
 # Function to reverse the lines
 reverse_lines() {
