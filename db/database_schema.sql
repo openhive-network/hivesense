@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS hivesense_app_status
   parallel_workers INT,
   llm TEXT,
   ollama TEXT,
-  start_block INT
+  start_block INT,
+  embedding_batch_size INT
 );
 
 CREATE TABLE IF NOT EXISTS version(
@@ -67,7 +68,7 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 $BODY$;
 
 INSERT INTO hivesense_app_status
-(id, continue_processing, parallel_workers, llm, ollama, start_block)
+(id, continue_processing, parallel_workers, llm, ollama, start_block, embedding_batch_size)
 VALUES
 (
     1,
@@ -75,12 +76,14 @@ VALUES
     current_setting('PG_TEMP.PARALLEL_WORKERS', TRUE)::INT,
     current_setting('PG_TEMP.LLM', TRUE)::TEXT,
     current_setting('PG_TEMP.OLLAMA_HOST', TRUE)::TEXT,
-    current_setting('PG_TEMP.START_BLOCK', TRUE)::INT
+    current_setting('PG_TEMP.START_BLOCK', TRUE)::INT,
+    current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT
 )
 ON CONFLICT (id)
 DO UPDATE SET
-ollama = excluded.ollama;
--- only ollama host can be overridden by subsequent install
+ollama = excluded.ollama,
+embedding_batch_size = excluded.embedding_batch_size;
+-- only ollama host and batch size can be overridden by subsequent install
 -- changing llm model or number of host requires resync
 
 RESET ROLE;
