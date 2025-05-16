@@ -17,6 +17,10 @@ HIVEMIND_NODE_SUBMODULE_SHA=$(
     git -C "${ROOT_SRC_PATH}/submodules/hivemind" describe --tags --exact-match HEAD 2>/dev/null ||
     git -C "${ROOT_SRC_PATH}/submodules/hivemind" rev-parse --short=8 HEAD
 )
+REPUTATION_TRACKER_HIVEMIND_VERSION=$(
+    git -C "${ROOT_SRC_PATH}/submodules/hivemind/reputation_tracker" describe --tags --exact-match HEAD 2>/dev/null ||
+    git -C "${ROOT_SRC_PATH}/submodules/hivemind/reputation_tracker" rev-parse --short=8 HEAD
+)
 
 GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
 HIVESENSE_TAG=${TAG:-$(echo "$GIT_COMMIT_SHA" | cut -c1-8)}
@@ -30,6 +34,7 @@ HAF_IMAGE="registry.gitlab.syncad.com/hive/hivesense/haf/ai-instance"
 HAF_VERSION="$HAF_SUBMODULE_SHA"
 ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
+export REPUTATION_TRACKER_VERSION="${REPUTATION_TRACKER_HIVEMIND_VERSION}"
 HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 # Hivesense
