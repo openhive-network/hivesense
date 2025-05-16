@@ -222,7 +222,7 @@ The CI pipeline includes several key steps to ensure quality, build consistency,
 
 #### Docker Image Builds
 - Builds Docker images based on the current submodule versions for:
-   - `haf ai-instance` (with AI-related tools see  [`/scripts/setup_ubuntu.sh`](./scripts/setup_ubuntu.sh) used by [`Dockerfile.haf_ai`](./Dockerfile.haf_ai) ) 
+   - `haf` 
    - `hivemind`
    - `haf_api_node`
    - `hivesense`
@@ -244,7 +244,6 @@ To reproduce CI-related issues on your local machine, you can replicate the envi
 
 1. **Build Docker Images**
    ```bash
-   ./scripts/build_haf_ai_image.sh       # Builds the HAF Docker image with AI support. Uses the HAF submodule version as the base.
    ./scripts/build_images.sh             # Builds Docker images for hivesense and the PostgREST rewriter.
    ```
 

@@ -30,8 +30,7 @@ HIVE_API_NODE_REGISTRY="registry.gitlab.syncad.com/hive"
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
-HAF_IMAGE="registry.gitlab.syncad.com/hive/hivesense/haf/ai-instance"
-HAF_VERSION="$HAF_SUBMODULE_SHA"
+HAF_VERSION="${HAF_SUBMODULE_SHA}"
 ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
 export REPUTATION_TRACKER_VERSION="${REPUTATION_TRACKER_HIVEMIND_VERSION}"
@@ -45,6 +44,7 @@ HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/hive/hivesense/rewiter"
 HIVESENSE_SYNC_ARGS="--stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 HIVESENSE_OLLAMA=http://hivesense-ollama:11434
+#HIVESENSE_OLLAMA=http://192.168.6.186:11434
 HIVESENSE_MODEL=yxchia/multilingual-e5-base:F16
 HIVESENSE_VECTOR_SIZE=768
 HIVESENSE_START_BLOCK=1
