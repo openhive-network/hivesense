@@ -110,13 +110,29 @@ build_images:
   tags:
     - public-runner-docker
 
+build_haf_ai_images:
+  extends: .docker_image_builder_job_template
+  stage: build
+  before_script:
+    - !reference [.docker_image_builder_job_template, before_script]
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  script:
+    - $CI_PROJECT_DIR/scripts/build_haf_ai_image.sh --push
+  needs:
+    - job: prepare_haf_image
+  tags:
+    - public-runner-docker
+
 sync:
   extends: .docker_image_builder_job_template
   stage: sync
   image: registry.gitlab.syncad.com/hive/haf_api_node/dind:1.27.11rc2
   needs:
-    - prepare_haf_image
     - build_images
+    - build_haf_ai_images
   variables:
     DOCKER_COMPOSE_VERSION: 2.27.1
     DATA_SOURCE: ${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}
