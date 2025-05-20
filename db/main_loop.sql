@@ -97,7 +97,7 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post( hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, 3 ) as bodies
+        SELECT hp.id as post_id, preprocess_post( hpd.title || '.\n\n' || hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, 3 ) as bodies
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id
