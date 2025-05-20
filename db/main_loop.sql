@@ -53,13 +53,23 @@ DECLARE
     __end_ts   timestamptz;
     __number_of_posts INT;
     __number_of_chunks INT;
+
     __number_of_workers INT;
+    __tokenizer_name TEXT;
+    __max_tokens INT;
+    __min_new_ratio REAL;
+    __lang_model TEXT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
     -- will RAISE when hivemind context does not exist
     SELECT last_completed_block_num FROM hivemind_app.hive_state INTO __hivemind_current_block;
     SELECT parallel_workers FROM hivesense_app_status INTO __number_of_workers;
+
+    SELECT tokenizer_model FROM hivesense_app_status INTO __tokenizer_name;
+    SELECT tokens_per_chunk FROM hivesense_app_status INTO __max_tokens;
+    SELECT 1 - overlap_amount FROM hivesense_app_status INTO __min_new_ratio;
+    SELECT sentence_language_model FROM hivesense_app_status INTO __lang_model;
 
     ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
     ASSERT __number_of_workers > 0 , 'number of workers less than 1';
@@ -87,7 +97,7 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post( hpd.body ) as bodies
+        SELECT hp.id as post_id, preprocess_post( hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, 3 ) as bodies
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id

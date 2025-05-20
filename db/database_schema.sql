@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS hivesense_app_status
   llm TEXT,
   ollama TEXT,
   start_block INT,
-  embedding_batch_size INT
+  embedding_batch_size INT, -- send this many texts to ollama in a single API call, it will generate this many embedding vectors and sent them back
+  tokenizer_model TEXT, -- model used for counting tokens, must be compatible with `llm`'s tokenizer
+  tokens_per_chunk INT, -- for chunking posts, number of tokens per chunk (should not `llm`'s the model's max tokens)
+  overlap_amount REAL, -- for chunking posts, try to include this amount of overlap with the prevoius chunk to add context (0.15 = 15%)
+  sentence_language_model TEXT -- model for detecting sentence boundaries
 );
 
 CREATE TABLE IF NOT EXISTS version(
@@ -68,7 +72,7 @@ EXECUTE format( 'GRANT ALL ON SCHEMA %s TO hived_group' , __schema_name );
 $BODY$;
 
 INSERT INTO hivesense_app_status
-(id, continue_processing, parallel_workers, llm, ollama, start_block, embedding_batch_size)
+(id, continue_processing, parallel_workers, llm, ollama, start_block, embedding_batch_size, tokenizer_model, tokens_per_chunk, overlap_amount, sentence_language_model)
 VALUES
 (
     1,
@@ -77,7 +81,11 @@ VALUES
     current_setting('PG_TEMP.LLM', TRUE)::TEXT,
     current_setting('PG_TEMP.OLLAMA_HOST', TRUE)::TEXT,
     current_setting('PG_TEMP.START_BLOCK', TRUE)::INT,
-    current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT
+    current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT,
+    current_setting('PG_TEMP.TOKENIZER_MODEL', TRUE)::TEXT,
+    current_setting('PG_TEMP.TOKENS_PER_CHUNK', TRUE)::INT,
+    current_setting('PG_TEMP.OVERLAP_AMOUNT', TRUE)::REAL,
+    current_setting('PG_TEMP.SENTENCE_LANGUAGE_MODEL', TRUE)::TEXT
 )
 ON CONFLICT (id)
 DO UPDATE SET

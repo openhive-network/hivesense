@@ -30,6 +30,10 @@ install_packages() {
   apt-get install postgresql-17-pgvector
   apt-get install -y postgresql-plpython3-17
   apt-get install -y curl
+
+  pip3 install --break-system-packages transformers spacy
+  python3 -m spacy download xx_sent_ud_sm --break-system-packages
+  huggingface-cli download intfloat/multilingual-e5-base
 }
 
 install_packages

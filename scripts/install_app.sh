@@ -15,19 +15,19 @@ print_help () {
     echo
     echo "Allows to setup a database already filled by HAF instance, to work with reputation_tracker application."
     echo "OPTIONS:"
-    echo "  --host=VALUE                  Allows to specify a PostgreSQL host location (defaults to /var/run/postgresql)"
-    echo "  --port=NUMBER                 Allows to specify a PostgreSQL operating port (defaults to 5432)"
-    echo "  --postgres-url=URL            Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
-    echo "  --swagger-url=URL             Allows to specify a server URL"
-    echo "  --is_forking=TRUE/FALSE       Allows to specify if app should be forking or not (defaults to true)"
-    echo "  --indexes-only                Only creates indexes"
-    echo "  --schema-only                 Only creates schema, but not indexes"
-    echo "  --llm=MODEL_NAME              Choose LLM model (defaults: bge-m3:latest)"
-    echo "  --ollama=OLLAMA_URLS          Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
-    echo "  --vector_size=NUMBER          Choose vector size for embeddings (defaults: 1024)"
-    echo "  --start_block=NUMBER          Choose start block to sync (default: 1)"
-    echo "  --parallel_workers=NUMBER     Choose number of parallel contexts that ask OLLAMA"
-    echo "  --embedding_batch_size=NUMBER The number of texts we ask OLLAMA to generate embeddings for in a single API call"
+    echo "  --host=VALUE                         Allows to specify a PostgreSQL host location (defaults to /var/run/postgresql)"
+    echo "  --port=NUMBER                        Allows to specify a PostgreSQL operating port (defaults to 5432)"
+    echo "  --postgres-url=URL                   Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
+    echo "  --swagger-url=URL                    Allows to specify a server URL"
+    echo "  --is_forking=TRUE/FALSE              Allows to specify if app should be forking or not (defaults to true)"
+    echo "  --indexes-only                       Only creates indexes"
+    echo "  --schema-only                        Only creates schema, but not indexes"
+    echo "  --llm=MODEL_NAME                     Choose LLM model (defaults: bge-m3:latest)"
+    echo "  --ollama=OLLAMA_URLS                 Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
+    echo "  --vector_size=NUMBER                 Choose vector size for embeddings (defaults: 1024)"
+    echo "  --start_block=NUMBER                 Choose start block to sync (default: 1)"
+    echo "  --parallel_workers=NUMBER            Choose number of parallel contexts that ask OLLAMA"
+    echo "  --embedding_batch_size=NUMBER        The number of texts we ask OLLAMA to generate embeddings for in a single API call"
     echo "  --help                        Display this help screen and exit"
     echo
 }
@@ -46,6 +46,10 @@ VECTOR_SIZE=768
 PARALLEL_WORKERS=16
 EMBEDDING_BATCH_SIZE=100
 START_BLOCK=1
+TOKENIZER_MODEL='intfloat/multilingual-e5-base' # compatible with yxchia/multilingual-e5-base:F16
+TOKENS_PER_CHUNK=512
+OVERLAP_AMOUNT='0.15'
+SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
 
 
 while [ $# -gt 0 ]; do
@@ -79,6 +83,18 @@ while [ $# -gt 0 ]; do
         ;;
     --embedding_batch_size=*)
             EMBEDDING_BATCH_SIZE="${1#*=}"
+        ;;
+    --tokenizer-model=*)
+	    TOKENIZER_MODEL="${1#*=}"
+        ;;
+    --tokens_per_chunk=*)
+	    TOKENS_PER_CHUNK="${1#*=}"
+        ;;
+    --overlap_amount=*)
+	    OVERLAP_AMOUNT="${1#*=}"
+        ;;
+    --sentence_language_model=*)
+	    SENTENCE_LANGUAGE_MODEL="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -132,7 +148,7 @@ for i in $(seq 1 "$PARALLEL_WORKERS"); do
     psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner; CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA}${i} AUTHORIZATION hivesense_owner;"
 done
 
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.START_BLOCK TO ${START_BLOCK};SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}';SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.START_BLOCK TO ${START_BLOCK};SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}';SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};SET PG_TEMP.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}'; SET PG_TEMP.TOKENS_PER_CHUNK TO ${TOKENS_PER_CHUNK}; SET PG_TEMP.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT}; SET PG_TEMP.SENTENCE_LANGUAGE_MODEL TO '${SENTENCE_LANGUAGE_MODEL}'; SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/ollama.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
