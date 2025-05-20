@@ -28,7 +28,11 @@ print_help () {
     echo "  --start_block=NUMBER                 Choose start block to sync (default: 1)"
     echo "  --parallel_workers=NUMBER            Choose number of parallel contexts that ask OLLAMA"
     echo "  --embedding_batch_size=NUMBER        The number of texts we ask OLLAMA to generate embeddings for in a single API call"
-    echo "  --help                        Display this help screen and exit"
+    echo "  --use-halfvec-index=TRUE/FALSE       Use HNSW half-precision index (defaults to false)"
+    echo "  --document-prefix=TEXT               Prefix for documents (defaults to 'passage: ')"
+    echo "  --query-prefix=TEXT                  Prefix for queries (defaults to 'query: ')"
+    echo "  --embedding-dimensionality=NUMBER    Embedding vector dimensionality (defaults to 768)"
+    echo "  --help                               Display this help screen and exit"
     echo
 }
 
@@ -50,7 +54,10 @@ TOKENIZER_MODEL='intfloat/multilingual-e5-base' # compatible with yxchia/multili
 TOKENS_PER_CHUNK=512
 OVERLAP_AMOUNT='0.15'
 SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
-
+USE_HALFVEC_INDEX=false
+DOCUMENT_PREFIX='passage: '
+QUERY_PREFIX='query: '
+EMBEDDING_DIMENSIONALITY=768
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -95,6 +102,18 @@ while [ $# -gt 0 ]; do
         ;;
     --sentence_language_model=*)
 	    SENTENCE_LANGUAGE_MODEL="${1#*=}"
+        ;;
+    --use-halfvec-index=*)
+        USE_HALFVEC_INDEX="${1#*=}"
+        ;;
+    --document-prefix=*)
+        DOCUMENT_PREFIX="${1#*=}"
+        ;;
+    --query-prefix=*)
+        QUERY_PREFIX="${1#*=}"
+        ;;
+    --embedding-dimensionality=*)
+        EMBEDDING_DIMENSIONALITY="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -148,7 +167,23 @@ for i in $(seq 1 "$PARALLEL_WORKERS"); do
     psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner; CREATE SCHEMA IF NOT EXISTS ${HIVESENSE_SCHEMA}${i} AUTHORIZATION hivesense_owner;"
 done
 
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.START_BLOCK TO ${START_BLOCK};SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}';SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};SET PG_TEMP.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}'; SET PG_TEMP.TOKENS_PER_CHUNK TO ${TOKENS_PER_CHUNK}; SET PG_TEMP.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT}; SET PG_TEMP.SENTENCE_LANGUAGE_MODEL TO '${SENTENCE_LANGUAGE_MODEL}'; SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/database_schema.sql"
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
+  SET pg_temp.START_BLOCK TO ${START_BLOCK};
+  SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};
+  SET pg_temp.LLM TO '${LLM}';
+  SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';
+  SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};
+  SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};
+  SET pg_temp.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}';
+  SET pg_temp.TOKENS_PER_CHUNK TO ${TOKENS_PER_CHUNK};
+  SET pg_temp.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT};
+  SET pg_temp.SENTENCE_LANGUAGE_MODEL TO '${SENTENCE_LANGUAGE_MODEL}';
+  SET pg_temp.USE_HALFVEC_INDEX TO ${USE_HALFVEC_INDEX};
+  SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
+  SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
+  SET pg_temp.EMBEDDING_DIMENSIONALITY TO ${EMBEDDING_DIMENSIONALITY};
+  SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
+" -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/ollama.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
