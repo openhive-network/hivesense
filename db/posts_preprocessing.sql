@@ -55,7 +55,8 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _min_new_ratio DOUBLE PRECISION DEFAULT 0.85,
     _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
     _max_chunks INTEGER DEFAULT NULL,
-    _truncate_long_sentences BOOLEAN DEFAULT TRUE
+    _truncate_long_sentences BOOLEAN DEFAULT TRUE,
+    _document_prefix TEXT DEFAULT ''
 )
 RETURNS TEXT [] --NULL means that post was rejected
 LANGUAGE plpgsql
@@ -77,7 +78,7 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT chunk_post( __result, _tokenizer_name, _max_tokens, _min_new_ratio, _lang_model, _max_chunks, _truncate_long_sentences ) INTO __chunks;
+    SELECT chunk_post( __result, _tokenizer_name, _max_tokens, _min_new_ratio, _lang_model, _max_chunks, _truncate_long_sentences, _document_prefix ) INTO __chunks;
 
     RETURN __chunks;
 END;
@@ -99,9 +100,10 @@ CREATE OR REPLACE FUNCTION chunk_post(
     _min_new_ratio DOUBLE PRECISION DEFAULT 0.85,
     _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
     _max_chunks INTEGER DEFAULT NULL,
-    _truncate_long_sentences BOOLEAN DEFAULT TRUE
+    _truncate_long_sentences BOOLEAN DEFAULT TRUE,
+    _document_prefix TEXT DEFAULT ''
 )
-RETURNS TEXT[]    -- array of chunks
+RETURNS TEXT[]    -- array of prefixed chunks
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
@@ -124,6 +126,15 @@ if key not in cache:
 # retrieve cached objects
 nlp, tokenizer = cache[key]
 
+# --- Determine prefix token‐cost and adjust budget ---
+prefix = _document_prefix or ''
+prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
+prefix_len = len(prefix_ids)
+
+max_content_tokens = _max_tokens - prefix_len
+if max_content_tokens <= 0:
+    plpy.error(f"DOCUMENT_PREFIX '{prefix}' exceeds token budget {_max_tokens}")
+
 # --- Pre-tokenize sentences ---
 doc = nlp(_body)
 sentence_tokens = [
@@ -136,7 +147,7 @@ sentence_tokens = [
 chunks = []
 prev_sentences = []
 i = 0
-new_budget = int(_max_tokens * _min_new_ratio)
+new_budget = int(max_content_tokens * _min_new_ratio)
 
 # --- Main loop: build each chunk ---
 while i < len(sentence_tokens):
@@ -151,13 +162,13 @@ while i < len(sentence_tokens):
 
         # Special: first sentence if it alone exceeds new_budget
         if not chunk and new_tokens == 0 and tlen > new_budget:
-            if tlen <= _max_tokens:
+            if tlen <= max_content_tokens:
                 chunk.append((text, tokens))
                 chunk_tokens += tlen
                 new_tokens += tlen
                 i += 1
             elif _truncate_long_sentences:
-                trunc = tokens[:_max_tokens]
+                trunc = tokens[:max_content_tokens]
                 chunk.append((tokenizer.decode(trunc), trunc))
                 chunk_tokens += len(trunc)
                 new_tokens += len(trunc)
@@ -177,7 +188,7 @@ while i < len(sentence_tokens):
     # Phase 2: prepend overlap from previous chunk
     for prev_text, prev_tokens in reversed(prev_sentences):
         ptlen = len(prev_tokens)
-        if chunk_tokens + ptlen <= _max_tokens:
+        if chunk_tokens + ptlen <= max_content_tokens:
             chunk.insert(0, (prev_text, prev_tokens))
             chunk_tokens += ptlen
         else:
@@ -187,7 +198,7 @@ while i < len(sentence_tokens):
     while i < len(sentence_tokens):
         text, tokens = sentence_tokens[i]
         tlen = len(tokens)
-        if chunk_tokens + tlen > _max_tokens:
+        if chunk_tokens + tlen > max_content_tokens:
             break
         chunk.append((text, tokens))
         chunk_tokens += tlen
@@ -201,5 +212,5 @@ while i < len(sentence_tokens):
 if _max_chunks is not None:
     chunks = chunks[:_max_chunks]
 
-return chunks
+return [ prefix + c for c in chunks ]
 $$;
