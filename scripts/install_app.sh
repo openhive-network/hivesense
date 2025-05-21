@@ -24,14 +24,17 @@ print_help () {
     echo "  --schema-only                        Only creates schema, but not indexes"
     echo "  --llm=MODEL_NAME                     Choose LLM model (defaults: bge-m3:latest)"
     echo "  --ollama=OLLAMA_URLS                 Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
-    echo "  --vector_size=NUMBER                 Choose vector size for embeddings (defaults: 1024)"
+    echo "  --vector_size=NUMBER                 Choose vector size for embeddings (defaults: 768)"
     echo "  --start_block=NUMBER                 Choose start block to sync (default: 1)"
     echo "  --parallel_workers=NUMBER            Choose number of parallel contexts that ask OLLAMA"
     echo "  --embedding_batch_size=NUMBER        The number of texts we ask OLLAMA to generate embeddings for in a single API call"
+    echo "  --tokenizer-model=MODEL_NAME         The tokenizer model, must be compatible with 'llm'"
+    echo "  --tokens_per_chunk=NUMBER            The maximum number of tokens to break long posts into"
+    echo "  --overlap_amount=NUMBER              The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
+    echo "  --sentence_language_model=MODEL_NAME The model to use for detecting sentence breaks"
     echo "  --use-halfvec-index=TRUE/FALSE       Use HNSW half-precision index (defaults to false)"
     echo "  --document-prefix=TEXT               Prefix for documents (defaults to 'passage: ')"
     echo "  --query-prefix=TEXT                  Prefix for queries (defaults to 'query: ')"
-    echo "  --embedding-dimensionality=NUMBER    Embedding vector dimensionality (defaults to 768)"
     echo "  --help                               Display this help screen and exit"
     echo
 }
@@ -57,7 +60,6 @@ SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
 USE_HALFVEC_INDEX=false
 DOCUMENT_PREFIX='passage: '
 QUERY_PREFIX='query: '
-EMBEDDING_DIMENSIONALITY=768
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,9 +113,6 @@ while [ $# -gt 0 ]; do
         ;;
     --query-prefix=*)
         QUERY_PREFIX="${1#*=}"
-        ;;
-    --embedding-dimensionality=*)
-        EMBEDDING_DIMENSIONALITY="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -181,7 +180,6 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.USE_HALFVEC_INDEX TO ${USE_HALFVEC_INDEX};
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
-  SET pg_temp.EMBEDDING_DIMENSIONALITY TO ${EMBEDDING_DIMENSIONALITY};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"

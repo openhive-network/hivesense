@@ -109,7 +109,7 @@ VALUES
     current_setting('PG_TEMP.USE_HALFVEC_INDEX', TRUE)::BOOLEAN,
     current_setting('PG_TEMP.DOCUMENT_PREFIX', TRUE)::TEXT,
     current_setting('PG_TEMP.QUERY_PREFIX', TRUE)::TEXT,
-    current_setting('PG_TEMP.EMBEDDING_DIMENSIONALITY', TRUE)::INT
+    current_setting('PG_TEMP.VECTOR_SIZE', TRUE)::INT
 )
 ON CONFLICT (id)
 DO UPDATE SET
