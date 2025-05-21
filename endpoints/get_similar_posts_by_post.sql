@@ -173,7 +173,7 @@ BEGIN
                           hp.source AS blacklists,
                           hp.muted_reasons,
                           search.similarity_order
-                      FROM find_nearest_posts_to_post(author, permlink, posts_limit, _observer_id => __observer_id) as search,
+                      FROM hivesense_app.find_nearest_posts_to_post(author, permlink, posts_limit, _observer_id => __observer_id) as search,
                         LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
                   ) row
     INTO __result;

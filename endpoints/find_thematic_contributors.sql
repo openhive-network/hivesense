@@ -86,8 +86,8 @@ BEGIN
 
     SELECT jsonb_agg (
             ha.name ORDER BY search.rank ASC
-    ) FROM find_thematic_contributors_with_embedding(
-                   hivesense_embed(query_prefix || thematic)
+    ) FROM hivesense_app.find_thematic_contributors_with_embedding(
+                   hivesense_app.hivesense_embed(__query_prefix || thematic)
                  , authors_limit
                  , _observer_id => __observer_id
     ) as search

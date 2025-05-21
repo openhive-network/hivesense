@@ -148,7 +148,7 @@ BEGIN
            hp.source AS blacklists,
            hp.muted_reasons,
            search.similarity_order
-        FROM find_nearest_posts(
+        FROM hivesense_app.find_nearest_posts(
                    pattern
                  , posts_limit
                  , _observer_id => __observer_id
