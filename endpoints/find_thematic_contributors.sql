@@ -74,6 +74,7 @@ $$
 DECLARE
     __result JSON;
     __observer_id INT := 0;
+    __query_prefix TEXT;
 BEGIN
     IF observer != '' THEN
         __observer_id = hivemind_postgrest_utilities.find_account_id(
@@ -81,10 +82,12 @@ BEGIN
                 True);
     END IF;
 
+    SELECT query_prefix INTO __query_prefix FROM hivesense_app.hivesense_app_status WHERE id = 1;
+
     SELECT jsonb_agg (
             ha.name ORDER BY search.rank ASC
     ) FROM find_thematic_contributors_with_embedding(
-                   hivesense_embed(thematic)
+                   hivesense_embed(query_prefix || thematic)
                  , authors_limit
                  , _observer_id => __observer_id
     ) as search

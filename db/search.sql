@@ -78,10 +78,13 @@ RETURNS SETOF similar_post_result
 LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $BODY$
+DECLARE
+    __query_prefix TEXT;
 BEGIN
+    SELECT query_prefix INTO __query_prefix FROM hivesense_app.hivesense_app_status WHERE id = 1;
 
     RETURN QUERY SELECT similarity_order, post_id FROM find_nearest_posts_with_embedding(
-             hivesense_embed(_query)
+             hivesense_embed(__query_prefix || _query)
          , _limit
          , _observer_id => _observer_id
          ,  _start_post_id => _start_post_id
