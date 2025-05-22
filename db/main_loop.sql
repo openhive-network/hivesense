@@ -1,40 +1,39 @@
 SET ROLE hivesense_owner;
 
 DO $BODY$
-    DECLARE
-        __llm TEXT := current_setting('pg_temp.LLM', TRUE);
-        __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
-    BEGIN
-        EXECUTE format($$
+DECLARE
+    __llm    TEXT := current_setting('pg_temp.LLM',       TRUE);
+    __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
+BEGIN
+    EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
-        RETURNS vector
-        IMMUTABLE
-        LANGUAGE plpgsql
-        PARALLEL SAFE
+            RETURNS vector
+            IMMUTABLE
+            LANGUAGE plpgsql
+            PARALLEL SAFE
         AS
-		$BODY2$
+        $BODY2$
         BEGIN
             RETURN hivesense_app.ollama_embed('%s', _post, host => '%s');
         END;
-		$BODY2$
-		$$, __llm, __ollama);
+        $BODY2$
+    $$, __llm, __ollama);
 
-        EXECUTE format($$
+    EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[])
-        RETURNS hivesense_app.post_and_vector[]
-        IMMUTABLE
-        LANGUAGE plpgsql
-        PARALLEL SAFE
+            RETURNS hivesense_app.post_and_vector[]
+            IMMUTABLE
+            LANGUAGE plpgsql
+            PARALLEL SAFE
         AS
-		$BODY2$
+        $BODY2$
         BEGIN
             RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s');
         END;
-		$BODY2$
-		$$, __llm, __ollama);
-END $BODY$;
-
-
+        $BODY2$
+    $$, __llm, __ollama);
+END;
+$BODY$;
 
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,

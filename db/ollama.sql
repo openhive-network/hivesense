@@ -1,57 +1,37 @@
--- improves ai.ollama_embedd for reuse already initialized connection
--- it ist 2x faster now than ai.ollama_embed
--- It fits our needs, the ollama connection object is saved in python globals and will be destroyed together with postgres session
--- In our architecture the postgres session is associated with a connection between postgrest server and postgresql server.
--- These connections (postgrest<->postgresql) are held in a pool by the postgrest
 CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
-    model text,
-    input_text text,
-    host text DEFAULT NULL::text,
-    keep_alive text DEFAULT NULL::text,
-    embedding_options jsonb DEFAULT NULL::jsonb
+    model             TEXT,
+    input_text        TEXT,
+    host              TEXT    DEFAULT NULL::text,
+    keep_alive        TEXT    DEFAULT NULL::text,
+    embedding_options JSONB   DEFAULT NULL::jsonb
 )
 RETURNS vector
-LANGUAGE 'plpython3u'
-COST 100
-IMMUTABLE PARALLEL UNSAFE
-SET search_path=pg_catalog, pg_temp
-AS $BODY$
-    try:
-        if "ai.version" not in GD:
-            r = plpy.execute("select coalesce(pg_catalog.current_setting('ai.python_lib_dir', true), '/usr/local/lib/pgai') as python_lib_dir")
-            python_lib_dir = r[0]["python_lib_dir"]
-            from pathlib import Path
-            import sys
-            import sysconfig
-            # Note: the "old" (pre-0.4.0) packages are installed as system-level python packages
-            # and take precedence over our extension-version specific packages.
-            # By removing the whole thing from the path we won't run into package conflicts.
-            if "purelib" in sysconfig.get_path_names() and sysconfig.get_path("purelib") in sys.path:
-                sys.path.remove(sysconfig.get_path("purelib"))
-            python_lib_dir = Path(python_lib_dir).joinpath("0.8.0")
-            import site
-            site.addsitedir(str(python_lib_dir))
-            from ai import __version__ as ai_version
-            assert("0.8.0" == ai_version)
-            GD["ai.version"] = "0.8.0"
-        else:
-            if GD["ai.version"] != "0.8.0":
-                plpy.fatal("the pgai extension version has changed. start a new session")
-        import ai.ollama
-        if "ai.ollama_client" not in GD:
-            GD["ai.ollama_client"] = ai.ollama.make_client(plpy, host)
-        client = GD["ai.ollama_client"]
-        embedding_options_1 = None
-        if embedding_options is not None:
-            import json
-            embedding_options_1 = {k: v for k, v in json.loads(embedding_options).items()}
-        resp = client.embeddings(model, input_text, options=embedding_options_1, keep_alive=keep_alive)
-        return resp.get("embedding")
-    except Exception as e:
-        if "ai.ollama_client" in GD:
-            del GD["ai.ollama_client"]
-        plpy.error(f"Error during embedding operation: {str(e)}")
-$BODY$;
+IMMUTABLE
+PARALLEL SAFE
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    batch_in  hivesense_app.id_and_post[];
+    batch_out hivesense_app.post_and_vector[];
+BEGIN
+    -- wrap into a single-element id_and_post[] (post_id is ignored downstream)
+    batch_in := ARRAY[
+        ROW(1, ARRAY[input_text])::hivesense_app.id_and_post
+    ];
+
+    -- call the batch endpoint (which always normalizes)
+    batch_out := hivesense_app.ollama_embed(
+        model,
+        batch_in,
+        host              => host,
+        keep_alive        => keep_alive,
+        embedding_options => embedding_options
+    );
+
+    -- extract and return the single vector
+    RETURN batch_out[1].vec;
+END;
+$$;
 
 
 DROP TYPE IF EXISTS hivesense_app.id_and_post CASCADE;
