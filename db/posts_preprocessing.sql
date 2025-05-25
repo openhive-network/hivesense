@@ -14,7 +14,7 @@ if 'post_clean_content_patterns' not in globals():
 
         "remove_markdown_links": re.compile(r'\[([^\]]+)\]\([^\)]+\)|!\[\]\([^)]*\)|!\S+\.(jpg|jpeg|png|gif)', re.IGNORECASE),
 
-        "remove_unwanted": re.compile(r'Posted via.*$|[*_]+|[^a-zA-Z0-9\s,.!?\"\'’]', re.MULTILINE),
+        "remove_unwanted": re.compile(r'Posted via.*$|[*_]+', re.MULTILINE),
 
         "normalize_whitespace": re.compile(r'\s+')
     }
