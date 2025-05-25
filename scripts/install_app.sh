@@ -35,6 +35,7 @@ print_help () {
     echo "  --use-halfvec-index=TRUE/FALSE       Use HNSW half-precision index (defaults to false)"
     echo "  --document-prefix=TEXT               Prefix for documents (defaults to 'passage: ')"
     echo "  --query-prefix=TEXT                  Prefix for queries (defaults to 'query: ')"
+    echo "  --min-token-threshold=INT            Don't generate embeddings for posts with fewer than this number of tokens"
     echo "  --help                               Display this help screen and exit"
     echo
 }
@@ -60,6 +61,7 @@ SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
 USE_HALFVEC_INDEX=false
 DOCUMENT_PREFIX='passage: '
 QUERY_PREFIX='query: '
+MIN_TOKEN_THRESHOLD=75
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -113,6 +115,9 @@ while [ $# -gt 0 ]; do
         ;;
     --query-prefix=*)
         QUERY_PREFIX="${1#*=}"
+        ;;
+    --min-token-threshold=*)
+        MIN_TOKEN_THRESHOLD="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -180,6 +185,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.USE_HALFVEC_INDEX TO ${USE_HALFVEC_INDEX};
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
+  SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"

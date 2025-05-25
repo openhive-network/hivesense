@@ -34,20 +34,6 @@ GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
 
-CREATE OR REPLACE FUNCTION post_count_words(_post_body TEXT)
-RETURNS INTEGER
-LANGUAGE plpython3u
-IMMUTABLE
-PARALLEL SAFE
-AS
-$BODY$
-    return len(_post_body.split())
-$BODY$;
-
-GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
-GRANT EXECUTE ON FUNCTION post_count_words(TEXT) TO pg_database_owner WITH GRANT OPTION;
-
 CREATE OR REPLACE FUNCTION preprocess_post(
     _post_body TEXT,
     _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
@@ -56,7 +42,8 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
     _max_chunks INTEGER DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
-    _document_prefix TEXT DEFAULT ''
+    _document_prefix TEXT DEFAULT '',
+    _min_token_threshold INT
 )
 RETURNS TEXT [] --NULL means that post was rejected
 LANGUAGE plpgsql
@@ -65,7 +52,6 @@ PARALLEL SAFE
 AS
 $BODY$
 DECLARE
-    __words_limit INT := 50;
     __result TEXT;
     __chunks TEXT[];
 BEGIN
@@ -74,11 +60,7 @@ BEGIN
         RETURN __result;
     END IF;
 
-    IF post_count_words( __result ) <= __words_limit THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT chunk_post( __result, _tokenizer_name, _max_tokens, _min_new_ratio, _lang_model, _max_chunks, _truncate_long_sentences, _document_prefix ) INTO __chunks;
+    SELECT chunk_post( __result, _tokenizer_name, _max_tokens, _min_new_ratio, _lang_model, _max_chunks, _truncate_long_sentences, _document_prefix, _min_token_threshold ) INTO __chunks;
 
     RETURN __chunks;
 END;
@@ -101,7 +83,8 @@ CREATE OR REPLACE FUNCTION chunk_post(
     _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
     _max_chunks INTEGER DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
-    _document_prefix TEXT DEFAULT ''
+    _document_prefix TEXT DEFAULT '',
+    _min_token_threshold INT DEFAULT 0
 )
 RETURNS TEXT[]    -- array of prefixed chunks
 LANGUAGE plpython3u
@@ -143,6 +126,12 @@ sentence_tokens = [
     for sent in doc.sents
     if sent.text.strip()
 ]
+
+
+total_tokens = sum(len(tokens) for _, tokens in sentence_tokens)
+
+if total_tokens < _min_token_threshold:
+    return None
 
 chunks = []
 prev_sentences = []
