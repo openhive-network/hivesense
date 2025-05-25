@@ -60,6 +60,7 @@ DECLARE
     __lang_model TEXT;
     __doc_prefix TEXT;
     __min_token_threshold INT;
+    __max_embeddings_per_post INT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
@@ -71,14 +72,16 @@ BEGIN
            1 - overlap_amount,
            sentence_language_model,
            document_prefix,
-           min_token_threshold
+           min_token_threshold,
+           max_embeddings_per_post
       INTO __number_of_workers,
            __tokenizer_name,
            __max_tokens,
            __min_new_ratio,
            __lang_model,
            __doc_prefix,
-           __min_token_threshold
+           __min_token_threshold,
+           __max_embeddings_per_post
     FROM hivesense_app.hivesense_app_status
     WHERE id = 1;
 
@@ -108,7 +111,7 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post( hpd.title || '.\n\n' || hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, 3, TRUE, __doc_prefix, __min_token_threshold ) as bodies
+        SELECT hp.id as post_id, preprocess_post( hpd.title || '.\n\n' || hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold ) as bodies
         FROM hivemind_app.hive_posts as hp
                  JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
         WHERE hp.id=hp.root_id

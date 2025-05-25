@@ -36,6 +36,7 @@ print_help () {
     echo "  --document-prefix=TEXT               Prefix for documents (defaults to 'passage: ')"
     echo "  --query-prefix=TEXT                  Prefix for queries (defaults to 'query: ')"
     echo "  --min-token-threshold=INT            Don't generate embeddings for posts with fewer than this number of tokens"
+    echo "  --max-embeddings-per-post            Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
     echo "  --help                               Display this help screen and exit"
     echo
 }
@@ -62,6 +63,7 @@ USE_HALFVEC_INDEX=false
 DOCUMENT_PREFIX='passage: '
 QUERY_PREFIX='query: '
 MIN_TOKEN_THRESHOLD=75
+MAX_EMBEDINGS_PER_POST=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -118,6 +120,9 @@ while [ $# -gt 0 ]; do
         ;;
     --min-token-threshold=*)
         MIN_TOKEN_THRESHOLD="${1#*=}"
+        ;;
+    --max-embeddings-per-post=*)
+        MAX_EMBEDINGS_PER_POST="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -186,6 +191,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
   SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};
+  SET pg_temp.MAX_EMBEDINGS_PER_POST TO '${MAX_EMBEDINGS_PER_POST}';
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
