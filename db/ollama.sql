@@ -1,3 +1,16 @@
+DROP TYPE IF EXISTS hivesense_app.id_and_post CASCADE;
+CREATE TYPE hivesense_app.id_and_post AS (
+    post_id INTEGER,
+    body TEXT [] -- chunked post body
+);
+
+
+DROP TYPE IF EXISTS hivesense_app.post_and_vector CASCADE;
+CREATE TYPE hivesense_app.post_and_vector AS (
+    post_id INTEGER,
+    vec vector
+);
+
 CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model             TEXT,
     input_text        TEXT,
@@ -32,20 +45,6 @@ BEGIN
     RETURN batch_out[1].vec;
 END;
 $$;
-
-
-DROP TYPE IF EXISTS hivesense_app.id_and_post CASCADE;
-CREATE TYPE hivesense_app.id_and_post AS (
-    post_id INTEGER,
-    body TEXT [] -- chunked post body
-);
-
-
-DROP TYPE IF EXISTS hivesense_app.post_and_vector CASCADE;
-CREATE TYPE hivesense_app.post_and_vector AS (
-    post_id INTEGER,
-    vec vector
-);
 
 -- batch version of pga ollama embed
 -- because it uses python, then only super user can be owner
