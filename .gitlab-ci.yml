@@ -137,6 +137,7 @@ sync:
       docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
       echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
       echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
+      git -C submodules/hivemind submodule update --init reputation_tracker
       git config --global --add safe.directory "$CI_PROJECT_DIR"
       git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
       git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
