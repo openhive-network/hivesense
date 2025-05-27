@@ -43,7 +43,7 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _max_chunks INTEGER DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
     _document_prefix TEXT DEFAULT '',
-    _min_token_threshold INT
+    _min_token_threshold INT DEFAULT 0
 )
 RETURNS TEXT [] --NULL means that post was rejected
 LANGUAGE plpgsql
@@ -90,116 +90,160 @@ RETURNS TEXT[]    -- array of prefixed chunks
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
-# --- Cache loader dict in globals() ---
+# ---------------------------------------------------------
+# 1.  Cache spaCy pipe, tokenizer, and *fixed overhead*
+# ---------------------------------------------------------
 if 'chunk_post_cache' not in globals():
     globals()['chunk_post_cache'] = {}
 
+key = (_tokenizer_name, _lang_model, _document_prefix)
 cache = globals()['chunk_post_cache']
-key = (_tokenizer_name, _lang_model)
 
 if key not in cache:
     import spacy
     from transformers import AutoTokenizer
 
-    nlp = spacy.load(_lang_model, disable=["ner","tagger","parser"])
-    tokenizer = AutoTokenizer.from_pretrained(_tokenizer_name)
+    nlp        = spacy.load(_lang_model, disable=("ner", "tagger", "parser"))
+    tokenizer  = AutoTokenizer.from_pretrained(_tokenizer_name)
 
-    cache[key] = (nlp, tokenizer)
+    prefix_ids = tokenizer.encode(_document_prefix or '',
+                                  add_special_tokens=False)
+    specials   = tokenizer.num_special_tokens_to_add(pair=False)  # typically 2
 
-# retrieve cached objects
-nlp, tokenizer = cache[key]
+    cache[key] = {
+        'nlp'           : nlp,
+        'tok'           : tokenizer,
+        'prefix_ids'    : prefix_ids,
+        'prefix_len'    : len(prefix_ids),
+        'specials'      : specials,
+        'fixed_overhead': len(prefix_ids) + specials
+    }
 
-# --- Determine prefix token‐cost and adjust budget ---
-prefix = _document_prefix or ''
-prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-prefix_len = len(prefix_ids)
+nlp        = cache[key]['nlp']
+tok        = cache[key]['tok']
+prefix_len = cache[key]['prefix_len']
+fixed_over = cache[key]['fixed_overhead']
+prefix     = _document_prefix or ''
 
-max_content_tokens = _max_tokens - prefix_len
+# ---------------------------------------------------------
+# 2.  Work out the *content* budget once
+# ---------------------------------------------------------
+max_content_tokens = _max_tokens - fixed_over
 if max_content_tokens <= 0:
     plpy.error(f"DOCUMENT_PREFIX '{prefix}' exceeds token budget {_max_tokens}")
 
-# --- Pre-tokenize sentences ---
+# ---------------------------------------------------------
+# 3.  Pre-tokenise every sentence once
+# ---------------------------------------------------------
 doc = nlp(_body)
 sentence_tokens = [
-    (sent.text.strip(),
-     tokenizer.encode(sent.text.strip(), add_special_tokens=False))
-    for sent in doc.sents
-    if sent.text.strip()
+    (s.text.strip(),
+     tok.encode(s.text.strip(), add_special_tokens=False))
+    for s in doc.sents if s.text.strip()
 ]
 
-
-total_tokens = sum(len(tokens) for _, tokens in sentence_tokens)
-
-if total_tokens < _min_token_threshold:
+if sum(len(t) for _, t in sentence_tokens) < _min_token_threshold:
     return None
 
-chunks = []
-prev_sentences = []
-i = 0
-new_budget = int(max_content_tokens * _min_new_ratio)
+# ---------------------------------------------------------
+# 4.  Chunk loop
+# ---------------------------------------------------------
+chunks          = []
+prev_sentences  = []           # context for overlap
+i               = 0            # cursor into sentence_tokens
 
-# --- Main loop: build each chunk ---
 while i < len(sentence_tokens):
-    chunk = []         # List of (text, tokens)
-    chunk_tokens = 0
+    chunk          = []        # sentences in display order
+    added_stack    = []        # sentences in *addition* order
+    chunk_tokens   = 0
+    new_tokens     = 0
+    new_budget     = int(max_content_tokens * _min_new_ratio)
 
-    # Phase 1: new content up to new_budget
-    new_tokens = 0
+    # ---- Phase 1:  fresh content up to new_budget ----
     while i < len(sentence_tokens):
-        text, tokens = sentence_tokens[i]
-        tlen = len(tokens)
+        txt, ids = sentence_tokens[i]
+        tlen     = len(ids)
 
-        # Special: first sentence if it alone exceeds new_budget
-        if not chunk and new_tokens == 0 and tlen > new_budget:
+        # special case: very long first sentence
+        if not chunk and tlen > new_budget:
             if tlen <= max_content_tokens:
-                chunk.append((text, tokens))
+                # accept whole
+                chunk.extend([(txt, ids)])
+                added_stack.append({'txt': txt, 'ids': ids, 'src': 'new'})
+                new_tokens   += tlen
                 chunk_tokens += tlen
-                new_tokens += tlen
                 i += 1
             elif _truncate_long_sentences:
-                trunc = tokens[:max_content_tokens]
-                chunk.append((tokenizer.decode(trunc), trunc))
-                chunk_tokens += len(trunc)
-                new_tokens += len(trunc)
-                i += 1
-            else:
+                trunc_ids = ids[:max_content_tokens]
+                trunc_txt = tok.decode(trunc_ids)
+                chunk.extend([(trunc_txt, trunc_ids)])
+                added_stack.append({'txt': trunc_txt,
+                                    'ids': trunc_ids,
+                                    'src': 'new'})
+                new_tokens   += len(trunc_ids)
+                chunk_tokens += len(trunc_ids)
                 i += 1
             break
 
         if new_tokens + tlen > new_budget:
             break
 
-        chunk.append((text, tokens))
-        new_tokens += tlen
+        chunk.extend([(txt, ids)])
+        added_stack.append({'txt': txt, 'ids': ids, 'src': 'new'})
+        new_tokens   += tlen
         chunk_tokens += tlen
         i += 1
 
-    # Phase 2: prepend overlap from previous chunk
-    for prev_text, prev_tokens in reversed(prev_sentences):
-        ptlen = len(prev_tokens)
-        if chunk_tokens + ptlen <= max_content_tokens:
-            chunk.insert(0, (prev_text, prev_tokens))
-            chunk_tokens += ptlen
+    # ---- Phase 2:  prepend overlap from previous chunk ----
+    for ptxt, pids in reversed(prev_sentences):
+        plen = len(pids)
+        if chunk_tokens + plen <= max_content_tokens:
+            chunk.insert(0, (ptxt, pids))
+            added_stack.append({'txt': ptxt, 'ids': pids, 'src': 'prev'})
+            chunk_tokens += plen
         else:
             break
 
-    # Phase 3: back-fill with any remaining new sentences
+    # ---- Phase 3:  back-fill with more new sentences ----
     while i < len(sentence_tokens):
-        text, tokens = sentence_tokens[i]
-        tlen = len(tokens)
+        txt, ids = sentence_tokens[i]
+        tlen     = len(ids)
         if chunk_tokens + tlen > max_content_tokens:
             break
-        chunk.append((text, tokens))
+        chunk.extend([(txt, ids)])
+        added_stack.append({'txt': txt, 'ids': ids, 'src': 'new'})
         chunk_tokens += tlen
         i += 1
 
-    # finalize this chunk
-    chunks.append(" ".join([s for s, _ in chunk]))
+    # ---- Phase 4:  Verify & trim until the *real* encode fits ----
+    def encode_len(full_text: str) -> int:
+        # *One* encode() per check – still cheap
+        return len(tok.encode(full_text, add_special_tokens=True))
+
+    full_txt = prefix + " ".join(t for t, _ in chunk)
+    while encode_len(full_txt) > _max_tokens:
+        if not added_stack:
+            plpy.error("Internal error: no sentence left to pop but still long")
+
+        last = added_stack.pop()          # last *added*, regardless of order
+        chunk.remove((last['txt'], last['ids']))
+
+        if last['src'] == 'new':
+            # rewind cursor so the popped sentence becomes the next candidate
+            i -= 1
+
+        if not chunk:
+            plpy.error("A single sentence exceeds the hard limit; aborting.")
+
+        full_txt = prefix + " ".join(t for t, _ in chunk)
+
+    chunks.append(full_txt)
+
+    # build the context list for the next loop
     prev_sentences = chunk
 
-# Apply chunk limit if specified
-if _max_chunks is not None:
-    chunks = chunks[:_max_chunks]
+    if _max_chunks is not None and len(chunks) >= _max_chunks:
+        break
 
-return [ prefix + c for c in chunks ]
+return chunks
 $$;
