@@ -3,7 +3,7 @@
 set -e
 
 wait_for_hivesense_startup() {
-    COMMAND="SELECT EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'hivensense_vectors_embed_hnsw_idxs' );"
+    COMMAND="SELECT EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND ( relname = 'posts_vectors_embedding_half_hnsw' OR relname = 'posts_vectors_embedding_hnsw' ));"
     MESSAGE="Waiting for Hivesense to finish processing blocks..."
     HIVEMIND_BLOCK_COMMAND="SELECT last_completed_block_num FROM hivemind_app.hive_state"
     HAF_BLOCK_COMMAND="SELECT consistent_block FROM hafd.hive_state"
