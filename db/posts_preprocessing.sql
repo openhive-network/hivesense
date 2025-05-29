@@ -1,97 +1,74 @@
+/* ======================================================================
+   1.  post_clean_content – unchanged
+   ===================================================================== */
 CREATE OR REPLACE FUNCTION post_clean_content(_text_input TEXT)
 RETURNS TEXT
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
-import re
+import re, html
+from bs4 import BeautifulSoup
 
-# Cache regex patterns in a global dictionary to avoid recompilation
-if 'post_clean_content_patterns' not in globals():
-    globals()['post_clean_content_patterns'] = {
-        "remove_html": re.compile(r'(!\[.*?\]\(.*?\)|https?://\S+|<img[^>]*>|<b[^>]*>.*?</b>|'
-                                  r'<table[^>]*>.*?</table>|<div[^>]*>.*?</div>|'
-                                  r'<style[^>]*>.*?</style>|<script[^>]*>.*?</script>|<[^>]+>)', re.IGNORECASE),
+if 'post_clean_patterns' not in globals():
+    globals()['post_clean_patterns'] = {
+        # images & bare URLs
+        "remove_markdown": re.compile(r'(!\[.*?\]\(.*?\)|https?://\S+)', re.IGNORECASE), # remove markdown images and bare http links
 
+        # [title](url) ⇒ title
         "remove_markdown_links": re.compile(r'\[([^\]]+)\]\([^\)]+\)|!\[\]\([^)]*\)|!\S+\.(jpg|jpeg|png|gif)', re.IGNORECASE),
 
         "remove_unwanted": re.compile(r'Posted via.*$|[*_]+', re.MULTILINE),
 
-        "normalize_whitespace": re.compile(r'\s+')
+        "remove_base64" : re.compile(r'data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+'),
     }
 
-patterns = globals()['post_clean_content_patterns']
+patterns = globals()['post_clean_patterns']
 
-def clean_text(text):
-    text = patterns["remove_html"].sub('', text)
-    text = patterns["remove_markdown_links"].sub(r'\1', text)
-    text = patterns["remove_unwanted"].sub('', text)
-    return patterns["normalize_whitespace"].sub(' ', text).strip()
+def clean(text: str) -> str:
+    # 1) Unescape HTML entities like &nbsp;
+    text = html.unescape(text)
 
-return clean_text(_text_input)
+    # 2) Parse and strip unwanted tags
+    soup = BeautifulSoup(text, 'lxml')
+    for tag in soup(['script', 'style', 'img', 'table']):
+        tag.decompose()
+
+    # 4) Extract the remaining text and collapse whitespace
+    extracted = soup.get_text(separator=' ')
+
+    extracted = patterns["remove_markdown"].sub('', extracted)
+    extracted = patterns["remove_markdown_links"].sub(r'\1', extracted)
+    extracted = patterns["remove_base64"].sub('', extracted)
+    return patterns["remove_unwanted"].sub('', extracted)
+
+return clean(_text_input)
 $$;
 
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
-GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner     WITH GRANT OPTION;
 
-CREATE OR REPLACE FUNCTION preprocess_post(
-    _post_body TEXT,
-    _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
-    _max_tokens INTEGER DEFAULT 512,
-    _min_new_ratio DOUBLE PRECISION DEFAULT 0.85,
-    _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
-    _max_chunks INTEGER DEFAULT NULL,
-    _truncate_long_sentences BOOLEAN DEFAULT TRUE,
-    _document_prefix TEXT DEFAULT '',
-    _min_token_threshold INT DEFAULT 0
-)
-RETURNS TEXT [] --NULL means that post was rejected
-LANGUAGE plpgsql
-IMMUTABLE
-PARALLEL SAFE
-AS
-$BODY$
-DECLARE
-    __result TEXT;
-    __chunks TEXT[];
-BEGIN
-    __result := post_clean_content( _post_body );
-    IF __result IS NULL THEN
-        RETURN __result;
-    END IF;
-
-    SELECT chunk_post( __result, _tokenizer_name, _max_tokens, _min_new_ratio, _lang_model, _max_chunks, _truncate_long_sentences, _document_prefix, _min_token_threshold ) INTO __chunks;
-
-    RETURN __chunks;
-END;
-$BODY$;
-
-
--- divides a post into parts of at most `max_token` tokens each, breaking
--- on sentence boundaries.
--- with the default parameters, it attempts to create a 15% overlap, so
--- the first 15% of the tokens of the second chunk will be the same as the
--- last 15% of the tokens from the first chunk.
---
--- note: if the last chunk would have only a few lines of new post content,
---       this will add as much overlap as possible instead of just targeting 15%
 CREATE OR REPLACE FUNCTION chunk_post(
     _body TEXT,
+    _post_id INTEGER,
+    _permlink TEXT,
     _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
-    _max_tokens INTEGER DEFAULT 512,
-    _min_new_ratio DOUBLE PRECISION DEFAULT 0.85,
-    _lang_model TEXT DEFAULT 'xx_sent_ud_sm',
-    _max_chunks INTEGER DEFAULT NULL,
+    _max_tokens     INTEGER      DEFAULT 512,
+    _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
+    _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
+    _max_chunks     INTEGER      DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
-    _document_prefix TEXT DEFAULT '',
-    _min_token_threshold INT DEFAULT 0
+    _document_prefix TEXT        DEFAULT 'passage: ',
+    _min_token_threshold INT     DEFAULT 75        -- reject very short posts
 )
-RETURNS TEXT[]    -- array of prefixed chunks
+RETURNS TEXT[]
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
+import re, plpy
+import pysbd
+
 # ---------------------------------------------------------
-# 1.  Cache spaCy pipe, tokenizer, and *fixed overhead*
+# 1.  Cache tokenizer, regexes, and fixed overhead
 # ---------------------------------------------------------
 if 'chunk_post_cache' not in globals():
     globals()['chunk_post_cache'] = {}
@@ -100,53 +77,150 @@ key = (_tokenizer_name, _lang_model, _document_prefix)
 cache = globals()['chunk_post_cache']
 
 if key not in cache:
-    import spacy
     from transformers import AutoTokenizer
 
-    nlp        = spacy.load(_lang_model, disable=("ner", "tagger", "parser"))
     tokenizer  = AutoTokenizer.from_pretrained(_tokenizer_name)
 
-    prefix_ids = tokenizer.encode(_document_prefix or '',
-                                  add_special_tokens=False)
+    prefix_ids = tokenizer.encode(_document_prefix or '', add_special_tokens=False)
     specials   = tokenizer.num_special_tokens_to_add(pair=False)  # typically 2
 
+    patterns = {
+        "normalize_whitespace": re.compile(r'\s+'),
+
+        "cjk_sentence_end": re.compile(r'(?<=[。？！…\.?!])\s*|\r?\n+'),
+
+        # any Hiragana (U+3040–U+309F) or Katakana (U+30A0–U+30FF) code‐point
+        "ja_characters": re.compile(r"[\u3040-\u309F\u30A0-\u30FF]"),
+        # basic CJK Unified Ideographs (U+4E00–U+9FFF)
+        "zh_characters": re.compile(r"[\u4E00-\u9FFF]"),
+        # Hangul Syllables (U+AC00–U+D7AF)
+        "ko_characters": re.compile(r"[\uAC00-\uD7AF]")
+    }
+
     cache[key] = {
-        'nlp'           : nlp,
         'tok'           : tokenizer,
         'prefix_ids'    : prefix_ids,
         'prefix_len'    : len(prefix_ids),
         'specials'      : specials,
-        'fixed_overhead': len(prefix_ids) + specials
+        'fixed_overhead': len(prefix_ids) + specials,
+        'patterns'      : patterns
     }
 
-nlp        = cache[key]['nlp']
 tok        = cache[key]['tok']
 prefix_len = cache[key]['prefix_len']
 fixed_over = cache[key]['fixed_overhead']
 prefix     = _document_prefix or ''
+patterns   = cache[key]['patterns']
 
 # ---------------------------------------------------------
-# 2.  Work out the *content* budget once
+# 2.  Helper functions for splitting text on sentences
+# ---------------------------------------------------------
+def split_cjk(text: str) -> list[str]:
+    # splits out the punctuation
+    parts = re.split(patterns["cjk_sentence_end"], text)
+    # filter out any empty strings
+    return [p for p in parts if p]
+
+# stupid language guesser for now.  we should likely use langdetect or lid if "assume english works for most western languages" is wrong
+def guess_language(text: str) -> str:
+    if patterns["ko_characters"].search(text):
+        return 'ko'
+    if patterns["ja_characters"].search(text):
+        return 'ja'
+    if patterns["zh_characters"].search(text):
+        return'zh'
+    return 'en'
+
+def split_sentences(text: str, assumed_language: str) -> list[str]:
+    if assumed_language == 'ko':
+        # sbd doesn't have Korean language support, so fall back to a simple
+        # regex that splits on either .!?, their CJK equivalents, or newlines.
+        # that's better than nothing, maybe we can find something smarter later
+        return split_cjk(text)
+
+    # cache one Segmenter per language
+    if 'sentence_splitters' not in globals():
+        globals()['sentence_splitters'] = {}
+    cache = globals()['sentence_splitters']
+
+    sbd_cache_key = f'sbd_{assumed_language}'
+    if sbd_cache_key not in cache:
+        cache[sbd_cache_key] = pysbd.Segmenter(language=assumed_language, clean=False)
+    sbd = cache[sbd_cache_key]
+
+    return sbd.segment(text)
+
+def normalize_whitespace(text: str) -> str:
+    return patterns["normalize_whitespace"].sub(' ', text).strip()
+
+def split_sentences_to_token_count(text: str,
+                                   target_max_length: int,
+                                   tok) -> list[tuple[str,list[int]]]:
+    language = guess_language(text)
+    raw_sents = split_sentences(text, language)
+
+    # normalize and drop any empties
+    cleaned = [normalize_whitespace(s) for s in raw_sents if s.strip()]
+
+    output = []
+    for s in cleaned:
+        token_ids = tok.encode(s, add_special_tokens=False)
+        if len(token_ids) <= target_max_length:
+            output.append((s, token_ids))
+            continue
+
+        # --- oversized chunk!
+        # SBD will refuse to split multi-sentence quotes and parentheticals.
+        # try to unwrap quotes/parens and re-split
+        unwrapped = False
+        for open_ch, close_ch in [('"', '"'), ('“', '”'), ("'", "'"), ('(', ')'), ('[', ']')]:
+            if s.startswith(open_ch) and s.endswith(close_ch):
+                inner = s[len(open_ch):-len(close_ch)]
+                # re-split the inner text
+                for sub in split_sentences(inner, language):
+                    sub_clean = normalize_whitespace(sub)
+                    if not sub_clean:
+                        continue
+                    sub_tokens = tok.encode(sub_clean, add_special_tokens=False)
+                    output.append((sub_clean, sub_tokens))
+                unwrapped = True
+                break
+
+        if unwrapped:
+            continue
+
+        # --- fallback: brute-force split on ASCII . ? ! + space
+        parts = re.split(r'(?<=[\.?!])\s+', s)
+        if len(parts) > 1:
+            for sub in parts:
+                sub_clean = normalize_whitespace(sub)
+                if not sub_clean:
+                    continue
+                sub_tokens = tok.encode(sub_clean, add_special_tokens=False)
+                # if still too big, we could recurse—but this should catch most
+                output.append((sub_clean, sub_tokens))
+        else:
+            # give up and accept the giant sentence
+            output.append((s, token_ids))
+
+    return output
+# ---------------------------------------------------------
+# 3.  Work out the *content* budget once
 # ---------------------------------------------------------
 max_content_tokens = _max_tokens - fixed_over
 if max_content_tokens <= 0:
     plpy.error(f"DOCUMENT_PREFIX '{prefix}' exceeds token budget {_max_tokens}")
 
 # ---------------------------------------------------------
-# 3.  Pre-tokenise every sentence once
+# 4.  Split to sentences, pre-tokenising every sentence
 # ---------------------------------------------------------
-doc = nlp(_body)
-sentence_tokens = [
-    (s.text.strip(),
-     tok.encode(s.text.strip(), add_special_tokens=False))
-    for s in doc.sents if s.text.strip()
-]
+sentence_tokens = split_sentences_to_token_count(_body, max_content_tokens, tok)
 
 if sum(len(t) for _, t in sentence_tokens) < _min_token_threshold:
     return None
 
 # ---------------------------------------------------------
-# 4.  Chunk loop
+# 5.  Chunk loop
 # ---------------------------------------------------------
 chunks          = []
 prev_sentences  = []           # context for overlap
@@ -174,8 +248,15 @@ while i < len(sentence_tokens):
                 chunk_tokens += tlen
                 i += 1
             elif _truncate_long_sentences:
+                warning_threshold = 800
+                if tlen > warning_threshold:
+                    plpy.notice(f'Post ID: {_post_id}     Link: {_permlink}')
+                    plpy.notice(f'Truncating long sentence of {tlen} tokens to {max_content_tokens}')
+                    plpy.notice(f'Sentence is: {txt}')
                 trunc_ids = ids[:max_content_tokens]
                 trunc_txt = tok.decode(trunc_ids)
+                if tlen > warning_threshold:
+                    plpy.notice(f'Truncated to: {trunc_txt}')
                 chunk.extend([(trunc_txt, trunc_ids)])
                 added_stack.append({'txt': trunc_txt,
                                     'ids': trunc_ids,
@@ -215,25 +296,35 @@ while i < len(sentence_tokens):
         chunk_tokens += tlen
         i += 1
 
-    # ---- Phase 4:  Verify & trim until the *real* encode fits ----
-    def encode_len(full_text: str) -> int:
-        # *One* encode() per check – still cheap
-        return len(tok.encode(full_text, add_special_tokens=True))
+    # ---- Phase 4:  verify & trim until the real encode fits ----
+    def encode_len(txt: str) -> int:
+        return len(tok.encode(txt, add_special_tokens=True))
 
     full_txt = prefix + " ".join(t for t, _ in chunk)
+
     while encode_len(full_txt) > _max_tokens:
         if not added_stack:
             plpy.error("Internal error: no sentence left to pop but still long")
 
-        last = added_stack.pop()          # last *added*, regardless of order
+        last = added_stack.pop()          # most-recently-added
         chunk.remove((last['txt'], last['ids']))
 
-        if last['src'] == 'new':
-            # rewind cursor so the popped sentence becomes the next candidate
-            i -= 1
-
-        if not chunk:
-            plpy.error("A single sentence exceeds the hard limit; aborting.")
+        if len(chunk) == 0:
+            # last['ids'] is the ONLY remaining content; chop it token-by-token
+            ids = last['ids'][:]
+            while ids and encode_len(prefix + tok.decode(ids)) > _max_tokens:
+                ids.pop()                 # drop ONE token-id
+            if not ids:
+                plpy.error("Even one token would overflow; aborting.")
+            # rebuild chunk with the shrunken sentence
+            shrunk_txt = tok.decode(ids)
+            chunk.append((shrunk_txt, ids))
+            # push a synthetic entry so we could shrink further if still needed
+            added_stack.append({'txt': shrunk_txt, 'ids': ids, 'src': 'new'})
+        else:
+            # if the popped item came from fresh content we must re-process it
+            if last['src'] == 'new':
+                i -= 1                    # rewind so the next chunk sees it
 
         full_txt = prefix + " ".join(t for t, _ in chunk)
 
@@ -247,3 +338,58 @@ while i < len(sentence_tokens):
 
 return chunks
 $$;
+GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner      WITH GRANT OPTION;
+
+
+/* ======================================================================
+   3.  preprocess_post – calls new chunk_post
+   ===================================================================== */
+CREATE OR REPLACE FUNCTION preprocess_post(
+    _post_body  TEXT,
+    _post_id INTEGER,
+    _permlink TEXT,
+    _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
+    _max_tokens     INTEGER      DEFAULT 512,
+    _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
+    _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
+    _max_chunks     INTEGER      DEFAULT NULL,
+    _truncate_long_sentences BOOLEAN DEFAULT TRUE,
+    _document_prefix TEXT        DEFAULT 'passage: ',
+    _min_token_threshold INT     DEFAULT 75
+)
+RETURNS TEXT[]                    -- NULL ➜ post rejected
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+    __cleaned TEXT;
+    __chunks  TEXT[];
+BEGIN
+    __cleaned := post_clean_content(_post_body);
+    IF __cleaned IS NULL OR length(__cleaned)=0 THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT chunk_post(
+               __cleaned,
+               _post_id,
+               _permlink,
+               _tokenizer_name,
+               _max_tokens,
+               _min_new_ratio,
+               _lang_model,
+               _max_chunks,
+               _truncate_long_sentences,
+               _document_prefix,
+               _min_token_threshold
+           )
+      INTO __chunks;
+
+    RETURN __chunks;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner  WITH GRANT OPTION;

@@ -111,14 +111,16 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post( hpd.title || '.\n\n' || hpd.body, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, __max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold ) as bodies
+        SELECT hp.id as post_id, preprocess_post(hpd.title || '.\n\n' || hpd.body, hp.id, '@' || ha.name || '/' || hpl.permlink, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, __max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold) as bodies
         FROM hivemind_app.hive_posts as hp
-                 JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
-        WHERE hp.id=hp.root_id
+        JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
+        JOIN hivemind_app.hive_accounts AS ha ON hp.author_id = ha.id
+        JOIN hivemind_app.hive_permlink_data AS hpl ON hp.permlink_id = hpl.id
+        WHERE hp.id = hp.root_id
         AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-        AND __number_of_workers - (hp.id % __number_of_workers )  = _worker
+        AND __number_of_workers - (hp.id % __number_of_workers)  = _worker
     ), id_and_body_agg AS (
-        SELECT ARRAY_AGG( (p.post_id, p.bodies)::hivesense_app.id_and_post ) as id_and_body
+        SELECT ARRAY_AGG((p.post_id, p.bodies)::hivesense_app.id_and_post) as id_and_body
         FROM posts p
         WHERE p.bodies IS NOT NULL
     ), embeddings AS (
