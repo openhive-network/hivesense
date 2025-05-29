@@ -17,10 +17,6 @@ install_pgai() {
     popd
 }
 
-install_langchain() {
-  python3.12 -m pip install --break-system-packages langchain
-}
-
 install_packages() {
   apt-get update
   /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
@@ -31,11 +27,29 @@ install_packages() {
   apt-get install -y postgresql-plpython3-17
   apt-get install -y curl
 
-  pip3 install --break-system-packages transformers spacy
-  python3 -m spacy download xx_sent_ud_sm --break-system-packages
-  huggingface-cli download intfloat/multilingual-e5-base
+  pip3 install --break-system-packages pysbd
+}
+
+install_tokenizer() {
+  pip3 install --break-system-packages tokenizers
+
+  mkdir -p /home/hived/tokenizer-files
+  cat << EOF > /tmp/download-tokenizer-files.py
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="intfloat/multilingual-e5-base",
+    local_dir="/home/hived/tokenizer-files/e5-base",
+    allow_patterns=[
+      "tokenizer.json"
+    ]
+)
+EOF
+  python3 /tmp/download-tokenizer-files.py
+  rm /tmp/download-tokenizer-files.py
+  chown -R hived.users /home/hived/tokenizer-files
 }
 
 install_packages
 install_pgai
-install_langchain
+install_tokenizer
