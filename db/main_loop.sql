@@ -65,7 +65,7 @@ BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
     -- will RAISE when hivemind context does not exist
-    SELECT last_completed_block_num FROM hivemind_app.hive_state INTO __hivemind_current_block;
+    SELECT hive.app_get_current_block_num('hivemind_app') INTO __hivemind_current_block;
     SELECT parallel_workers,
            tokenizer_model,
            tokens_per_chunk,
@@ -87,7 +87,6 @@ BEGIN
 
     ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
     ASSERT __number_of_workers > 0 , 'number of workers less than 1';
-
 
     -- hivemind exists
     IF __hivemind_current_block < _first_block_num THEN
@@ -111,12 +110,12 @@ BEGIN
     END IF;
 
     WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post(hpd.title || '.\n\n' || hpd.body, hp.id, '@' || ha.name || '/' || hpl.permlink, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, __max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold) as bodies
+        SELECT hp.id as post_id, preprocess_post(hpd.title || '.\n\n' || hpd.body, hp.id, '[permlink reporting disabled]'/* '@' || ha.name || '/' || hpl.permlink */, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, __max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold) as bodies
         FROM hivemind_app.hive_posts as hp
         JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
-        JOIN hivemind_app.hive_accounts AS ha ON hp.author_id = ha.id
-        JOIN hivemind_app.hive_permlink_data AS hpl ON hp.permlink_id = hpl.id
-        WHERE hp.id = hp.root_id
+        -- JOIN hivemind_app.hive_accounts AS ha ON hp.author_id = ha.id
+        -- JOIN hivemind_app.hive_permlink_data AS hpl ON hp.permlink_id = hpl.id
+        WHERE (hp.root_id = hp.id OR hp.root_id = 0) /* root_id is 0 during massive sync */
         AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
         AND __number_of_workers - (hp.id % __number_of_workers)  = _worker
     ), id_and_body_agg AS (
@@ -327,6 +326,7 @@ BEGIN
     END IF;
 
     IF _blocks_range IS NULL THEN
+        --RAISE INFO 'block range is null...';
         CONTINUE;
     END IF;
 

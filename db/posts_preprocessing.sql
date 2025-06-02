@@ -51,7 +51,7 @@ CREATE OR REPLACE FUNCTION chunk_post(
     _body TEXT,
     _post_id INTEGER,
     _permlink TEXT,
-    _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
+    _tokenizer_name TEXT DEFAULT 'e5-base',
     _max_tokens     INTEGER      DEFAULT 512,
     _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
     _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
@@ -66,6 +66,7 @@ IMMUTABLE
 AS $$
 import re, plpy
 import pysbd
+from pathlib import Path
 
 # ---------------------------------------------------------
 # 1.  Cache tokenizer, regexes, and fixed overhead
@@ -77,12 +78,16 @@ key = (_tokenizer_name, _lang_model, _document_prefix)
 cache = globals()['chunk_post_cache']
 
 if key not in cache:
-    from transformers import AutoTokenizer
+    from tokenizers import Tokenizer
 
-    tokenizer  = AutoTokenizer.from_pretrained(_tokenizer_name)
+    root = Path("/home/hived/tokenizer-files") / _tokenizer_name          # <-- mount or COPY here
+    if (root / "tokenizer.json").exists():               # JSON-BPE (GPT/Qwen/etc.)
+        tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
+    else:
+        plpy.error(f"No tokenizer.json found, please place (or bind-mount) the appropriate file in {str(root)}") 
 
     prefix_ids = tokenizer.encode(_document_prefix or '', add_special_tokens=False)
-    specials   = tokenizer.num_special_tokens_to_add(pair=False)  # typically 2
+    specials   = tokenizer.num_special_tokens_to_add(is_pair=False)  # typically 2
 
     patterns = {
         "normalize_whitespace": re.compile(r'\s+'),
@@ -164,7 +169,7 @@ def split_sentences_to_token_count(text: str,
 
     output = []
     for s in cleaned:
-        token_ids = tok.encode(s, add_special_tokens=False)
+        token_ids = tok.encode(s, add_special_tokens=False).ids
         if len(token_ids) <= target_max_length:
             output.append((s, token_ids))
             continue
@@ -181,7 +186,7 @@ def split_sentences_to_token_count(text: str,
                     sub_clean = normalize_whitespace(sub)
                     if not sub_clean:
                         continue
-                    sub_tokens = tok.encode(sub_clean, add_special_tokens=False)
+                    sub_tokens = tok.encode(sub_clean, add_special_tokens=False).ids
                     output.append((sub_clean, sub_tokens))
                 unwrapped = True
                 break
@@ -196,7 +201,7 @@ def split_sentences_to_token_count(text: str,
                 sub_clean = normalize_whitespace(sub)
                 if not sub_clean:
                     continue
-                sub_tokens = tok.encode(sub_clean, add_special_tokens=False)
+                sub_tokens = tok.encode(sub_clean, add_special_tokens=False).ids
                 # if still too big, we could recurse—but this should catch most
                 output.append((sub_clean, sub_tokens))
         else:
@@ -298,7 +303,7 @@ while i < len(sentence_tokens):
 
     # ---- Phase 4:  verify & trim until the real encode fits ----
     def encode_len(txt: str) -> int:
-        return len(tok.encode(txt, add_special_tokens=True))
+        return len(tok.encode(txt, add_special_tokens=True).ids)
 
     full_txt = prefix + " ".join(t for t, _ in chunk)
 
@@ -349,7 +354,7 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _post_body  TEXT,
     _post_id INTEGER,
     _permlink TEXT,
-    _tokenizer_name TEXT DEFAULT 'intfloat/multilingual-e5-base',
+    _tokenizer_name TEXT DEFAULT 'e5-base',
     _max_tokens     INTEGER      DEFAULT 512,
     _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
     _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
