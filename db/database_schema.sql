@@ -60,14 +60,23 @@ CREATE TABLE IF NOT EXISTS version(
 
 -- extend to public, to find vector from pgvector
 EXECUTE format( 'SET SEARCH_PATH TO %s, public', __schema_name );
-
 EXECUTE format($$
-            CREATE TABLE IF NOT EXISTS posts_vectors
-            (
-                post_id INT NOT NULL,
-                embedding vector( %s ) NOT NULL
-            );
-            $$, __vector_size
+    CREATE TABLE IF NOT EXISTS posts_vectors
+    (
+        post_id      INT NOT NULL,
+        chunk_number INT NOT NULL,
+        embedding    vector(%s) NOT NULL,
+        PRIMARY KEY (post_id, chunk_number)
+    );
+    $$, __vector_size
+);
+
+-- This table will hold, for every post_id that we generate embeddings for,
+-- the total number of tokens in that post.  We insert one row per post_id.
+CREATE TABLE IF NOT EXISTS hivesense_app.post_data
+(
+    post_id         INT PRIMARY KEY,
+    number_of_tokens INT NOT NULL
 );
 
 -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'

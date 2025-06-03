@@ -11,6 +11,20 @@ CREATE TYPE hivesense_app.post_and_vector AS (
     vec vector
 );
 
+DROP TYPE IF EXISTS hivesense_app.id_and_post_chunk CASCADE;
+CREATE TYPE hivesense_app.id_and_post_chunk AS (
+    post_id     INT,
+    chunk_text  TEXT,
+    chunk_number INT
+);
+
+DROP TYPE IF EXISTS hivesense_app.post_and_vector_chunk CASCADE;
+CREATE TYPE hivesense_app.post_and_vector_chunk AS (
+    post_id      INT,
+    chunk_number INT,
+    vec          vector -- same dimension as before
+);
+
 CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model             TEXT,
     input_text        TEXT,
@@ -49,15 +63,15 @@ $$;
 -- batch version of pga ollama embed
 -- because it uses python, then only super user can be owner
 -- TODO(mickiewicz@syncad.com) create pull request with the function for pgai
-DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, hivesense_app.id_and_post [], text, text, jsonb);
+DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb);
 CREATE FUNCTION hivesense_app.ollama_embed(
     model               TEXT,
-    posts               hivesense_app.id_and_post[],
+    posts               hivesense_app.id_and_post_chunk[],
     host                TEXT          DEFAULT NULL::text,
     keep_alive          TEXT          DEFAULT NULL::text,
     embedding_options   JSONB         DEFAULT NULL::jsonb
 )
-RETURNS hivesense_app.post_and_vector[]
+RETURNS hivesense_app.post_and_vector_chunk[]
 LANGUAGE plpython3u
 IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
@@ -100,11 +114,15 @@ AS $BODY$
     # — flatten all (post_id, chunk) pairs —
     flat_texts    = []
     flat_post_ids = []
-    for post in posts:
-        pid = post['post_id']
-        for chunk in post['body']:
-            flat_texts.append(chunk)
+    flat_chunk_numbers = []
+    if posts is not None:
+        for post in posts:
+            pid     = post['post_id']
+            ctext   = post['chunk_text']
+            cnumber = post['chunk_number']
+            flat_texts.append(ctext)
             flat_post_ids.append(pid)
+            flat_chunk_numbers.append(cnumber)
 
     embeddings  = []
     total       = len(flat_texts)
@@ -115,6 +133,7 @@ AS $BODY$
         end         = min(start + max_batch, total)
         batch_texts = flat_texts[start:end]
         batch_pids  = flat_post_ids[start:end]
+        batch_nums  = flat_chunk_numbers[start:end]
 
         # retry the entire batch up to max_retries
         resp = None
@@ -139,11 +158,14 @@ AS $BODY$
 
         # unpack the embeddings array
         for idx, emb in enumerate(resp.get("embeddings", [])):
-            embeddings.append((batch_pids[idx], emb))
+            pid   = batch_pids[idx]
+            cnum  = batch_nums[idx]
+            # append a triple (post_id, chunk_number, emb_vector)
+            embeddings.append((pid, cnum, emb))
 
     return embeddings
 $BODY$;
 
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post [], text, text, jsonb) TO haf_admin WITH GRANT OPTION;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post [], text, text, jsonb) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post [], text, text, jsonb) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO haf_admin WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO pg_database_owner WITH GRANT OPTION;

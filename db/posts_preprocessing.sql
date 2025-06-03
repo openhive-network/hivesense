@@ -47,6 +47,13 @@ $$;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION post_clean_content(TEXT) TO pg_database_owner     WITH GRANT OPTION;
 
+-- This composite will let us return both (TEXT[] chunks, INT token_count).
+DROP TYPE IF EXISTS hivesense_app.post_preprocess_result CASCADE;
+CREATE TYPE hivesense_app.post_preprocess_result AS (
+    chunks          TEXT[],   -- the array of chunk‐strings, exactly as before
+    token_count     INT       -- total number of tokens in the original post
+);
+
 CREATE OR REPLACE FUNCTION chunk_post(
     _body TEXT,
     _post_id INTEGER,
@@ -60,7 +67,7 @@ CREATE OR REPLACE FUNCTION chunk_post(
     _document_prefix TEXT        DEFAULT 'passage: ',
     _min_token_threshold INT     DEFAULT 75        -- reject very short posts
 )
-RETURNS TEXT[]
+RETURNS hivesense_app.post_preprocess_result
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
@@ -221,7 +228,11 @@ if max_content_tokens <= 0:
 # ---------------------------------------------------------
 sentence_tokens = split_sentences_to_token_count(_body, max_content_tokens, tok)
 
-if sum(len(t) for _, t in sentence_tokens) < _min_token_threshold:
+# here is our total token count for the entire (cleaned) post:
+__token_count = sum(len(ids) for _txt, ids in sentence_tokens)
+
+if __token_count < _min_token_threshold:
+    # returns NULL if the post is “too short”
     return None
 
 # ---------------------------------------------------------
@@ -341,7 +352,8 @@ while i < len(sentence_tokens):
     if _max_chunks is not None and len(chunks) >= _max_chunks:
         break
 
-return chunks
+# plpy.notice(f"chunked post {_post_id} with token count {__token_count}")
+return (chunks, __token_count)
 $$;
 GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner      WITH GRANT OPTION;
@@ -363,36 +375,44 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _document_prefix TEXT        DEFAULT 'passage: ',
     _min_token_threshold INT     DEFAULT 75
 )
-RETURNS TEXT[]                    -- NULL ➜ post rejected
+RETURNS hivesense_app.post_preprocess_result -- NULL ➜ post rejected
 LANGUAGE plpgsql
 IMMUTABLE
 PARALLEL SAFE
 AS $$
 DECLARE
     __cleaned TEXT;
-    __chunks  TEXT[];
+    __result  hivesense_app.post_preprocess_result;
 BEGIN
-    __cleaned := post_clean_content(_post_body);
+    __cleaned := hivesense_app.post_clean_content(_post_body);
     IF __cleaned IS NULL OR length(__cleaned)=0 THEN
         RETURN NULL;
     END IF;
 
-    SELECT chunk_post(
-               __cleaned,
-               _post_id,
-               _permlink,
-               _tokenizer_name,
-               _max_tokens,
-               _min_new_ratio,
-               _lang_model,
-               _max_chunks,
-               _truncate_long_sentences,
-               _document_prefix,
-               _min_token_threshold
-           )
-      INTO __chunks;
+    SELECT *
+      INTO __result
+    FROM hivesense_app.chunk_post(
+        __cleaned,
+        _post_id,
+        _permlink,
+        _tokenizer_name,
+        _max_tokens,
+        _min_new_ratio,
+        _lang_model,
+        _max_chunks,
+        _truncate_long_sentences,
+        _document_prefix,
+        _min_token_threshold
+    );
 
-    RETURN __chunks;
+
+    -- If the post was too short or filtered out, chunk_post returns NULL
+    IF __result IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    -- 3) Return the composite (chunks, token_count) unchanged
+    RETURN __result;
 END;
 $$;
 

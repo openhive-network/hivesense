@@ -20,8 +20,8 @@ BEGIN
     $$, __llm, __ollama);
 
     EXECUTE format($$
-        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post[])
-            RETURNS hivesense_app.post_and_vector[]
+        CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post_chunk[])
+            RETURNS hivesense_app.post_and_vector_chunk[]
             IMMUTABLE
             LANGUAGE plpgsql
             PARALLEL SAFE
@@ -105,46 +105,125 @@ BEGIN
     --END IF;
 
     IF _logs THEN
-        RAISE NOTICE 'Hivesense % is attempting to process a block range: <%, %>', _worker, _first_block_num, _last_block_num;
+        RAISE NOTICE 'Hivesense % is processing block range: <%, %>', _worker, _first_block_num, _last_block_num;
         __start_ts := clock_timestamp();
     END IF;
 
-    WITH posts AS (
-        SELECT hp.id as post_id, preprocess_post(hpd.title || '.\n\n' || hpd.body, hp.id, '[permlink reporting disabled]'/* '@' || ha.name || '/' || hpl.permlink */, __tokenizer_name, __max_tokens, __min_new_ratio, __lang_model, __max_embeddings_per_post, TRUE, __doc_prefix, __min_token_threshold) as bodies
-        FROM hivemind_app.hive_posts as hp
-        JOIN hivemind_app.hive_post_data as hpd ON hpd.id = hp.id
-        -- JOIN hivemind_app.hive_accounts AS ha ON hp.author_id = ha.id
-        -- JOIN hivemind_app.hive_permlink_data AS hpl ON hp.permlink_id = hpl.id
-        WHERE (hp.root_id = hp.id OR hp.root_id = 0) /* root_id is 0 during massive sync */
-        AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-        AND __number_of_workers - (hp.id % __number_of_workers)  = _worker
-    ), id_and_body_agg AS (
-        SELECT ARRAY_AGG((p.post_id, p.bodies)::hivesense_app.id_and_post) as id_and_body
+    WITH
+    --------------------------------------------------------------------------------
+    -- (1) Call preprocess_post → returns composite (chunks TEXT[], token_count INT)
+    --------------------------------------------------------------------------------
+    posts AS (
+        SELECT
+            hp.id          AS post_id,
+            pp.chunks      AS bodies,
+            pp.token_count AS token_count
+        FROM hivemind_app.hive_posts AS hp
+        JOIN hivemind_app.hive_post_data AS hpd
+          ON hpd.id = hp.id
+
+        -- LATERAL subselect to capture both fields in one go:
+        CROSS JOIN LATERAL (
+          SELECT
+            (tmp).chunks      AS chunks,
+            (tmp).token_count AS token_count
+          FROM (
+            SELECT preprocess_post(
+                     hpd.title || '.\n\n' || hpd.body,
+                     hp.id,
+                     '[permlink reporting disabled]',
+                     __tokenizer_name,
+                     __max_tokens,
+                     __min_new_ratio,
+                     __lang_model,
+                     __max_embeddings_per_post,
+                     TRUE,                 -- _truncate_long_sentences
+                     __doc_prefix,
+                     __min_token_threshold
+                   ) AS tmp
+          ) AS unpacked
+        ) AS pp(chunks, token_count)
+
+        WHERE (hp.root_id = hp.id OR hp.root_id = 0)
+          AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
+          AND __number_of_workers - (hp.id % __number_of_workers) = _worker
+
+        -- Only keep posts for which preprocess_post returned non‐NULL
+        AND pp.chunks IS NOT NULL
+    ),
+
+    --------------------------------------------------------------------------------
+    -- (2) Insert into post_data(post_id, number_of_tokens)
+    --------------------------------------------------------------------------------
+    insert_post_data AS (
+        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens)
+        SELECT
+            p.post_id,
+            p.token_count
         FROM posts p
-        WHERE p.bodies IS NOT NULL
-    ), embeddings AS (
-        SELECT (id_vector).post_id as post_id, (id_vector).vec as embedding
+        ON CONFLICT (post_id) DO NOTHING
+    ),
+
+    --------------------------------------------------------------------------------
+    -- (3) Explode bodies[] into (post_id, chunk_text, chunk_number)
+    --------------------------------------------------------------------------------
+    post_chunks AS (
+        SELECT
+            p.post_id,
+            p.bodies[idx]      AS chunk_text,
+            (idx - 1)          AS chunk_number
+        FROM posts p
+        CROSS JOIN LATERAL (
+            SELECT generate_subscripts(p.bodies, 1) AS idx
+        ) AS x
+    ),
+
+    --------------------------------------------------------------------------------
+    -- (4) Aggregate into id_and_post_chunk[]
+    --------------------------------------------------------------------------------
+    id_and_body_agg AS (
+        SELECT
+            ARRAY_AGG(
+              (pc.post_id, pc.chunk_text, pc.chunk_number)
+              ::hivesense_app.id_and_post_chunk
+            ) AS id_and_body
+        FROM post_chunks pc
+    ),
+
+    --------------------------------------------------------------------------------
+    -- (5) Call hivesense_embed(id_and_post_chunk[]) → returns post_and_vector_chunk[]
+    --------------------------------------------------------------------------------
+    embeddings AS (
+        SELECT
+            (pv).post_id      AS post_id,
+            (pv).chunk_number AS chunk_number,
+            (pv).vec          AS embedding
         FROM (
-                 SELECT UNNEST(hivesense_embed(ibagg.id_and_body)) AS id_vector
-                 FROM id_and_body_agg ibagg
-                 WHERE CARDINALITY(ibagg.id_and_body) > 0
-             ) AS subquery
-    ), insert_to AS (
-        INSERT INTO hivesense_app.posts_vectors (post_id, embedding)
-            SELECT emb.post_id, emb.embedding
-            FROM embeddings emb
-    ) SELECT (SELECT CARDINALITY(id_and_body) FROM id_and_body_agg ), (SELECT COUNT(*) FROM embeddings) INTO __number_of_posts, __number_of_chunks;
+            SELECT UNNEST(hivesense_app.hivesense_embed(ibagg.id_and_body)) AS pv
+            FROM id_and_body_agg ibagg
+        ) AS subquery
+    ),
 
-    __number_of_posts = COALESCE( __number_of_posts, 0 );
-    __number_of_chunks = COALESCE( __number_of_chunks, 0 );
+    --------------------------------------------------------------------------------
+    -- (6) Insert into posts_vectors(post_id, chunk_number, embedding)
+    --------------------------------------------------------------------------------
+    insert_into_posts_vectors AS (
+        INSERT INTO hivesense_app.posts_vectors (post_id, chunk_number, embedding)
+        SELECT
+            e.post_id,
+            e.chunk_number,
+            e.embedding
+        FROM embeddings e
+    )
 
-    IF _logs THEN
-        __end_ts := clock_timestamp();
-        RAISE NOTICE 'Hivesense % processed block range: <%, %> with % roots posts and % total chunks successfully in % s
-    ', _worker, _first_block_num, _last_block_num, __number_of_posts, __number_of_chunks, (extract(epoch FROM __end_ts - __start_ts));
-    END IF;
+    SELECT
+        (SELECT CARDINALITY(id_and_body) FROM id_and_body_agg),
+        (SELECT COUNT(*)                FROM embeddings)
+  INTO __number_of_posts, __number_of_chunks;
 
-    RETURN __number_of_posts;
+  --RAISE NOTICE 'End of hivesense_block_range_data, % posts, % chunks', __number_of_posts, __number_of_chunks;
+
+  RETURN coalesce(__number_of_posts, 0);
 END;
 $$;
 
