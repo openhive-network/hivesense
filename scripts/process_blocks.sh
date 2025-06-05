@@ -62,10 +62,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+postgres_access(){
+  echo "${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=$1"}"
+}
 POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=hivesense_block_processing"}
-NUMBER_OF_WORKERS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
-LLM="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT llm FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
-OLLAMA_ADDRESS="$(psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -t -c "SELECT ollama FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+NUMBER_OF_WORKERS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+LLM="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT llm FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+OLLAMA_ADDRESS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT ollama FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 
 
 initialize_ollama() {
@@ -128,24 +131,21 @@ initialize_ollama() {
 
 
 
-process_blocks() {
+launch_worker() {
     local n_blocks="${2:-null}"
     local worker=${1}
 
     trap '' SIGINT SIGTERM  # Child ignores signals
 
-    # record the startup time for use in health checks
-    date -uIseconds > /tmp/block_processing_startup_time.txt
-
     setsid bash <<EOF
-    psql "${POSTGRES_ACCESS}${worker}" \
+    psql "$(postgres_access hivesense_worker_${worker})" \
       -v ON_ERROR_STOP=on \
       -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
       -c "\\timing" \
       -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
-      -c "CALL ${HIVESENSE_SCHEMA}.main('${HIVESENSE_SCHEMA}', ${worker}, ${n_blocks});" \
+      -c "CALL ${HIVESENSE_SCHEMA}.worker_loop(${worker}, '${HIVESENSE_SCHEMA}', ${n_blocks});" \
     || \
-    psql "${POSTGRES_ACCESS}${worker}" \
+    psql "$(postgres_access hivesense_worker_${worker})" \
       -v ON_ERROR_STOP=on \
       -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
       -c "\\timing" \
@@ -155,18 +155,47 @@ EOF
     echo "Worker ${worker} stopped"
 }
 
+launch_scheduler() {
+    local n_blocks="${2:-null}"
+    local num_workers=${1}
+
+    trap '' SIGINT SIGTERM  # Child ignores signals
+
+    setsid bash <<EOF
+    psql "$(postgres_access hivesense_scheduler)" \
+      -v ON_ERROR_STOP=on \
+      -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
+      -c "\\timing" \
+      -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
+      -c "CALL ${HIVESENSE_SCHEMA}.scheduler('${HIVESENSE_SCHEMA}', ${num_workers}, ${n_blocks});" \
+    || \
+    psql "$(postgres_access hivesense_scheduler)" \
+      -v ON_ERROR_STOP=on \
+      -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
+      -c "\\timing" \
+      -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
+      -c "SELECT ${HIVESENSE_SCHEMA}.STOPPROCESSING();"
+EOF
+    echo "Scheduler stopped"
+}
+
 initialize_ollama
+
+# record the startup time for use in health checks
+date -uIseconds > /tmp/block_processing_startup_time.txt
+
+launch_scheduler "$NUMBER_OF_WORKERS" "$PROCESS_BLOCK_LIMIT" &
 
 # gen number of workers
 i=1
 while [ "$i" -le "$NUMBER_OF_WORKERS" ]; do
-    process_blocks "$i" "$PROCESS_BLOCK_LIMIT" &
+    launch_worker "$i" "$PROCESS_BLOCK_LIMIT" &
     i=$((i + 1))
 done
 
 terminate_jobs() {
     echo "Breaking HiveSense workers";
-    psql "${POSTGRES_ACCESS}breaker" -v "ON_ERROR_STOP=on" -t -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.stopProcessing()";
+    psql "$(postgres_access hivesense_breaker)" -v "ON_ERROR_STOP=on" -t -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.stopProcessing()";
     wait
 }
 

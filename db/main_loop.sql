@@ -146,7 +146,6 @@ BEGIN
 
         WHERE (hp.root_id = hp.id OR hp.root_id = 0)
           AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-          AND __number_of_workers - (hp.id % __number_of_workers) = _worker
 
         -- Only keep posts for which preprocess_post returned non‐NULL
         AND pp.chunks IS NOT NULL
@@ -331,92 +330,263 @@ BEGIN
 END
 $$;
 
-/** Application entry point, which:
-  - defines its data schema,
-  - creates HAF application context,
-  - starts application main-loop (which iterates infinitely).
-  - To stop it call `stopProcessing();` from another session and commit its trasaction.
+/** Application entry point, which starts application main-loop (which iterates infinitely).
+  To stop it call `stopProcessing();` from another session and commit its trasaction.
 */
-CREATE OR REPLACE PROCEDURE main(
-    IN _appContextBaseName hive.CONTEXT_NAME,
-    IN _worker INT,
-    IN _maxBlockLimit INT = null
+CREATE OR REPLACE PROCEDURE hivesense_app.scheduler(
+    IN  _app_context_base_name  hive.context_name,
+    IN  _workers                INT,
+    IN  _max_block_limit        INT      DEFAULT NULL
 )
 LANGUAGE plpgsql
-AS
-$$
+AS $$
 DECLARE
-  _blocks_range hive.blocks_range := (0,0);
-  __number_of_posts INT;
-  __context_name hive.context_name := _appContextBaseName || _worker;
-  __start_block INT := 0;
-  __breaking_reason break_reason := NULL;
+    __context_name      hive.context_name := _app_context_base_name; -- single context
+    __start_block       INT               := 0;
+    __blocks_range      hive.blocks_range := (0,0);
+    __batch_id          BIGINT;
+    __todo              INT;
+    __breaking_reason   break_reason      := NULL;
+    __blocks            INT;
+    __blocks_per_chunk  INT;
+    __number_of_chunks  INT;
+    __chunks_per_worker INT;
+    __extra             INT;
+    __from_block        INT;
+    __to_block          INT;
 BEGIN
-  SELECT start_block INTO __start_block
-  FROM hivesense_app_status;
+    -- read configured start_block
+    SELECT start_block INTO __start_block
+    FROM   hivesense_app.hivesense_app_status;
 
-  IF _maxBlockLimit != NULL THEN
-    RAISE NOTICE 'Max block limit is specified as: %', _maxBlockLimit;
-  END IF;
-
-  PERFORM allowProcessing();
-  
-  RAISE NOTICE 'Last block processed by application %: %', __context_name, hive.app_get_current_block_num(__context_name);
-
-  RAISE NOTICE 'Entering application main loop...';
-
-  IF hive.app_get_current_block_num(__context_name) < __start_block - 1 THEN
-    PERFORM hive.app_set_current_block_num( __context_name, __start_block - 1 );
-  END IF;
-
-  LOOP
-
-    IF NOT wait_for_start_block( __start_block, _worker, __context_name ) THEN
-        CONTINUE;
+    IF _max_block_limit IS NOT NULL THEN
+        RAISE NOTICE 'Max block limit is specified as: %', _max_block_limit;
     END IF;
 
-    CALL hive.app_next_iteration(
-      __context_name,
-      _blocks_range, 
-      _override_max_batch => NULL, 
-      _limit => _maxBlockLimit);
+    PERFORM allowprocessing();
 
-    __breaking_reason = isBreakingPending( __context_name, _maxBlockLimit, _blocks_range );
-    IF __breaking_reason IS NOT NULL THEN
-        ROLLBACK;
-        IF __breaking_reason = 'BLOCK_LIMIT_REACHED' THEN
-            IF _worker = 1 AND _maxBlockLimit IS NOT NULL AND hive.app_get_current_block_num(__context_name) >= _maxBlockLimit THEN
+    RAISE NOTICE 'Last block processed by application %: %',
+                 __context_name,
+                 hive.app_get_current_block_num(__context_name);
+
+    IF hive.app_get_current_block_num(__context_name) < __start_block - 1 THEN
+        PERFORM hive.app_set_current_block_num(__context_name, __start_block - 1);
+    END IF;
+
+    RAISE NOTICE 'Entering scheduler main loop...';
+
+    LOOP
+        -- honour start-block (wait until irreversible head reaches it)
+        IF NOT wait_for_start_block(__start_block, 1, __context_name) THEN
+            RAISE NOTICE 'Waiting for start block...';
+            PERFORM pg_sleep(0.1);
+            CONTINUE;
+        END IF;
+
+        RAISE NOTICE 'Past start block...';
+        -- request the next range from HAF
+        CALL hive.app_next_iteration(
+            __context_name,
+            __blocks_range,
+            _override_max_batch => NULL,
+            _limit              => _max_block_limit
+        );
+
+        RAISE NOTICE 'App_next_iteration returned';
+
+        -- check global break conditions
+        __breaking_reason := isbreakingpending(
+                                 __context_name,
+                                 _max_block_limit,
+                                 __blocks_range);
+        IF __breaking_reason IS NOT NULL THEN
+            ROLLBACK;
+            IF __breaking_reason = 'BLOCK_LIMIT_REACHED'
+               AND _max_block_limit IS NOT NULL
+               AND hive.app_get_current_block_num(__context_name) >= _max_block_limit THEN
                 CALL ensure_indexes_are_created();
             END IF;
+            RETURN;
         END IF;
-        RETURN;
-    END IF;
 
-    -- some global actions are reserved only for the first worker
-    IF _worker = 1 THEN
-        IF hive.get_current_stage_name(__context_name) = 'live'  THEN
+        -- nothing to do yet
+        IF __blocks_range IS NULL THEN
+            RAISE NOTICE '__blocks_range IS NULL';
+            CONTINUE;
+        END IF;
+
+        -------------------------------------------------------------------
+        -- Split the range into contiguous slices and enqueue one per shard
+        -------------------------------------------------------------------
+        __blocks             := __blocks_range.last_block - __blocks_range.first_block + 1;
+        __chunks_per_worker  := 50;
+        __number_of_chunks   := _workers * __chunks_per_worker;
+        __blocks_per_chunk   := GREATEST(1, CEILING(__blocks / (_workers * __chunks_per_worker)));
+        __extra              := __blocks % __number_of_chunks;      -- first ⟂extra⟂ chunks get +1
+
+        __batch_id := nextval('hivesense_app.batch_seq');
+        __from_block := __blocks_range.first_block;
+
+        RAISE NOTICE 'Splitting range % to %', __blocks_range.first_block, __blocks_range.last_block;
+        WHILE __from_block <= __blocks_range.last_block LOOP
+            -- RAISE NOTICE 'SCHEDULER: computing work for';
+            __to_block := __from_block + __blocks_per_chunk - 1;
+            IF __extra > 0 THEN
+                __to_block := __to_block + 1;
+                __extra := __extra - 1;
+            END IF;
+
+            IF __to_block > __blocks_range.last_block THEN
+                __to_block := __blocks_range.last_block;
+            END IF;
+
+            -- only insert if this worker actually has work
+            IF __to_block >= __from_block THEN
+                RAISE NOTICE 'SCHEDULER: enqueuing work [%, %]', __from_block, __to_block;
+                INSERT INTO hivesense_app.block_tasks(
+                    batch_id,
+                    shard,
+                    first_block,
+                    last_block
+                )
+                VALUES (
+                    __batch_id,
+                    NULL, -- unclaimed
+                    __from_block,
+                    __to_block
+                );
+            END IF;
+
+            __from_block := __to_block + 1;
+        END LOOP;
+        COMMIT; -- we have to commit here so the workers can pick up the tasks
+
+        -------------------------------------------------------------------
+        -- Wait until the whole batch finishes
+        -------------------------------------------------------------------
+        LOOP
+            -- RAISE NOTICE 'SCHEDULER: checking whether all shards are done...';
+            SELECT COUNT(*) INTO __todo
+            FROM   hivesense_app.block_tasks
+            WHERE  batch_id = __batch_id
+              AND  status  <> 'done';
+
+            EXIT WHEN __todo = 0;
+            -- RAISE NOTICE 'SCHEDULER: waiting...';
+            PERFORM pg_sleep(0.1);
+            --PERFORM pg_sleep(5);
+        END LOOP;
+
+        -- clean up the tasks table, the tasks are all done, we don't need to keep that info around forever
+        TRUNCATE hivesense_app.block_tasks;
+
+        -------------------------------------------------------------------
+        -- After the batch, create indexes when appropriate
+        -------------------------------------------------------------------
+        IF hive.get_current_stage_name(__context_name) = 'live' THEN
             CALL ensure_indexes_are_created();
         END IF;
+    END LOOP;
 
-        IF _blocks_range IS NULL THEN
-            -- avoid logging from all workers because it is to verbose
-            RAISE INFO 'Waiting for next block...';
+    ASSERT FALSE, 'Scheduler: unreachable';
+END
+$$;
+
+
+CREATE OR REPLACE PROCEDURE hivesense_app.worker_loop(
+    IN _worker            INT,
+    IN _app_context_name  hive.context_name,
+    IN _max_block_limit   INT DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    __task              RECORD;
+    __done_posts        INT;
+    __breaking_reason   break_reason := NULL;
+BEGIN
+    -- workers run forever until break conditions tell them to exit
+    LOOP
+        ------------------------------------------------------------------
+        -- Try to claim a pending task for this shard
+        ------------------------------------------------------------------
+        -- RAISE NOTICE 'getting new task for worker %', _worker;
+        SELECT task_id,
+               first_block,
+               last_block
+        INTO   __task
+        FROM   hivesense_app.block_tasks
+        WHERE  status = 'pending'
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
+
+        IF NOT FOUND THEN
+            ROLLBACK;
+            -- RAISE NOTICE 'no work right now for worker %', _worker;
+            -- no work right now: check for break & sleep 100 ms
+            __breaking_reason :=
+                isbreakingpending(_app_context_name,
+                                  _max_block_limit,
+                                  NULL);
+            IF __breaking_reason IS NOT NULL THEN
+                RETURN;
+            END IF;
+
+            -- RAISE NOTICE 'worker % is sleeping', _worker;
+            PERFORM pg_sleep(0.1);
+            --PERFORM pg_sleep(5);
+            CONTINUE;
         END IF;
-    END IF;
 
-    IF _blocks_range IS NULL THEN
-        --RAISE INFO 'block range is null...';
-        CONTINUE;
-    END IF;
+        -- IF _blocks_range IS NULL THEN
+        --     RAISE INFO 'block range is null...';
+        --     CONTINUE;
+        -- END IF;
 
-    CALL hivesense_process_blocks(__context_name, _blocks_range, _worker, __number_of_posts);
-    IF  __number_of_posts IS NULL  THEN
-        ROLLBACK;
-        PERFORM pg_sleep( 5 ); -- wait for hivemind
-    END IF;
-  END LOOP;
+        ------------------------------------------------------------------
+        -- Mark task running
+        ------------------------------------------------------------------
+        -- RAISE NOTICE 'worker % marking task as running', _worker;
+        UPDATE hivesense_app.block_tasks
+           SET status     = 'running',
+               shard      = _worker,
+               claimed_at = clock_timestamp()
+         WHERE task_id    = __task.task_id;
 
-  ASSERT FALSE, 'Cannot reach this point';
+        ------------------------------------------------------------------
+        -- Execute the heavy work for this block sub-range
+        ------------------------------------------------------------------
+        -- RAISE NOTICE 'worker % processing block range % to %', _worker, __task.first_block, __task.last_block;
+        SELECT hivesense_block_range_data(
+                   __task.first_block,
+                   __task.last_block,
+                   TRUE,             -- logs
+                   _worker           -- keep original param order
+               )
+               INTO __done_posts;
+
+        RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block, __done_posts;
+        -- If Hivemind isn’t caught up yet → rollback & wait0
+        IF __done_posts IS NULL THEN
+            ROLLBACK;
+            PERFORM pg_sleep(5);
+            CONTINUE;
+        END IF;
+
+        ------------------------------------------------------------------
+        -- Mark task finished
+        ------------------------------------------------------------------
+        UPDATE hivesense_app.block_tasks
+           SET status      = 'done',
+               finished_at = clock_timestamp()
+         WHERE task_id = __task.task_id;
+
+        COMMIT; -- to let the scheduler know we're done
+
+        -- Normal loop continues – next task / check break on next iter
+    END LOOP;
+
+    ASSERT FALSE, 'Worker loop: unreachable';
 END
 $$;
 
