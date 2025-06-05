@@ -354,7 +354,29 @@ DECLARE
     __extra             INT;
     __from_block        INT;
     __to_block          INT;
+    _start_key          BIGINT;
+    _done_key           BIGINT;
+    _ack_key            BIGINT;
+    __shard             INT;
 BEGIN
+    --------------------------------------------------------------------------------
+    -- **At initialization: acquire every start_key_i** so that workers block.
+    --
+    --     We'll define:
+    --       start_key_i := 10_000_000 + i
+    --       done_key_i  := 20_000_000 + i
+    --       ack_key_i   := 30_000_000 + i
+
+    --
+    --     Here, we grab start_key_i and ack_key_i.  done_key_i is left unlocked,
+    --     so that as soon as a worker tries to lock it at loop-top, it succeeds.
+    --------------------------------------------------------------------------------
+    FOR __shard IN 1.._workers LOOP
+        PERFORM pg_advisory_lock(10_000_000 + __shard);  -- hold start_key_i
+        PERFORM pg_advisory_lock(30_000_000 + __shard);  -- hold ack_key_i
+    END LOOP;
+
+    RAISE NOTICE 'Scheduler: start_keys locked for all % workers; entering main loop...', _workers;
     -- read configured start_block
     SELECT start_block INTO __start_block
     FROM   hivesense_app.hivesense_app_status;
@@ -372,6 +394,8 @@ BEGIN
     IF hive.app_get_current_block_num(__context_name) < __start_block - 1 THEN
         PERFORM hive.app_set_current_block_num(__context_name, __start_block - 1);
     END IF;
+
+
 
     RAISE NOTICE 'Entering scheduler main loop...';
 
@@ -461,8 +485,55 @@ BEGIN
         END LOOP;
         COMMIT; -- we have to commit here so the workers can pick up the tasks
 
+        --------------------------------------------------------------------------------
+        -- WAKE ALL WORKERS by dropping each start_key_i
+        --
+        -- After that, each worker will:
+        --   • acquire start_key_i (unblocks them)
+        --   • then (below) will do their FCFS pulls until the queue is empty,
+        --   • then signal back on done_key_i.
+        --------------------------------------------------------------------------------
+        FOR __shard IN 1.._workers LOOP
+            _start_key := 10_000_000 + __shard;
+            PERFORM pg_advisory_unlock(_start_key);
+        END LOOP;
+
+        --------------------------------------------------------------------------------
+        -- Wait for each worker to finish, then ACK it, all in one consistent order:
+        --   1) BLOCK on done_key_i   (i.e. wait until worker UNLOCKs it)
+        --   2) immediately UNLOCK done_key_i  (reset it for next iteration)
+        --   3) UNLOCK  ack_key_i   (tell the worker “I saw your done”)
+        --   4) BLOCK on ack_key_i   (re‐grab it so it’s once again held by scheduler)
+        --   5) Now lock start_key_i so that worker will block at next loop
+        --
+        -- At no point do we do “LOCK(done_key_i); LOCK(start_key_i);”.
+        -- We do it in the order:  LOCK(done_key_i) → UNLOCK(done_key_i) → UNLOCK(ack_key_i) → LOCK(ack_key_i) → LOCK(start_key_i)
+        --------------------------------------------------------------------------------
+        FOR __shard IN 1.._workers LOOP
+          _done_key  := 20_000_000 + __shard;
+          _ack_key   := 30_000_000 + __shard;
+          _start_key := 10_000_000 + __shard;
+
+          -- Wait for worker_i to signal “done”:
+          PERFORM pg_advisory_lock(_done_key);
+
+          -- Immediately drop done_key_i so that next time the worker can LOCK it:
+          PERFORM pg_advisory_unlock(_done_key);
+
+          -- ACK the worker’s “done” by unlocking ack_key_i
+          PERFORM pg_advisory_unlock(_ack_key);
+
+          -- re‐grab ack_key_i so that the next time the worker tries to LOCK it, it will block
+          PERFORM pg_advisory_lock(_ack_key);
+
+          -- Pre‐lock start_key_i again so that the worker will block on it next loop
+          PERFORM pg_advisory_lock(_start_key);
+        END LOOP;
+
         -------------------------------------------------------------------
         -- Wait until the whole batch finishes
+        -- the locks should guarantee that the batch has already finished,
+        -- this is a double-check
         -------------------------------------------------------------------
         LOOP
             -- RAISE NOTICE 'SCHEDULER: checking whether all shards are done...';
@@ -472,7 +543,8 @@ BEGIN
               AND  status  <> 'done';
 
             EXIT WHEN __todo = 0;
-            -- RAISE NOTICE 'SCHEDULER: waiting...';
+            RAISE NOTICE 'SCHEDULER: Error -- scheduler was woken up but job queue is not empty...';
+            RAISE NOTICE 'SCHEDULER: switching to polling...';
             PERFORM pg_sleep(0.1);
             --PERFORM pg_sleep(5);
         END LOOP;
@@ -486,6 +558,12 @@ BEGIN
         IF hive.get_current_stage_name(__context_name) = 'live' THEN
             CALL ensure_indexes_are_created();
         END IF;
+
+        -- At this point, for EVERY i:
+        --   • start_key_i is back under scheduler’s control (since the worker did UNLOCK then we never dropped it again),
+        --   • done_key_i is free (we just dropped it in step 3.E.2),
+        --   • ack_key_i is back under scheduler’s control (we locked it again in 3.E.4).
+        -- Everything is reset for the next side‐by‐side handshake.
     END LOOP;
 
     ASSERT FALSE, 'Scheduler: unreachable';
@@ -504,86 +582,113 @@ DECLARE
     __task              RECORD;
     __done_posts        INT;
     __breaking_reason   break_reason := NULL;
+    _start_key  BIGINT := 10_000_000 + _worker;
+    _done_key   BIGINT := 20_000_000 + _worker;
+    _ack_key    BIGINT := 30_000_000 + _worker;
 BEGIN
     -- workers run forever until break conditions tell them to exit
     LOOP
-        ------------------------------------------------------------------
-        -- Try to claim a pending task for this shard
-        ------------------------------------------------------------------
-        -- RAISE NOTICE 'getting new task for worker %', _worker;
-        SELECT task_id,
-               first_block,
-               last_block
-        INTO   __task
-        FROM   hivesense_app.block_tasks
-        WHERE  status = 'pending'
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1;
+        --------------------------------------------------------------------------------
+        -- Grab done_key_i so scheduler can wait on it later.  This succeeds 
+        -- immediately the very first time (because we left done_key_i unlocked).
+        --------------------------------------------------------------------------------
+        PERFORM pg_advisory_lock(_done_key);
 
-        IF NOT FOUND THEN
-            ROLLBACK;
-            -- RAISE NOTICE 'no work right now for worker %', _worker;
-            -- no work right now: check for break & sleep 100 ms
-            __breaking_reason :=
-                isbreakingpending(_app_context_name,
-                                  _max_block_limit,
-                                  NULL);
-            IF __breaking_reason IS NOT NULL THEN
-                RETURN;
+        --------------------------------------------------------------------------------
+        -- Now block until the scheduler says “go” by unlocking start_key_i.
+        -- As soon as that happens, we acquire start_key_i.
+        --------------------------------------------------------------------------------
+        PERFORM pg_advisory_lock(_start_key);
+
+        --------------------------------------------------------------------------------
+        -- Immediately release start_key_i so it’s available for the next batch.
+        --------------------------------------------------------------------------------
+        PERFORM pg_advisory_unlock(_start_key);
+
+        LOOP
+            ------------------------------------------------------------------
+            -- Try to claim a pending task for this shard
+            ------------------------------------------------------------------
+            -- RAISE NOTICE 'getting new task for worker %', _worker;
+            SELECT task_id,
+                   first_block,
+                   last_block
+            INTO   __task
+            FROM   hivesense_app.block_tasks
+            WHERE  status = 'pending'
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1;
+
+            IF NOT FOUND THEN
+                ROLLBACK;
+                EXIT;
             END IF;
 
-            -- RAISE NOTICE 'worker % is sleeping', _worker;
-            PERFORM pg_sleep(0.1);
-            --PERFORM pg_sleep(5);
-            CONTINUE;
+            -- IF _blocks_range IS NULL THEN
+            --     RAISE INFO 'block range is null...';
+            --     CONTINUE;
+            -- END IF;
+
+            ------------------------------------------------------------------
+            -- Mark task running
+            ------------------------------------------------------------------
+            -- RAISE NOTICE 'worker % marking task as running', _worker;
+            UPDATE hivesense_app.block_tasks
+               SET status     = 'running',
+                   shard      = _worker,
+                   claimed_at = clock_timestamp()
+             WHERE task_id    = __task.task_id;
+
+            ------------------------------------------------------------------
+            -- Execute the heavy work for this block sub-range
+            ------------------------------------------------------------------
+            -- RAISE NOTICE 'worker % processing block range % to %', _worker, __task.first_block, __task.last_block;
+            SELECT hivesense_block_range_data(
+                       __task.first_block,
+                       __task.last_block,
+                       TRUE,             -- logs
+                       _worker           -- keep original param order
+                   )
+                   INTO __done_posts;
+
+            RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block, __done_posts;
+            -- If Hivemind isn’t caught up yet → rollback & wait0
+            IF __done_posts IS NULL THEN
+                ROLLBACK;
+                PERFORM pg_sleep(5);
+                CONTINUE;
+            END IF;
+
+            ------------------------------------------------------------------
+            -- Mark task finished
+            ------------------------------------------------------------------
+            UPDATE hivesense_app.block_tasks
+               SET status      = 'done',
+                   finished_at = clock_timestamp()
+             WHERE task_id = __task.task_id;
+
+            COMMIT; -- to let the scheduler and other workers see our progress
+        END LOOP;
+
+        --------------------------------------------------------------------------------
+        -- We have emptied the queue (or hit break conditions).
+        --     Signal “I’m done” by UNLOCKing done_key_i.
+        --------------------------------------------------------------------------------
+        PERFORM pg_advisory_unlock(_done_key);
+
+        -- Now block on ack_key_i until the scheduler “acks” our done_key_i.
+        PERFORM pg_advisory_lock(_ack_key);
+        -- As soon as the scheduler does `UNLOCK(ack_key_i)`, this returns.
+
+        --------------------------------------------------------------------------------
+        -- Immediately release ack_key_i so that the scheduler can lock it for the next iteration
+        --------------------------------------------------------------------------------
+        PERFORM pg_advisory_unlock(_ack_key);
+
+        __breaking_reason := isbreakingpending(_app_context_name, _max_block_limit, NULL);
+        IF __breaking_reason IS NOT NULL THEN
+          RETURN;
         END IF;
-
-        -- IF _blocks_range IS NULL THEN
-        --     RAISE INFO 'block range is null...';
-        --     CONTINUE;
-        -- END IF;
-
-        ------------------------------------------------------------------
-        -- Mark task running
-        ------------------------------------------------------------------
-        -- RAISE NOTICE 'worker % marking task as running', _worker;
-        UPDATE hivesense_app.block_tasks
-           SET status     = 'running',
-               shard      = _worker,
-               claimed_at = clock_timestamp()
-         WHERE task_id    = __task.task_id;
-
-        ------------------------------------------------------------------
-        -- Execute the heavy work for this block sub-range
-        ------------------------------------------------------------------
-        -- RAISE NOTICE 'worker % processing block range % to %', _worker, __task.first_block, __task.last_block;
-        SELECT hivesense_block_range_data(
-                   __task.first_block,
-                   __task.last_block,
-                   TRUE,             -- logs
-                   _worker           -- keep original param order
-               )
-               INTO __done_posts;
-
-        RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block, __done_posts;
-        -- If Hivemind isn’t caught up yet → rollback & wait0
-        IF __done_posts IS NULL THEN
-            ROLLBACK;
-            PERFORM pg_sleep(5);
-            CONTINUE;
-        END IF;
-
-        ------------------------------------------------------------------
-        -- Mark task finished
-        ------------------------------------------------------------------
-        UPDATE hivesense_app.block_tasks
-           SET status      = 'done',
-               finished_at = clock_timestamp()
-         WHERE task_id = __task.task_id;
-
-        COMMIT; -- to let the scheduler know we're done
-
-        -- Normal loop continues – next task / check break on next iter
     END LOOP;
 
     ASSERT FALSE, 'Worker loop: unreachable';
