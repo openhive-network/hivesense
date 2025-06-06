@@ -6,7 +6,7 @@ RETURNS TEXT
 LANGUAGE plpython3u
 IMMUTABLE
 AS $$
-import re, html
+import re, html, plpy
 from bs4 import BeautifulSoup
 
 if 'post_clean_patterns' not in globals():
@@ -36,8 +36,8 @@ def clean(text: str) -> str:
     # 4) Extract the remaining text and collapse whitespace
     extracted = soup.get_text(separator=' ')
 
-    extracted = patterns["remove_markdown"].sub('', extracted)
     extracted = patterns["remove_markdown_links"].sub(r'\1', extracted)
+    extracted = patterns["remove_markdown"].sub('', extracted)
     extracted = patterns["remove_base64"].sub('', extracted)
     return patterns["remove_unwanted"].sub('', extracted)
 
@@ -106,7 +106,9 @@ if key not in cache:
         # basic CJK Unified Ideographs (U+4E00–U+9FFF)
         "zh_characters": re.compile(r"[\u4E00-\u9FFF]"),
         # Hangul Syllables (U+AC00–U+D7AF)
-        "ko_characters": re.compile(r"[\uAC00-\uD7AF]")
+        "ko_characters": re.compile(r"[\uAC00-\uD7AF]"),
+        # detect when to apply workaround for PySBD bug
+        "catastrophic_backtracking_trigger": re.compile(r"\[[^\]]*\d{5,}[^\]]*\]")
     }
 
     cache[key] = {
@@ -160,7 +162,14 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
         cache[sbd_cache_key] = pysbd.Segmenter(language=assumed_language, clean=False)
     sbd = cache[sbd_cache_key]
 
-    return sbd.segment(text)
+    if patterns["catastrophic_backtracking_trigger"].search(text):
+        plpy.warning(f"Detected possible PySBD catastrophic backtracking situation, using simple regex splitter for this post")
+        # Detected something like "[111 111 111]"
+        # This can trigger the PySBD bug: https://github.com/nipunsadvilkar/pySBD/issues/79
+        # do a simple split instead
+        return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
+    else:
+        return sbd.segment(text)
 
 def normalize_whitespace(text: str) -> str:
     return patterns["normalize_whitespace"].sub(' ', text).strip()

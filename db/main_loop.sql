@@ -109,120 +109,93 @@ BEGIN
         __start_ts := clock_timestamp();
     END IF;
 
-    WITH
-    --------------------------------------------------------------------------------
-    -- (1) Call preprocess_post → returns composite (chunks TEXT[], token_count INT)
-    --------------------------------------------------------------------------------
-    posts AS (
-        SELECT
-            hp.id          AS post_id,
-            pp.chunks      AS bodies,
-            pp.token_count AS token_count
-        FROM hivemind_app.hive_posts AS hp
-        JOIN hivemind_app.hive_post_data AS hpd
-          ON hpd.id = hp.id
+    -- The preprocessing step is pretty expensive.  Way cheaper than generating embeddings, of course, but 
+    -- still more expensive than postgres thinks.  If we're not really careful about our CTEs below, 
+    -- postgresql will happily preprocess posts multiple times.  Instead, we don't let it, explicitly
+    -- preprocessing into a temp table here
+    CREATE TEMP TABLE tmp_posts_to_vectorize (
+        post_id      INT   PRIMARY KEY,
+        bodies       TEXT[],
+        token_count  INT
+    ) ON COMMIT DROP;
 
-        -- LATERAL subselect to capture both fields in one go:
-        CROSS JOIN LATERAL (
-          SELECT
-            (tmp).chunks      AS chunks,
-            (tmp).token_count AS token_count
-          FROM (
-            SELECT preprocess_post(
-                     hpd.title || '.\n\n' || hpd.body,
-                     hp.id,
-                     '[permlink reporting disabled]',
-                     __tokenizer_name,
-                     __max_tokens,
-                     __min_new_ratio,
-                     __lang_model,
-                     __max_embeddings_per_post,
-                     TRUE,                 -- _truncate_long_sentences
-                     __doc_prefix,
-                     __min_token_threshold
-                   ) AS tmp
-          ) AS unpacked
-        ) AS pp(chunks, token_count)
-
-        WHERE (hp.root_id = hp.id OR hp.root_id = 0)
-          AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-
-        -- Only keep posts for which preprocess_post returned non‐NULL
-        AND pp.chunks IS NOT NULL
-    ),
-
-    --------------------------------------------------------------------------------
-    -- (2) Insert into post_data(post_id, number_of_tokens)
-    --------------------------------------------------------------------------------
-    insert_post_data AS (
-        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens)
-        SELECT
-            p.post_id,
-            p.token_count
-        FROM posts p
-        ON CONFLICT (post_id) DO NOTHING
-    ),
-
-    --------------------------------------------------------------------------------
-    -- (3) Explode bodies[] into (post_id, chunk_text, chunk_number)
-    --------------------------------------------------------------------------------
-    post_chunks AS (
-        SELECT
-            p.post_id,
-            p.bodies[idx]      AS chunk_text,
-            (idx - 1)          AS chunk_number
-        FROM posts p
-        CROSS JOIN LATERAL (
-            SELECT generate_subscripts(p.bodies, 1) AS idx
-        ) AS x
-    ),
-
-    --------------------------------------------------------------------------------
-    -- (4) Aggregate into id_and_post_chunk[]
-    --------------------------------------------------------------------------------
-    id_and_body_agg AS (
-        SELECT
-            ARRAY_AGG(
-              (pc.post_id, pc.chunk_text, pc.chunk_number)
-              ::hivesense_app.id_and_post_chunk
-            ) AS id_and_body
-        FROM post_chunks pc
-    ),
-
-    --------------------------------------------------------------------------------
-    -- (5) Call hivesense_embed(id_and_post_chunk[]) → returns post_and_vector_chunk[]
-    --------------------------------------------------------------------------------
-    embeddings AS (
-        SELECT
-            (pv).post_id      AS post_id,
-            (pv).chunk_number AS chunk_number,
-            (pv).vec          AS embedding
-        FROM (
-            SELECT UNNEST(hivesense_app.hivesense_embed(ibagg.id_and_body)) AS pv
-            FROM id_and_body_agg ibagg
-        ) AS subquery
-    ),
-
-    --------------------------------------------------------------------------------
-    -- (6) Insert into posts_vectors(post_id, chunk_number, embedding)
-    --------------------------------------------------------------------------------
-    insert_into_posts_vectors AS (
-        INSERT INTO hivesense_app.posts_vectors (post_id, chunk_number, embedding)
-        SELECT
-            e.post_id,
-            e.chunk_number,
-            e.embedding
-        FROM embeddings e
-    )
-
+    -- Fill tmp_posts_to_vectorize exactly once for each post
+    INSERT INTO tmp_posts_to_vectorize(post_id, bodies, token_count)
     SELECT
-        (SELECT CARDINALITY(id_and_body) FROM id_and_body_agg),
-        (SELECT COUNT(*)                FROM embeddings)
-  INTO __number_of_posts, __number_of_chunks;
+      hp.id,
+      pp.chunks,
+      pp.token_count
+    FROM hivemind_app.hive_posts   AS hp
+    JOIN hivemind_app.hive_post_data AS hpd
+      ON hpd.id = hp.id
 
-  --RAISE NOTICE 'End of hivesense_block_range_data, % posts, % chunks', __number_of_posts, __number_of_chunks;
+    -- Single CROSS JOIN LATERAL that calls preprocess_post exactly once
+    CROSS JOIN LATERAL (
+      SELECT *
+      FROM preprocess_post(
+               hpd.title || '.\n\n' || hpd.body,
+               hp.id,
+               '[permlink disabled]',
+               __tokenizer_name,
+               __max_tokens,
+               __min_new_ratio,
+               __lang_model,
+               __max_embeddings_per_post,
+               TRUE,               -- _truncate_long_sentences
+               __doc_prefix,
+               __min_token_threshold
+             )
+    ) AS pp(chunks, token_count)
 
-  RETURN coalesce(__number_of_posts, 0);
+    WHERE (hp.root_id = hp.id OR hp.root_id = 0)
+      AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
+      AND pp.chunks IS NOT NULL;
+
+
+    -- record the token counts for posterity
+    INSERT INTO hivesense_app.post_data(post_id, number_of_tokens)
+    SELECT post_id, token_count
+    FROM tmp_posts_to_vectorize
+    ON CONFLICT (post_id) DO NOTHING;
+
+    -- Explode bodies[] into chunks
+    WITH post_chunks AS (
+      SELECT
+        post_id,
+        bodies[idx]      AS chunk_text,
+        (idx - 1)        AS chunk_number
+      FROM tmp_posts_to_vectorize
+      CROSS JOIN LATERAL generate_subscripts(bodies, 1) AS idx
+    ), id_and_body_agg AS (
+      SELECT
+        ARRAY_AGG( (pc.post_id, pc.chunk_text, pc.chunk_number)
+                   ::hivesense_app.id_and_post_chunk ) AS id_and_body
+      FROM post_chunks pc
+    ), embeddings AS (
+      SELECT
+        (pv).post_id,
+        (pv).chunk_number,
+        (pv).vec
+      FROM (
+        SELECT UNNEST(hivesense_app.hivesense_embed( ibagg.id_and_body)
+        ) AS pv
+        FROM id_and_body_agg ibagg
+      ) AS subquery
+    ), insert_into_posts_vectors AS (
+      INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding)
+      SELECT e.post_id, e.chunk_number, e.vec
+      FROM embeddings e
+    )
+    SELECT
+      (SELECT CARDINALITY(id_and_body) FROM id_and_body_agg),
+      (SELECT COUNT(*)                FROM embeddings)
+    INTO __number_of_posts, __number_of_chunks;
+
+    -- clean up 
+    DROP TABLE tmp_posts_to_vectorize;
+
+    --RAISE NOTICE 'End of hivesense_block_range_data, % posts, % chunks', __number_of_posts, __number_of_chunks;
+    RETURN coalesce(__number_of_posts, 0);
 END;
 $$;
 
@@ -466,7 +439,7 @@ BEGIN
 
             -- only insert if this worker actually has work
             IF __to_block >= __from_block THEN
-                RAISE NOTICE 'SCHEDULER: enqueuing work [%, %]', __from_block, __to_block;
+                -- RAISE NOTICE 'SCHEDULER: enqueuing work [%, %]', __from_block, __to_block;
                 INSERT INTO hivesense_app.block_tasks(
                     batch_id,
                     shard,
