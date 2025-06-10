@@ -183,7 +183,13 @@ BEGIN
       ) AS subquery
     ), insert_into_posts_vectors AS (
       INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding)
-      SELECT e.post_id, e.chunk_number, e.vec
+      SELECT e.post_id,
+             e.chunk_number,
+             CASE
+               WHEN hivesense_app.store_halfvec_embeddings()
+               THEN e.vec::public.halfvec
+               ELSE e.vec
+             END
       FROM embeddings e
     )
     SELECT
@@ -335,8 +341,11 @@ BEGIN
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
     -- at a time.  Disable that logging to avoid spamming the log file
-    PERFORM set_config('deadlock_timeout', '5s', true);
-    PERFORM set_config('log_lock_waits',    'off',  true);
+    --
+    -- turns out we need higher privileges to do this, skip for now
+    --
+    -- PERFORM set_config('deadlock_timeout', '5s', true);
+    -- PERFORM set_config('log_lock_waits',    'off',  true);
     --------------------------------------------------------------------------------
     -- **At initialization: acquire every start_key_i** so that workers block.
     --
@@ -567,8 +576,11 @@ BEGIN
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
     -- at a time.  Disable that logging to avoid spamming the log file
-    PERFORM set_config('deadlock_timeout', '5s', true);
-    PERFORM set_config('log_lock_waits',    'off',  true);
+    --
+    -- turns out we need higher privileges to do this, skip for now
+    --
+    -- PERFORM set_config('deadlock_timeout', '5s', true);
+    -- PERFORM set_config('log_lock_waits',    'off',  true);
     -- workers run forever until break conditions tell them to exit
     LOOP
         --------------------------------------------------------------------------------

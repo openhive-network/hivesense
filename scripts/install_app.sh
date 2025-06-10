@@ -15,29 +15,30 @@ print_help () {
     echo
     echo "Allows to setup a database already filled by HAF instance, to work with reputation_tracker application."
     echo "OPTIONS:"
-    echo "  --host=VALUE                         Allows to specify a PostgreSQL host location (defaults to /var/run/postgresql)"
-    echo "  --port=NUMBER                        Allows to specify a PostgreSQL operating port (defaults to 5432)"
-    echo "  --postgres-url=URL                   Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
-    echo "  --swagger-url=URL                    Allows to specify a server URL"
-    echo "  --is_forking=TRUE/FALSE              Allows to specify if app should be forking or not (defaults to true)"
-    echo "  --indexes-only                       Only creates indexes"
-    echo "  --schema-only                        Only creates schema, but not indexes"
-    echo "  --llm=MODEL_NAME                     Choose LLM model (defaults: bge-m3:latest)"
-    echo "  --ollama=OLLAMA_URLS                 Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
-    echo "  --vector_size=NUMBER                 Choose vector size for embeddings (defaults: 768)"
-    echo "  --start_block=NUMBER                 Choose start block to sync (default: 1)"
-    echo "  --parallel_workers=NUMBER            Choose number of parallel contexts that ask OLLAMA"
-    echo "  --embedding_batch_size=NUMBER        The number of texts we ask OLLAMA to generate embeddings for in a single API call"
-    echo "  --tokenizer-model=MODEL_NAME         The tokenizer model, must be compatible with 'llm'"
-    echo "  --tokens_per_chunk=NUMBER            The maximum number of tokens to break long posts into"
-    echo "  --overlap_amount=NUMBER              The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
-    echo "  --sentence_language_model=MODEL_NAME The model to use for detecting sentence breaks"
-    echo "  --use-halfvec-index=TRUE/FALSE       Use HNSW half-precision index (defaults to false)"
-    echo "  --document-prefix=TEXT               Prefix for documents (defaults to 'passage: ')"
-    echo "  --query-prefix=TEXT                  Prefix for queries (defaults to 'query: ')"
-    echo "  --min-token-threshold=INT            Don't generate embeddings for posts with fewer than this number of tokens"
-    echo "  --max-embeddings-per-post            Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
-    echo "  --help                               Display this help screen and exit"
+    echo "  --host=VALUE                          Allows to specify a PostgreSQL host location (defaults to /var/run/postgresql)"
+    echo "  --port=NUMBER                         Allows to specify a PostgreSQL operating port (defaults to 5432)"
+    echo "  --postgres-url=URL                    Allows to specify a PostgreSQL URL (in opposite to separate --host and --port options)"
+    echo "  --swagger-url=URL                     Allows to specify a server URL"
+    echo "  --is_forking=TRUE/FALSE               Allows to specify if app should be forking or not (defaults to true)"
+    echo "  --indexes-only                        Only creates indexes"
+    echo "  --schema-only                         Only creates schema, but not indexes"
+    echo "  --llm=MODEL_NAME                      Choose LLM model (defaults: bge-m3:latest)"
+    echo "  --ollama=OLLAMA_URLS                  Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
+    echo "  --vector_size=NUMBER                  Choose vector size for embeddings (defaults: 768)"
+    echo "  --start_block=NUMBER                  Choose start block to sync (default: 1)"
+    echo "  --parallel_workers=NUMBER             Choose number of parallel contexts that ask OLLAMA"
+    echo "  --embedding_batch_size=NUMBER         The number of texts we ask OLLAMA to generate embeddings for in a single API call"
+    echo "  --tokenizer-model=MODEL_NAME          The tokenizer model, must be compatible with 'llm'"
+    echo "  --tokens_per_chunk=NUMBER             The maximum number of tokens to break long posts into"
+    echo "  --overlap_amount=NUMBER               The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
+    echo "  --sentence_language_model=MODEL_NAME  The model to use for detecting sentence breaks"
+    echo "  --use-halfvec-index=TRUE/FALSE        Use HNSW half-precision index (defaults to false)"
+    echo "  --store-halfvec-embeddings=TRUE/FALSE Use HNSW half-precision index (defaults to false)"
+    echo "  --document-prefix=TEXT                Prefix for documents (defaults to 'passage: ')"
+    echo "  --query-prefix=TEXT                   Prefix for queries (defaults to 'query: ')"
+    echo "  --min-token-threshold=INT             Don't generate embeddings for posts with fewer than this number of tokens"
+    echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
+    echo "  --help                                Display this help screen and exit"
     echo
 }
 
@@ -60,6 +61,7 @@ TOKENS_PER_CHUNK=512
 OVERLAP_AMOUNT='0.15'
 SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
 USE_HALFVEC_INDEX=false
+STORE_HALFVEC_EMBEDDINGS=false
 DOCUMENT_PREFIX='passage: '
 QUERY_PREFIX='query: '
 MIN_TOKEN_THRESHOLD=75
@@ -111,6 +113,9 @@ while [ $# -gt 0 ]; do
         ;;
     --use-halfvec-index=*)
         USE_HALFVEC_INDEX="${1#*=}"
+        ;;
+    --store-halfvec-embeddings=*)
+        STORE_HALFVEC_EMBEDDINGS="${1#*=}"
         ;;
     --document-prefix=*)
         DOCUMENT_PREFIX="${1#*=}"
@@ -183,6 +188,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT};
   SET pg_temp.SENTENCE_LANGUAGE_MODEL TO '${SENTENCE_LANGUAGE_MODEL}';
   SET pg_temp.USE_HALFVEC_INDEX TO ${USE_HALFVEC_INDEX};
+  SET pg_temp.STORE_HALFVEC_EMBEDDINGS TO ${STORE_HALFVEC_EMBEDDINGS};
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
   SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};

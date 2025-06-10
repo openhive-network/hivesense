@@ -67,6 +67,11 @@ RETURNS boolean
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS
 $$ SELECT use_halfvec_index FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
 
+CREATE OR REPLACE FUNCTION hivesense_app.store_halfvec_embeddings()
+RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS
+$$ SELECT store_halfvec_embeddings FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
+
 CREATE OR REPLACE FUNCTION hivesense_app.embedding_dims()
 RETURNS int
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS
@@ -78,7 +83,10 @@ $$
 DECLARE
     dim int := hivesense_app.embedding_dims();
 BEGIN
-    IF hivesense_app.use_halfvec_index() THEN
+    IF hivesense_app.store_halfvec_embeddings() THEN
+        -- column already halfvec
+        RETURN format('embedding <=> $%s::halfvec(%s)', param_pos, dim);
+    ELSIF hivesense_app.use_halfvec_index() THEN
         RETURN format('embedding::halfvec(%1$s) <=> $%2$s::halfvec(%1$s)', dim, param_pos);
     ELSE
         RETURN format('embedding <=> $%s', param_pos);
@@ -93,8 +101,14 @@ $$
 DECLARE
     dim   int     := hivesense_app.embedding_dims();
     half  boolean := hivesense_app.use_halfvec_index();
+    store boolean := hivesense_app.store_halfvec_embeddings();
 BEGIN
-    IF half THEN
+    IF store THEN
+        RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
+        CREATE INDEX IF NOT EXISTS posts_vectors_embedding_half_hnsw
+            ON hivesense_app.posts_vectors
+        USING hnsw (embedding public.halfvec_cosine_ops);
+    ELSIF half THEN
         RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
         EXECUTE format(
           'CREATE INDEX IF NOT EXISTS posts_vectors_embedding_half_hnsw

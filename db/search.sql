@@ -134,7 +134,11 @@ DECLARE
 BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
 
-    SELECT embedding
+    SELECT CASE
+             WHEN hivesense_app.store_halfvec_embeddings()
+                  THEN embedding::public.vector
+             ELSE embedding
+           END
     FROM hivesense_app.posts_vectors
     WHERE post_id = __post_id
     INTO __post_embedding;
