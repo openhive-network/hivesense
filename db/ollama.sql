@@ -38,12 +38,12 @@ PARALLEL SAFE
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    batch_in  hivesense_app.id_and_post[];
-    batch_out hivesense_app.post_and_vector[];
+    batch_in  hivesense_app.id_and_post_chunk[];
+    batch_out hivesense_app.post_and_vector_chunk[];
 BEGIN
-    -- wrap into a single-element id_and_post[] (post_id is ignored downstream)
+    -- wrap into a single-element id_and_post_chunk[] (post_id and chunk_number are ignored downstream)
     batch_in := ARRAY[
-        ROW(1, ARRAY[input_text])::hivesense_app.id_and_post
+        ROW(1, input_text, 1)::hivesense_app.id_and_post_chunk
     ];
 
     -- call the batch endpoint (which always normalizes)

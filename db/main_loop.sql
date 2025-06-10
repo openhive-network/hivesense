@@ -332,6 +332,11 @@ DECLARE
     _ack_key            BIGINT;
     __shard             INT;
 BEGIN
+    -- by default, postgresql logs when threads are blocked on a lock for more than a second.
+    -- we use locks for synchronization, and expect threads to be blocked for at least 3s
+    -- at a time.  Disable that logging to avoid spamming the log file
+    PERFORM set_config('deadlock_timeout', '5s', true);
+    PERFORM set_config('log_lock_waits',    'off',  true);
     --------------------------------------------------------------------------------
     -- **At initialization: acquire every start_key_i** so that workers block.
     --
@@ -559,6 +564,11 @@ DECLARE
     _done_key   BIGINT := 20_000_000 + _worker;
     _ack_key    BIGINT := 30_000_000 + _worker;
 BEGIN
+    -- by default, postgresql logs when threads are blocked on a lock for more than a second.
+    -- we use locks for synchronization, and expect threads to be blocked for at least 3s
+    -- at a time.  Disable that logging to avoid spamming the log file
+    PERFORM set_config('deadlock_timeout', '5s', true);
+    PERFORM set_config('log_lock_waits',    'off',  true);
     -- workers run forever until break conditions tell them to exit
     LOOP
         --------------------------------------------------------------------------------
