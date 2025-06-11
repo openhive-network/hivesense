@@ -65,7 +65,6 @@ done
 postgres_access(){
   echo "${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=$1"}"
 }
-POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=hivesense_block_processing"}
 NUMBER_OF_WORKERS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 LLM="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT llm FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 OLLAMA_ADDRESS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT ollama FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
@@ -138,14 +137,14 @@ launch_worker() {
     trap '' SIGINT SIGTERM  # Child ignores signals
 
     setsid bash <<EOF
-    psql "$(postgres_access hivesense_worker_${worker})" \
+    psql "$(postgres_access "hivesense_worker_${worker}")" \
       -v ON_ERROR_STOP=on \
       -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
       -c "\\timing" \
       -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" \
       -c "CALL ${HIVESENSE_SCHEMA}.worker_loop(${worker}, '${HIVESENSE_SCHEMA}', ${n_blocks});" \
     || \
-    psql "$(postgres_access hivesense_worker_${worker})" \
+    psql "$(postgres_access "hivesense_worker_${worker}")" \
       -v ON_ERROR_STOP=on \
       -v HIVESENSE_SCHEMA="${HIVESENSE_SCHEMA}" \
       -c "\\timing" \
