@@ -37,6 +37,7 @@ print_help () {
     echo "  --document-prefix=TEXT                Prefix for documents (defaults to 'passage: ')"
     echo "  --query-prefix=TEXT                   Prefix for queries (defaults to 'query: ')"
     echo "  --min-token-threshold=INT             Don't generate embeddings for posts with fewer than this number of tokens"
+    echo "  --min-token-search-threshold=INT      Don't return search results for posts with fewer than this number of tokens"
     echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
     echo "  --help                                Display this help screen and exit"
     echo
@@ -65,6 +66,7 @@ STORE_HALFVEC_EMBEDDINGS=false
 DOCUMENT_PREFIX='passage: '
 QUERY_PREFIX='query: '
 MIN_TOKEN_THRESHOLD=75
+MIN_TOKEN_SEARCH_THRESHOLD=0
 MAX_EMBEDINGS_PER_POST=0
 
 while [ $# -gt 0 ]; do
@@ -125,6 +127,9 @@ while [ $# -gt 0 ]; do
         ;;
     --min-token-threshold=*)
         MIN_TOKEN_THRESHOLD="${1#*=}"
+        ;;
+    --min-token-search-threshold=*)
+        MIN_TOKEN_SEARCH_THRESHOLD="${1#*=}"
         ;;
     --max-embeddings-per-post=*)
         MAX_EMBEDINGS_PER_POST="${1#*=}"
@@ -192,6 +197,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
   SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};
+  SET pg_temp.MIN_TOKEN_SEARCH_THRESHOLD TO ${MIN_TOKEN_SEARCH_THRESHOLD};
   SET pg_temp.MAX_EMBEDINGS_PER_POST TO '${MAX_EMBEDINGS_PER_POST}';
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
