@@ -37,30 +37,35 @@ $BODY$;
 
 CREATE OR REPLACE FUNCTION hivesense_block_range_data(
     _first_block_num INT,
-    _last_block_num INT,
-    _logs BOOLEAN,
-    _worker INT
+    _last_block_num  INT,
+    _logs            BOOLEAN,
+    _worker          INT
 )
-RETURNS INT  -- NULL need to wait for hivemind, otherwise number of vectorized posts
+RETURNS INT
 LANGUAGE plpgsql
 VOLATILE
 PARALLEL SAFE
 AS $$
 DECLARE
     __hivemind_current_block INT;
-    __start_ts timestamptz;
-    __end_ts   timestamptz;
-    __number_of_posts INT;
-    __number_of_chunks INT;
+    __start_ts               timestamptz;
+    __end_ts                 timestamptz;
+    __number_of_posts        INT := 0;    -- counter for this run
+    __number_of_chunks       INT := 0;    -- counter for this run
+    __c                      INT;        -- temp for ROW_COUNT
 
-    __number_of_workers INT;
-    __tokenizer_name TEXT;
-    __max_tokens INT;
-    __min_new_ratio REAL;
-    __lang_model TEXT;
-    __doc_prefix TEXT;
-    __min_token_threshold INT;
+    __number_of_workers      INT;
+    __tokenizer_name         TEXT;
+    __max_tokens             INT;
+    __min_new_ratio          REAL;
+    __lang_model             TEXT;
+    __doc_prefix             TEXT;
+    __min_token_threshold    INT;
     __max_embeddings_per_post INT;
+
+    -- for the FOR loop
+    rec RECORD;
+    __prev_block INT;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
@@ -116,20 +121,18 @@ BEGIN
     CREATE TEMP TABLE tmp_posts_to_vectorize (
         post_id      INT   PRIMARY KEY,
         bodies       TEXT[],
-        token_count  INT
+        token_count  INT,
+        block_num    INT
     ) ON COMMIT DROP;
 
-    -- Fill tmp_posts_to_vectorize exactly once for each post
-    INSERT INTO tmp_posts_to_vectorize(post_id, bodies, token_count)
+    INSERT INTO tmp_posts_to_vectorize(post_id, bodies, token_count, block_num)
     SELECT
       hp.id,
       pp.chunks,
-      pp.token_count
+      pp.token_count,
+      hp.block_num
     FROM hivemind_app.hive_posts   AS hp
-    JOIN hivemind_app.hive_post_data AS hpd
-      ON hpd.id = hp.id
-
-    -- Single CROSS JOIN LATERAL that calls preprocess_post exactly once
+    JOIN hivemind_app.hive_post_data AS hpd ON hpd.id = hp.id
     CROSS JOIN LATERAL (
       SELECT *
       FROM preprocess_post(
@@ -146,62 +149,75 @@ BEGIN
                __min_token_threshold
              )
     ) AS pp(chunks, token_count)
-
     WHERE (hp.root_id = hp.id OR hp.root_id = 0)
-      AND hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-      AND pp.chunks IS NOT NULL;
+      AND (
+           hp.block_num_created BETWEEN _first_block_num AND _last_block_num
+        OR hp.block_num          BETWEEN _first_block_num AND _last_block_num
+      );
 
+    -- ◉◉◉ PER-POST LOOP WITH SERIALIZATION ◉◉◉
+    FOR rec IN
+      SELECT post_id, bodies, token_count, block_num
+        FROM tmp_posts_to_vectorize
+    LOOP
+      -- ensure there's a metadata row to lock
+      INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
+      VALUES (rec.post_id,
+              COALESCE(rec.token_count, 0),
+              -1)
+      ON CONFLICT (post_id) DO NOTHING;
 
-    -- record the token counts for posterity
-    INSERT INTO hivesense_app.post_data(post_id, number_of_tokens)
-    SELECT post_id, token_count
-    FROM tmp_posts_to_vectorize
-    ON CONFLICT (post_id) DO NOTHING;
+      -- serialize on this post_id
+      SELECT last_vectors_block
+        INTO __prev_block
+        FROM hivesense_app.post_data
+       WHERE post_id = rec.post_id
+       FOR UPDATE;
 
-    -- Explode bodies[] into chunks
-    WITH post_chunks AS (
-      SELECT
-        post_id,
-        bodies[idx]      AS chunk_text,
-        (idx - 1)        AS chunk_number
-      FROM tmp_posts_to_vectorize
-      CROSS JOIN LATERAL generate_subscripts(bodies, 1) AS idx
-    ), id_and_body_agg AS (
-      SELECT
-        ARRAY_AGG( (pc.post_id, pc.chunk_text, pc.chunk_number)
-                   ::hivesense_app.id_and_post_chunk ) AS id_and_body
-      FROM post_chunks pc
-    ), embeddings AS (
-      SELECT
-        (pv).post_id,
-        (pv).chunk_number,
-        (pv).vec
-      FROM (
-        SELECT UNNEST(hivesense_app.hivesense_embed( ibagg.id_and_body)
-        ) AS pv
-        FROM id_and_body_agg ibagg
-      ) AS subquery
-    ), insert_into_posts_vectors AS (
-      INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding)
-      SELECT e.post_id,
-             e.chunk_number,
-             CASE
-               WHEN hivesense_app.store_halfvec_embeddings()
-               THEN e.vec::public.halfvec
-               ELSE e.vec
-             END
-      FROM embeddings e
-    )
-    SELECT
-      (SELECT CARDINALITY(id_and_body) FROM id_and_body_agg),
-      (SELECT COUNT(*)                FROM embeddings)
-    INTO __number_of_posts, __number_of_chunks;
+      IF rec.block_num > COALESCE(__prev_block, -1) THEN
+        __number_of_posts := __number_of_posts + 1;
 
-    -- clean up 
+        -- delete any prior vectors
+        DELETE FROM hivesense_app.posts_vectors
+         WHERE post_id = rec.post_id;
+
+        -- generate & insert new embeddings
+        INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding)
+        SELECT
+          (pv).post_id,
+          (pv).chunk_number,
+          CASE
+            WHEN hivesense_app.store_halfvec_embeddings()
+            THEN (pv).vec::public.halfvec
+            ELSE (pv).vec
+          END
+        FROM (
+          SELECT UNNEST(
+            hivesense_app.hivesense_embed(
+              ARRAY(
+                SELECT (rec.post_id, rec.bodies[idx], idx-1)
+                       ::hivesense_app.id_and_post_chunk
+                  FROM generate_subscripts(rec.bodies,1) AS idx
+              )
+            )
+          ) AS pv
+        ) AS sub;
+
+        -- count how many chunks we just wrote
+        GET DIAGNOSTICS __c = ROW_COUNT;
+        __number_of_chunks := __number_of_chunks + __c;
+
+        -- bump metadata to block_num
+        UPDATE hivesense_app.post_data
+           SET number_of_tokens   = COALESCE(rec.token_count, 0),
+               last_vectors_block = rec.block_num
+         WHERE post_id = rec.post_id;
+      END IF;
+    END LOOP;
+
     DROP TABLE tmp_posts_to_vectorize;
 
-    --RAISE NOTICE 'End of hivesense_block_range_data, % posts, % chunks', __number_of_posts, __number_of_chunks;
-    RETURN coalesce(__number_of_posts, 0);
+    RETURN COALESCE(__number_of_posts, 0);
 END;
 $$;
 

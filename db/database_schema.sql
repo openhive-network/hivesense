@@ -83,7 +83,8 @@ BEGIN
   CREATE TABLE IF NOT EXISTS hivesense_app.post_data
   (
       post_id         INT PRIMARY KEY,
-      number_of_tokens INT NOT NULL
+      number_of_tokens INT NOT NULL,
+      last_vectors_block INT NOT NULL DEFAULT -1
   );
 
   -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'
