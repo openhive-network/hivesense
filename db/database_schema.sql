@@ -54,6 +54,9 @@ BEGIN
     runtime_hash TEXT
   );
 
+  -- Monotonic sequence that orders every logical operation
+  CREATE SEQUENCE IF NOT EXISTS hivesense_app.sync_seq;
+
   -- extend to public, to find vector from pgvector
   EXECUTE format( 'SET SEARCH_PATH TO %s, public', __schema_name );
   IF __store_halfvec_embeddings THEN
@@ -63,7 +66,8 @@ BEGIN
           post_id      INT NOT NULL,
           chunk_number INT NOT NULL,
           embedding    public.halfvec(%s) NOT NULL,
-          PRIMARY KEY (post_id, chunk_number)
+          sync_seq INT,          -- drawn from hivesense_app.sync_seq
+          PRIMARY KEY (sync_seq, post_id, chunk_number)
       );
     $$, __vector_size);
   ELSE
@@ -73,7 +77,8 @@ BEGIN
           post_id      INT NOT NULL,
           chunk_number INT NOT NULL,
           embedding    vector(%s) NOT NULL,
-          PRIMARY KEY (post_id, chunk_number)
+          sync_seq INT,          -- drawn from hivesense_app.sync_seq
+          PRIMARY KEY (sync_seq, post_id, chunk_number)
       );
     $$, __vector_size);
   END IF;
@@ -158,5 +163,22 @@ CREATE TABLE IF NOT EXISTS hivesense_app.block_tasks (
   finished_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS block_tasks_pending_idx ON hivesense_app.block_tasks (status, shard);
+
+-- Helpful index for “give me everything > after_seq”
+CREATE INDEX IF NOT EXISTS posts_vectors_sync_seq_idx
+    ON hivesense_app.posts_vectors(sync_seq);
+
+-- 2️⃣  Table that records logical deletions
+CREATE TABLE IF NOT EXISTS hivesense_app.deleted_embeddings (
+    post_id  INT     NOT NULL,
+    sync_seq INT     NOT NULL,
+    PRIMARY KEY (sync_seq, post_id)
+);
+
+CREATE INDEX IF NOT EXISTS deleted_embeddings_sync_seq_idx
+    ON hivesense_app.deleted_embeddings(sync_seq);
+
+RESET ROLE;
+
 
 RESET ROLE;

@@ -52,6 +52,7 @@ SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
 docker build -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "${SCRIPTPATH}/.."
 docker build -t "registry.gitlab.syncad.com/hive/hivesense/rewiter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
+docker build -t "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.syncer"  "${SCRIPTPATH}/.."
 
 echo "Build images tag ${TAG}"
 

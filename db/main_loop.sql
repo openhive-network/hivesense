@@ -66,6 +66,7 @@ DECLARE
     -- for the FOR loop
     rec RECORD;
     __prev_block INT;
+    __sync_seq            INT;        -- seq that orders insert / delete ops
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
@@ -175,14 +176,25 @@ BEGIN
        FOR UPDATE;
 
       IF rec.block_num > COALESCE(__prev_block, -1) THEN
+        -- Reserve a sequence value that will identify this logical operation
+        SELECT nextval('hivesense_app.sync_seq') INTO __sync_seq;
+
         __number_of_posts := __number_of_posts + 1;
 
-        -- delete any prior vectors
-        DELETE FROM hivesense_app.posts_vectors
-         WHERE post_id = rec.post_id;
+        -- Was the post previously embedded?  If so, log a delete operation
+        IF EXISTS (
+            SELECT 1 FROM hivesense_app.posts_vectors
+             WHERE post_id = rec.post_id
+        ) THEN
+            DELETE FROM hivesense_app.posts_vectors
+             WHERE post_id = rec.post_id;
+
+            INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
+            VALUES (rec.post_id, __sync_seq);
+        END IF;
 
         -- generate & insert new embeddings
-        INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding)
+        INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding, sync_seq)
         SELECT
           (pv).post_id,
           (pv).chunk_number,
@@ -190,7 +202,8 @@ BEGIN
             WHEN hivesense_app.store_halfvec_embeddings()
             THEN (pv).vec::public.halfvec
             ELSE (pv).vec
-          END
+          END,
+          __sync_seq
         FROM (
           SELECT UNNEST(
             hivesense_app.hivesense_embed(
