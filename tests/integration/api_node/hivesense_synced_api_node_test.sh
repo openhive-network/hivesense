@@ -9,7 +9,7 @@ query_database() {
 }
 
 # 1. check if hivesense is synced
-hivesense_block_num=$(query_database "SELECT current_block_num FROM hafd.contexts WHERE name = 'hivesense_app1'")
+hivesense_block_num=$(query_database "SELECT current_block_num FROM hafd.contexts WHERE name = 'hivesense_app'")
 if [ "$hivesense_block_num" -ne 1000000 ]; then
   echo "Current block num ${hivesense_block_num} != 1000000" >&2
   exit 1

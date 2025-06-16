@@ -7,7 +7,7 @@ wait_for_hivesense_startup() {
     MESSAGE="Waiting for Hivesense to finish processing blocks..."
     HIVEMIND_BLOCK_COMMAND="SELECT last_completed_block_num FROM hivemind_app.hive_state"
     HAF_BLOCK_COMMAND="SELECT consistent_block FROM hafd.hive_state"
-    HIVESENSE_BLOCK_COMMAND="SELECT hive.app_get_current_block_num('hivesense_app1')"
+    HIVESENSE_BLOCK_COMMAND="SELECT hive.app_get_current_block_num('hivesense_app')"
 
     i=0
     while :
