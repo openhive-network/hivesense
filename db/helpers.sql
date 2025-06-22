@@ -107,7 +107,8 @@ BEGIN
         RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
         CREATE INDEX IF NOT EXISTS posts_vectors_embedding_half_hnsw
             ON hivesense_app.posts_vectors
-        USING hnsw (embedding public.halfvec_cosine_ops);
+        USING hnsw (embedding public.halfvec_cosine_ops)
+        WITH (m = 32, ef_construction = 400);
     ELSIF half THEN
         RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
         EXECUTE format(
@@ -118,7 +119,8 @@ BEGIN
         RAISE NOTICE 'Creating full-precision HNSW index (%s-d)…', dim;
         CREATE INDEX IF NOT EXISTS posts_vectors_embedding_hnsw
             ON hivesense_app.posts_vectors
-        USING hnsw (embedding public.vector_cosine_ops);
+        USING hnsw (embedding public.vector_cosine_ops)
+        WITH (m = 32, ef_construction = 400);
     END IF;
 END;
 $$;

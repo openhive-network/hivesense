@@ -31,13 +31,37 @@ DECLARE
     max_posts     int   := LEAST(_limit, 1000);
     -- if _start_post_id=0 we collect immediately; otherwise skip until we see it
     collecting    bool  := (_start_post_id = 0);
-    batch_size    int   := GREATEST(_limit * 5, 50);  -- start with 5×
-    sql           text;
+
+    -- pull headers and defaults
+    req_headers        json;
+    batch_multiplier   int   := 5;     -- default multiplier
+    exploratory_factor int   := 1000;  -- default ef_search
+
+    -- batch size will be set in BEGIN
+    batch_size         int;
+    sql                text;
     __min_search_tokens int;
 BEGIN
+    -- grab the incoming headers JSON (if any)
+    SELECT current_setting('request.headers', true)::json
+      INTO req_headers;
+
+    -- override defaults if headers are present
+    batch_multiplier := COALESCE(
+        (req_headers->>'x-batch-size-multiplier')::int,
+        batch_multiplier
+    );
+    exploratory_factor := COALESCE(
+        (req_headers->>'x-exploratory-factor')::int,
+        exploratory_factor
+    );
+
+    -- initialize batch_size using the (possibly overridden) multiplier
+    batch_size := GREATEST(_limit * batch_multiplier, 50);
+
     -- tune pgvector index parameters
-    PERFORM set_config('ivfflat.probes', '4',    true);
-    PERFORM set_config('hnsw.ef_search',    '1000', true);
+    PERFORM set_config('ivfflat.probes',    '4',                        true);
+    PERFORM set_config('hnsw.ef_search',    exploratory_factor::text,   true);
 
     SELECT min_token_search_threshold
       INTO __min_search_tokens
@@ -47,7 +71,7 @@ BEGIN
     RAISE NOTICE 'In find_nearest_posts_with_embedding(vec, %, %, %, %)', _limit, _exclude_post_id, _observer_id, _start_post_id;
 
     LOOP
-        RAISE NOTICE 'Getting % posts', batch_size;
+        RAISE NOTICE 'Getting % posts (batch_size: %)', batch_size, batch_size;
         sql := format($q$
             SELECT hpv.post_id, %s AS similarity
               FROM hivesense_app.posts_vectors hpv
