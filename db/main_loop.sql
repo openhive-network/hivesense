@@ -69,6 +69,10 @@ DECLARE
     rec RECORD;
     __prev_block INT;
     __sync_seq            INT;        -- seq that orders insert / delete ops
+
+    __lock_start    timestamptz;
+    __lock_end      timestamptz;
+    __wait_interval interval;
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
@@ -106,7 +110,11 @@ BEGIN
     --END IF;
 
     IF _logs THEN
-        RAISE NOTICE 'Hivesense % is processing block range: <%, %>', _worker, _first_block_num, _last_block_num;
+        IF _first_block_num = _last_block_num THEN
+            RAISE NOTICE 'worker % is processing block %', _worker, _first_block_num;
+        ELSE
+            RAISE NOTICE 'worker % is processing block range: <%, %>', _worker, _first_block_num, _last_block_num;
+        END IF;
         __start_ts := clock_timestamp();
     END IF;
 
@@ -159,7 +167,23 @@ BEGIN
     LOOP
       -- grab an transaction‐scoped advisory lock in our own namespace to ensure no other workers
       -- are working on this same post while we are
-      PERFORM pg_advisory_xact_lock(__post_id_lock_namespace, rec.post_id);
+      -- Try to grab the lock immediately
+      IF NOT pg_try_advisory_xact_lock(__post_id_lock_namespace, rec.post_id) THEN
+          -- If it failed, we know there’s contention: measure how long it takes to acquire
+          __lock_start := clock_timestamp();
+          PERFORM pg_advisory_xact_lock(__post_id_lock_namespace, rec.post_id);
+          __lock_end := clock_timestamp();
+
+          -- Compute and log any non-zero wait
+          __wait_interval := __lock_end - __lock_start;
+          IF __wait_interval > '0s' THEN
+              RAISE NOTICE
+                'worker % was blocked waiting to work on post % for %s seconds',
+                _worker,
+                rec.post_id,
+                to_char(EXTRACT(EPOCH FROM __wait_interval), 'FM999999.000');
+          END IF;
+      END IF;
 
       SELECT last_vectors_block
         INTO __prev_block
@@ -422,7 +446,7 @@ BEGIN
             CONTINUE;
         END IF;
 
-        RAISE NOTICE 'Past start block...';
+        -- RAISE NOTICE 'Past start block...';
         -- request the next range from HAF
         CALL hive.app_next_iteration(
             __context_name,
@@ -431,7 +455,7 @@ BEGIN
             _limit              => _max_block_limit
         );
 
-        RAISE NOTICE 'App_next_iteration returned';
+        -- RAISE NOTICE 'App_next_iteration returned';
 
         -- check global break conditions
         __breaking_reason := isbreakingpending(
@@ -477,7 +501,10 @@ BEGIN
         __batch_id := nextval('hivesense_app.batch_seq');
         __from_block := __blocks_range.first_block;
 
-        RAISE NOTICE 'Splitting range % to %', __blocks_range.first_block, __blocks_range.last_block;
+        IF __blocks_range.last_block <> __blocks_range.first_block THEN
+            RAISE NOTICE 'Splitting range % to %', __blocks_range.first_block, __blocks_range.last_block;
+        END IF;
+
         WHILE __from_block <= __blocks_range.last_block LOOP
             -- RAISE NOTICE 'SCHEDULER: computing work for';
             __to_block := __from_block + __blocks_per_chunk - 1;
@@ -630,9 +657,9 @@ BEGIN
     SELECT advisory_lock_namespace_begin INTO __advisory_lock_namespace_begin
     FROM   hivesense_app.hivesense_app_status;
 
-    __start_key_namespace := __advisory_lock_namespace_begin
-    __done_key_namespace := __advisory_lock_namespace_begin + 1
-    __ack_key_namespace := __advisory_lock_namespace_begin + 2
+    __start_key_namespace := __advisory_lock_namespace_begin;
+    __done_key_namespace := __advisory_lock_namespace_begin + 1;
+    __ack_key_namespace := __advisory_lock_namespace_begin + 2;
 
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
@@ -707,7 +734,12 @@ BEGIN
                    )
                    INTO __done_posts;
 
-            RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block, __done_posts;
+            IF __task.last_block = __task.first_block THEN
+                RAISE NOTICE 'worker % processed block % containing % posts', _worker, __task.first_block, __done_posts;
+            ELSE
+                RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block + 1, __done_posts;
+            END IF;
+
             -- If Hivemind isn’t caught up yet → rollback & wait0
             IF __done_posts IS NULL THEN
                 ROLLBACK;
