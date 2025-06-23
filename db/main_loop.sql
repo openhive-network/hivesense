@@ -47,7 +47,6 @@ VOLATILE
 PARALLEL SAFE
 AS $$
 DECLARE
-    __hivemind_current_block INT;
     __start_ts               timestamptz;
     __end_ts                 timestamptz;
     __number_of_posts        INT := 0;    -- counter for this run
@@ -70,8 +69,6 @@ DECLARE
 BEGIN
     ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
 
-    -- will RAISE when hivemind context does not exist
-    SELECT hive.app_get_current_block_num('hivemind_app') INTO __hivemind_current_block;
     SELECT parallel_workers,
            tokenizer_model,
            tokens_per_chunk,
@@ -93,15 +90,6 @@ BEGIN
 
     ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
     ASSERT __number_of_workers > 0 , 'number of workers less than 1';
-
-    -- hivemind exists
-    IF __hivemind_current_block < _first_block_num THEN
-        RETURN NULL;
-    END IF;
-
-    IF __hivemind_current_block < _last_block_num THEN
-        RETURN NULL;
-    END IF;
 
     -- TODO(mickiewicz@syncad.com) when hivemind is not in a live stage then do not process
     -- maybe it is not required because last_completed in enough ?
@@ -160,14 +148,8 @@ BEGIN
     FOR rec IN
       SELECT post_id, bodies, token_count, block_num
         FROM tmp_posts_to_vectorize
+       ORDER BY post_id
     LOOP
-      -- ensure there's a metadata row to lock
-      INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
-      VALUES (rec.post_id,
-              COALESCE(rec.token_count, 0),
-              -1)
-      ON CONFLICT (post_id) DO NOTHING;
-
       -- serialize on this post_id
       SELECT last_vectors_block
         INTO __prev_block
@@ -349,6 +331,7 @@ CREATE OR REPLACE PROCEDURE hivesense_app.scheduler(
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    __hivemind_current_block INT;
     __context_name      hive.context_name := _app_context_base_name; -- single context
     __start_block       INT               := 0;
     __blocks_range      hive.blocks_range := (0,0);
@@ -455,6 +438,17 @@ BEGIN
             CONTINUE;
         END IF;
 
+        -- ── NEW: wait until hivemind has processed through this range ───────────────
+        LOOP
+            SELECT hive.app_get_current_block_num('hivemind_app')
+              INTO __hivemind_current_block;
+            EXIT WHEN __hivemind_current_block >= __blocks_range.last_block;
+            RAISE NOTICE 'Waiting for hivemind to reach block % (currently at %)',
+                         __blocks_range.last_block,
+                         __hivemind_current_block;
+            PERFORM pg_sleep(1);
+        END LOOP;
+
         -------------------------------------------------------------------
         -- Split the range into contiguous slices and enqueue one per shard
         -------------------------------------------------------------------
@@ -499,6 +493,24 @@ BEGIN
 
             __from_block := __to_block + 1;
         END LOOP;
+        --------------------------------------------------------------------------------
+        -- bulk-upsert post_data for every post in this batch
+        --------------------------------------------------------------------------------
+        WITH posts_to_seed AS (
+          SELECT DISTINCT hp.id AS post_id
+          FROM   hivemind_app.hive_posts    hp
+          JOIN   hivemind_app.hive_post_data hpd ON hpd.id = hp.id
+          WHERE  (hp.root_id = hp.id OR hp.root_id = 0)
+            AND (
+                 hp.block_num_created BETWEEN __blocks_range.first_block AND __blocks_range.last_block
+              OR hp.block_num          BETWEEN __blocks_range.first_block AND __blocks_range.last_block
+            )
+        )
+        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
+        SELECT post_id, 0, -1
+          FROM posts_to_seed
+        ON CONFLICT (post_id) DO NOTHING;
+
         COMMIT; -- we have to commit here so the workers can pick up the tasks
 
         --------------------------------------------------------------------------------
