@@ -532,6 +532,7 @@ BEGIN
             EXIT WHEN __todo = 0;
             RAISE NOTICE 'SCHEDULER: Error -- scheduler was woken up but job queue is not empty...';
             RAISE NOTICE 'SCHEDULER: switching to polling...';
+            EXIT WHEN NOT continueProcessing();
             PERFORM pg_sleep(0.1);
             --PERFORM pg_sleep(5);
         END LOOP;
