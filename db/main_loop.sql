@@ -53,14 +53,17 @@ DECLARE
     __number_of_chunks       INT := 0;    -- counter for this run
     __c                      INT;        -- temp for ROW_COUNT
 
-    __number_of_workers      INT;
-    __tokenizer_name         TEXT;
-    __max_tokens             INT;
-    __min_new_ratio          REAL;
-    __lang_model             TEXT;
-    __doc_prefix             TEXT;
-    __min_token_threshold    INT;
-    __max_embeddings_per_post INT;
+    __number_of_workers             INT;
+    __tokenizer_name                TEXT;
+    __max_tokens                    INT;
+    __min_new_ratio                 REAL;
+    __lang_model                    TEXT;
+    __doc_prefix                    TEXT;
+    __min_token_threshold           INT;
+    __max_embeddings_per_post       INT;
+    __advisory_lock_namespace_begin INT;
+
+    __post_id_lock_namespace        INT;
 
     -- for the FOR loop
     rec RECORD;
@@ -76,7 +79,8 @@ BEGIN
            sentence_language_model,
            document_prefix,
            min_token_threshold,
-           max_embeddings_per_post
+           max_embeddings_per_post,
+           advisory_lock_namespace_begin
       INTO __number_of_workers,
            __tokenizer_name,
            __max_tokens,
@@ -84,12 +88,15 @@ BEGIN
            __lang_model,
            __doc_prefix,
            __min_token_threshold,
-           __max_embeddings_per_post
+           __max_embeddings_per_post,
+          __advisory_lock_namespace_begin
     FROM hivesense_app.hivesense_app_status
     WHERE id = 1;
 
     ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
     ASSERT __number_of_workers > 0 , 'number of workers less than 1';
+
+    __post_id_lock_namespace := __advisory_lock_namespace_begin + 3;
 
     -- TODO(mickiewicz@syncad.com) when hivemind is not in a live stage then do not process
     -- maybe it is not required because last_completed in enough ?
@@ -150,12 +157,14 @@ BEGIN
         FROM tmp_posts_to_vectorize
        ORDER BY post_id
     LOOP
-      -- serialize on this post_id
+      -- grab an transaction‐scoped advisory lock in our own namespace to ensure no other workers
+      -- are working on this same post while we are
+      PERFORM pg_advisory_xact_lock(__post_id_lock_namespace, rec.post_id);
+
       SELECT last_vectors_block
         INTO __prev_block
         FROM hivesense_app.post_data
-       WHERE post_id = rec.post_id
-       FOR UPDATE;
+       WHERE post_id = rec.post_id;
 
       IF rec.block_num > COALESCE(__prev_block, -1) THEN
         -- Reserve a sequence value that will identify this logical operation
@@ -331,24 +340,25 @@ CREATE OR REPLACE PROCEDURE hivesense_app.scheduler(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    __hivemind_current_block INT;
-    __context_name      hive.context_name := _app_context_base_name; -- single context
-    __start_block       INT               := 0;
-    __blocks_range      hive.blocks_range := (0,0);
-    __batch_id          BIGINT;
-    __todo              INT;
-    __breaking_reason   break_reason      := NULL;
-    __blocks            INT;
-    __blocks_per_chunk  INT;
-    __number_of_chunks  INT;
-    __chunks_per_worker INT;
-    __extra             INT;
-    __from_block        INT;
-    __to_block          INT;
-    _start_key          BIGINT;
-    _done_key           BIGINT;
-    _ack_key            BIGINT;
-    __shard             INT;
+    __hivemind_current_block        INT;
+    __context_name                  hive.context_name := _app_context_base_name; -- single context
+    __start_block                   INT               := 0;
+    __blocks_range                  hive.blocks_range := (0,0);
+    __batch_id                      BIGINT;
+    __todo                          INT;
+    __breaking_reason               break_reason      := NULL;
+    __blocks                        INT;
+    __blocks_per_chunk              INT;
+    __number_of_chunks              INT;
+    __chunks_per_worker             INT;
+    __extra                         INT;
+    __from_block                    INT;
+    __to_block                      INT;
+    __advisory_lock_namespace_begin INT;
+    __start_key_namespace           INT;
+    __done_key_namespace            INT;
+    __ack_key_namespace             INT;
+    __shard                         INT;
 BEGIN
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
@@ -358,6 +368,15 @@ BEGIN
     --
     -- PERFORM set_config('deadlock_timeout', '5s', true);
     -- PERFORM set_config('log_lock_waits',    'off',  true);
+
+    -- read configured start_block
+    SELECT start_block, advisory_lock_namespace_begin INTO __start_block, __advisory_lock_namespace_begin
+    FROM   hivesense_app.hivesense_app_status;
+
+    __start_key_namespace := __advisory_lock_namespace_begin;
+    __done_key_namespace := __advisory_lock_namespace_begin + 1;
+    __ack_key_namespace := __advisory_lock_namespace_begin + 2;
+
     --------------------------------------------------------------------------------
     -- **At initialization: acquire every start_key_i** so that workers block.
     --
@@ -371,14 +390,11 @@ BEGIN
     --     so that as soon as a worker tries to lock it at loop-top, it succeeds.
     --------------------------------------------------------------------------------
     FOR __shard IN 1.._workers LOOP
-        PERFORM pg_advisory_lock(10_000_000 + __shard);  -- hold start_key_i
-        PERFORM pg_advisory_lock(30_000_000 + __shard);  -- hold ack_key_i
+        PERFORM pg_advisory_lock(__start_key_namespace, __shard);  -- hold start_key_i
+        PERFORM pg_advisory_lock(__ack_key_namespace, __shard);  -- hold ack_key_i
     END LOOP;
 
     RAISE NOTICE 'Scheduler: start_keys locked for all % workers; entering main loop...', _workers;
-    -- read configured start_block
-    SELECT start_block INTO __start_block
-    FROM   hivesense_app.hivesense_app_status;
 
     IF _max_block_limit IS NOT NULL THEN
         RAISE NOTICE 'Max block limit is specified as: %', _max_block_limit;
@@ -522,8 +538,7 @@ BEGIN
         --   • then signal back on done_key_i.
         --------------------------------------------------------------------------------
         FOR __shard IN 1.._workers LOOP
-            _start_key := 10_000_000 + __shard;
-            PERFORM pg_advisory_unlock(_start_key);
+            PERFORM pg_advisory_unlock(__start_key_namespace, __shard);
         END LOOP;
 
         --------------------------------------------------------------------------------
@@ -538,24 +553,21 @@ BEGIN
         -- We do it in the order:  LOCK(done_key_i) → UNLOCK(done_key_i) → UNLOCK(ack_key_i) → LOCK(ack_key_i) → LOCK(start_key_i)
         --------------------------------------------------------------------------------
         FOR __shard IN 1.._workers LOOP
-          _done_key  := 20_000_000 + __shard;
-          _ack_key   := 30_000_000 + __shard;
-          _start_key := 10_000_000 + __shard;
 
           -- Wait for worker_i to signal “done”:
-          PERFORM pg_advisory_lock(_done_key);
+          PERFORM pg_advisory_lock(__done_key_namespace, __shard);
 
           -- Immediately drop done_key_i so that next time the worker can LOCK it:
-          PERFORM pg_advisory_unlock(_done_key);
+          PERFORM pg_advisory_unlock(__done_key_namespace, __shard);
 
           -- ACK the worker’s “done” by unlocking ack_key_i
-          PERFORM pg_advisory_unlock(_ack_key);
+          PERFORM pg_advisory_unlock(__ack_key_namespace, __shard);
 
           -- re‐grab ack_key_i so that the next time the worker tries to LOCK it, it will block
-          PERFORM pg_advisory_lock(_ack_key);
+          PERFORM pg_advisory_lock(__ack_key_namespace, __shard);
 
           -- Pre‐lock start_key_i again so that the worker will block on it next loop
-          PERFORM pg_advisory_lock(_start_key);
+          PERFORM pg_advisory_lock(__start_key_namespace, __shard);
         END LOOP;
 
         -------------------------------------------------------------------
@@ -607,13 +619,21 @@ CREATE OR REPLACE PROCEDURE hivesense_app.worker_loop(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    __task              RECORD;
-    __done_posts        INT;
-    __breaking_reason   break_reason := NULL;
-    _start_key  BIGINT := 10_000_000 + _worker;
-    _done_key   BIGINT := 20_000_000 + _worker;
-    _ack_key    BIGINT := 30_000_000 + _worker;
+    __task                          RECORD;
+    __done_posts                    INT;
+    __breaking_reason               break_reason := NULL;
+    __advisory_lock_namespace_begin INT;
+    __start_key_namespace           INT;
+    __done_key_namespace            INT;
+    __ack_key_namespace             INT;
 BEGIN
+    SELECT advisory_lock_namespace_begin INTO __advisory_lock_namespace_begin
+    FROM   hivesense_app.hivesense_app_status;
+
+    __start_key_namespace := __advisory_lock_namespace_begin
+    __done_key_namespace := __advisory_lock_namespace_begin + 1
+    __ack_key_namespace := __advisory_lock_namespace_begin + 2
+
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
     -- at a time.  Disable that logging to avoid spamming the log file
@@ -628,18 +648,18 @@ BEGIN
         -- Grab done_key_i so scheduler can wait on it later.  This succeeds 
         -- immediately the very first time (because we left done_key_i unlocked).
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_lock(_done_key);
+        PERFORM pg_advisory_lock(__done_key_namespace, _worker);
 
         --------------------------------------------------------------------------------
         -- Now block until the scheduler says “go” by unlocking start_key_i.
         -- As soon as that happens, we acquire start_key_i.
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_lock(_start_key);
+        PERFORM pg_advisory_lock(__start_key_namespace, _worker);
 
         --------------------------------------------------------------------------------
         -- Immediately release start_key_i so it’s available for the next batch.
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(_start_key);
+        PERFORM pg_advisory_unlock(__start_key_namespace, _worker);
 
         LOOP
             ------------------------------------------------------------------
@@ -710,16 +730,16 @@ BEGIN
         -- We have emptied the queue (or hit break conditions).
         --     Signal “I’m done” by UNLOCKing done_key_i.
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(_done_key);
+        PERFORM pg_advisory_unlock(__done_key_namespace, _worker);
 
         -- Now block on ack_key_i until the scheduler “acks” our done_key_i.
-        PERFORM pg_advisory_lock(_ack_key);
+        PERFORM pg_advisory_lock(__ack_key_namespace, _worker);
         -- As soon as the scheduler does `UNLOCK(ack_key_i)`, this returns.
 
         --------------------------------------------------------------------------------
         -- Immediately release ack_key_i so that the scheduler can lock it for the next iteration
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(_ack_key);
+        PERFORM pg_advisory_unlock(__ack_key_namespace, _worker);
 
         __breaking_reason := isbreakingpending(_app_context_name, _max_block_limit, NULL);
         IF __breaking_reason IS NOT NULL THEN
