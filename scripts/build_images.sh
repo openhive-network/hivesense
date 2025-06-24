@@ -51,13 +51,14 @@ set -eu pipefail
 SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
 docker build -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "${SCRIPTPATH}/.."
-docker build -t "registry.gitlab.syncad.com/hive/hivesense/rewiter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
+docker build -t "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewiter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
 docker build -t "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.syncer"  "${SCRIPTPATH}/.."
 
 echo "Build images tag ${TAG}"
 
 if [ -n "${PUSH:-}" ]; then
   docker push "registry.gitlab.syncad.com/hive/hivesense:${TAG}"
-  docker push "registry.gitlab.syncad.com/hive/hivesense/rewiter:${TAG}"
+  docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewiter:${TAG}"
+  docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}"
   echo "Pushed images tag ${TAG}"
 fi
