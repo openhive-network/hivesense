@@ -35,11 +35,10 @@ BEGIN
 END;
 $BODY$;
 
-CREATE OR REPLACE FUNCTION hivesense_block_range_data(
-    _first_block_num INT,
-    _last_block_num  INT,
-    _logs            BOOLEAN,
-    _worker          INT
+CREATE OR REPLACE FUNCTION generate_embeddings_for_posts(
+    _post_ids INT[],
+    _logs     BOOLEAN,
+    _worker   INT
 )
 RETURNS INT
 LANGUAGE plpgsql
@@ -47,100 +46,56 @@ VOLATILE
 PARALLEL SAFE
 AS $$
 DECLARE
-    __start_ts               timestamptz;
-    __end_ts                 timestamptz;
-    __number_of_posts        INT := 0;    -- counter for this run
-    __number_of_chunks       INT := 0;    -- counter for this run
-    __c                      INT;        -- temp for ROW_COUNT
-
-    __number_of_workers             INT;
-    __tokenizer_name                TEXT;
-    __max_tokens                    INT;
-    __min_new_ratio                 REAL;
-    __lang_model                    TEXT;
-    __doc_prefix                    TEXT;
-    __min_token_threshold           INT;
-    __max_embeddings_per_post       INT;
-    __advisory_lock_namespace_begin INT;
-
-    __post_id_lock_namespace        INT;
-
-    -- for the FOR loop
+    __number_of_posts        INT := 0;
+    __number_of_chunks       INT := 0;
+    __c                      INT;
+    __tokenizer_name         TEXT;
+    __max_tokens             INT;
+    __min_new_ratio          REAL;
+    __lang_model             TEXT;
+    __doc_prefix             TEXT;
+    __min_token_threshold    INT;
+    __max_embeddings_per_post INT;
     rec RECORD;
-    __prev_block INT;
-    __sync_seq            INT;        -- seq that orders insert / delete ops
-
-    __lock_start    timestamptz;
-    __lock_end      timestamptz;
-    __wait_interval interval;
+    __sync_seq INT;
 BEGIN
-    ASSERT _first_block_num <= _last_block_num, 'Invalid range of blocks';
-
-    SELECT parallel_workers,
-           tokenizer_model,
+    SELECT tokenizer_model,
            tokens_per_chunk,
            1 - overlap_amount,
            sentence_language_model,
            document_prefix,
            min_token_threshold,
-           max_embeddings_per_post,
-           advisory_lock_namespace_begin
-      INTO __number_of_workers,
-           __tokenizer_name,
+           max_embeddings_per_post
+      INTO __tokenizer_name,
            __max_tokens,
            __min_new_ratio,
            __lang_model,
            __doc_prefix,
            __min_token_threshold,
-           __max_embeddings_per_post,
-          __advisory_lock_namespace_begin
+           __max_embeddings_per_post
     FROM hivesense_app.hivesense_app_status
     WHERE id = 1;
 
-    ASSERT __number_of_workers IS NOT NULL, 'NULL number of workers';
-    ASSERT __number_of_workers > 0 , 'number of workers less than 1';
-
-    __post_id_lock_namespace := __advisory_lock_namespace_begin + 3;
-
-    -- TODO(mickiewicz@syncad.com) when hivemind is not in a live stage then do not process
-    -- maybe it is not required because last_completed in enough ?
-    -- but last completed does not guaranteen index on block_num_created, but maybe this is an edge case
-    --IF hive.get_current_stage_name( 'hivemind_app' ) != 'live' THEN
-    --    RETURN NULL;
-    --END IF;
-
-    IF _logs THEN
-        IF _first_block_num = _last_block_num THEN
-            RAISE NOTICE 'worker % is processing block %', _worker, _first_block_num;
-        ELSE
-            RAISE NOTICE 'worker % is processing block range: <%, %>', _worker, _first_block_num, _last_block_num;
-        END IF;
-        __start_ts := clock_timestamp();
-    END IF;
-
-    -- The preprocessing step is pretty expensive.  Way cheaper than generating embeddings, of course, but 
-    -- still more expensive than postgres thinks.  If we're not really careful about our CTEs below, 
-    -- postgresql will happily preprocess posts multiple times.  Instead, we don't let it, explicitly
-    -- preprocessing into a temp table here
-    CREATE TEMP TABLE tmp_posts_to_vectorize (
-        post_id      INT   PRIMARY KEY,
-        bodies       TEXT[],
-        token_count  INT,
-        block_num    INT
-    ) ON COMMIT DROP;
-
-    INSERT INTO tmp_posts_to_vectorize(post_id, bodies, token_count, block_num)
+    /* =====================================================================
+     * 0️⃣  PRE-PROCESS EVERY POST ONCE
+     *     ---------------------------------
+     *     We call preprocess_post with _min_token_threshold = 0 so we
+     *     *always* get (token_count, chunks[]).  Later we decide whether
+     *     the post is “big enough” (token_count ≥ __min_token_threshold).
+     * ====================================================================*/
+    CREATE TEMP TABLE tmp_pre ON COMMIT DROP AS
     SELECT
-      hp.id,
-      pp.chunks,
-      pp.token_count,
-      hp.block_num
-    FROM hivemind_app.hive_posts   AS hp
-    JOIN hivemind_app.hive_post_data AS hpd ON hpd.id = hp.id
-    CROSS JOIN LATERAL (
-      SELECT *
-      FROM preprocess_post(
-               hpd.title || '.\n\n' || hpd.body,
+        hp.id        AS post_id,
+        hp.block_num,
+        COALESCE(pp.token_count, 0)            AS token_count,
+        COALESCE(pp.chunks, ARRAY[]::TEXT[])   AS chunks
+    FROM   unnest(_post_ids)          AS sel(id)
+    JOIN   hivemind_app.hive_posts     hp  ON hp.id = sel.id
+    LEFT   JOIN LATERAL preprocess_post(
+               /* body ---------------------------------------------------- */
+               (SELECT hpd.title || '.\n\n' || hpd.body
+                  FROM hivemind_app.hive_post_data hpd
+                  WHERE hpd.id = hp.id),
                hp.id,
                '[permlink disabled]',
                __tokenizer_name,
@@ -148,108 +103,139 @@ BEGIN
                __min_new_ratio,
                __lang_model,
                __max_embeddings_per_post,
-               TRUE,               -- _truncate_long_sentences
+               TRUE,
                __doc_prefix,
-               __min_token_threshold
-             )
-    ) AS pp(chunks, token_count)
-    WHERE (hp.root_id = hp.id OR hp.root_id = 0)
-      AND (
-           hp.block_num_created BETWEEN _first_block_num AND _last_block_num
-        OR hp.block_num          BETWEEN _first_block_num AND _last_block_num
-      );
+               0                      -- ← return *even if very short*
+           ) AS pp
+           ON TRUE;
 
-    -- ◉◉◉ PER-POST LOOP WITH SERIALIZATION ◉◉◉
+    /* =====================================================================
+     * 1️⃣  CHUNKS FOR POSTS THAT ARE STILL “BIG ENOUGH”
+     * ====================================================================*/
+    CREATE TEMP TABLE tmp_chunks ON COMMIT DROP AS
+    SELECT
+        post_id,
+        generate_subscripts(chunks, 1) - 1          AS chunk_number,
+        chunks[generate_subscripts(chunks, 1)]      AS chunk_text,
+        token_count,
+        block_num
+    FROM tmp_pre
+    WHERE token_count >= __min_token_threshold
+      AND array_length(chunks, 1) IS NOT NULL;
+
+    /* =====================================================================
+     * 2️⃣  EMBED THOSE CHUNKS
+     * ====================================================================*/
+    CREATE TEMP TABLE tmp_vectors ON COMMIT DROP AS
+    WITH all_chunks AS (
+        SELECT ARRAY_AGG(
+                   (post_id, chunk_text, chunk_number)
+                     ::hivesense_app.id_and_post_chunk
+                   ORDER BY post_id, chunk_number
+               ) AS arr
+        FROM tmp_chunks
+    )
+    SELECT
+        pv.post_id,
+        pv.chunk_number,
+        pv.vec
+    FROM all_chunks
+    CROSS JOIN LATERAL UNNEST(hivesense_app.hivesense_embed(all_chunks.arr)) AS pv;
+
+    /* =====================================================================
+     * 3️⃣  POSTS THAT NOW PRODUCE ZERO CHUNKS
+     *     (true deletions / under-threshold edits)
+     * ====================================================================*/
+    CREATE TEMP TABLE tmp_empty_posts ON COMMIT DROP AS
+    SELECT post_id,
+           block_num,
+           token_count
+    FROM   tmp_pre
+    WHERE  token_count <  __min_token_threshold
+       OR  array_length(chunks,1) IS NULL;
+
+    /* nothing to do if no deletions */
+    IF EXISTS (SELECT 1 FROM tmp_empty_posts) THEN
+
+        /* ➤ fresh sync_seq for every empty post */
+        CREATE TEMP TABLE tmp_empty_seq ON COMMIT DROP AS
+        SELECT post_id,
+               nextval('hivesense_app.sync_seq') AS sync_seq
+        FROM   tmp_empty_posts;
+
+        /* ➤ delete lingering vectors */
+        DELETE FROM hivesense_app.posts_vectors pv
+        USING  tmp_empty_posts ep
+        WHERE  pv.post_id = ep.post_id;
+
+        /* ➤ record the logical deletion */
+        INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
+        SELECT post_id, sync_seq
+        FROM   tmp_empty_seq;
+
+        /* ➤ bring post_data up to date */
+        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
+        SELECT post_id, token_count, block_num
+        FROM   tmp_empty_posts
+        ON CONFLICT (post_id) DO UPDATE
+            SET number_of_tokens   = EXCLUDED.number_of_tokens,
+                last_vectors_block = EXCLUDED.last_vectors_block;
+    END IF;
+
+    /* =====================================================================
+     *  (the original code starting at
+     *    “-- 3) per-post sync_seq, delete & insert” continues unmodified)
+     * ====================================================================*/
+
+
+    -- 3) per-post sync_seq, delete & insert
     FOR rec IN
-      SELECT post_id, bodies, token_count, block_num
-        FROM tmp_posts_to_vectorize
-       ORDER BY post_id
+      SELECT DISTINCT post_id, block_num,
+             MAX(token_count) AS tcnt
+        FROM tmp_chunks
+       GROUP BY post_id, block_num
     LOOP
-      -- grab an transaction‐scoped advisory lock in our own namespace to ensure no other workers
-      -- are working on this same post while we are
-      -- Try to grab the lock immediately
-      IF NOT pg_try_advisory_xact_lock(__post_id_lock_namespace, rec.post_id) THEN
-          -- If it failed, we know there’s contention: measure how long it takes to acquire
-          __lock_start := clock_timestamp();
-          PERFORM pg_advisory_xact_lock(__post_id_lock_namespace, rec.post_id);
-          __lock_end := clock_timestamp();
-
-          -- Compute and log any non-zero wait
-          __wait_interval := __lock_end - __lock_start;
-          IF __wait_interval > '0s' THEN
-              RAISE NOTICE
-                'worker % was blocked waiting to work on post % for %s seconds',
-                _worker,
-                rec.post_id,
-                to_char(EXTRACT(EPOCH FROM __wait_interval), 'FM999999.000');
-          END IF;
-      END IF;
-
-      SELECT last_vectors_block
-        INTO __prev_block
-        FROM hivesense_app.post_data
-       WHERE post_id = rec.post_id;
-
-      IF rec.block_num > COALESCE(__prev_block, -1) THEN
-        -- Reserve a sequence value that will identify this logical operation
         SELECT nextval('hivesense_app.sync_seq') INTO __sync_seq;
 
-        __number_of_posts := __number_of_posts + 1;
-
-        -- Was the post previously embedded?  If so, log a delete operation
         IF EXISTS (
-            SELECT 1 FROM hivesense_app.posts_vectors
-             WHERE post_id = rec.post_id
+           SELECT 1 FROM hivesense_app.posts_vectors
+            WHERE post_id = rec.post_id
         ) THEN
             DELETE FROM hivesense_app.posts_vectors
              WHERE post_id = rec.post_id;
-
             INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
             VALUES (rec.post_id, __sync_seq);
         END IF;
 
-        -- generate & insert new embeddings
-        INSERT INTO hivesense_app.posts_vectors(post_id, chunk_number, embedding, sync_seq)
+        INSERT INTO hivesense_app.posts_vectors(
+            post_id, chunk_number, embedding, sync_seq
+        )
         SELECT
-          (pv).post_id,
-          (pv).chunk_number,
-          CASE
-            WHEN hivesense_app.store_halfvec_embeddings()
-            THEN (pv).vec::public.halfvec
-            ELSE (pv).vec
+          post_id,
+          chunk_number,
+          CASE WHEN hivesense_app.store_halfvec_embeddings()
+               THEN vec::public.halfvec
+               ELSE vec
           END,
           __sync_seq
-        FROM (
-          SELECT UNNEST(
-            hivesense_app.hivesense_embed(
-              ARRAY(
-                SELECT (rec.post_id, rec.bodies[idx], idx-1)
-                       ::hivesense_app.id_and_post_chunk
-                  FROM generate_subscripts(rec.bodies,1) AS idx
-              )
-            )
-          ) AS pv
-        ) AS sub;
+        FROM tmp_vectors
+        WHERE post_id = rec.post_id
+        ORDER BY chunk_number;
 
-        -- count how many chunks we just wrote
         GET DIAGNOSTICS __c = ROW_COUNT;
         __number_of_chunks := __number_of_chunks + __c;
 
-        -- bump metadata to block_num
         UPDATE hivesense_app.post_data
-           SET number_of_tokens   = COALESCE(rec.token_count, 0),
+           SET number_of_tokens   = rec.tcnt,
                last_vectors_block = rec.block_num
          WHERE post_id = rec.post_id;
-      END IF;
+
+        __number_of_posts := __number_of_posts + 1;
     END LOOP;
 
-    DROP TABLE tmp_posts_to_vectorize;
-
-    RETURN COALESCE(__number_of_posts, 0);
+    RETURN __number_of_posts;
 END;
 $$;
-
-
 
 CREATE OR REPLACE PROCEDURE hivesense_massive_processing(
     IN _from INT, IN _to INT, IN _logs BOOLEAN, IN _worker INT, OUT _done INT
@@ -383,6 +369,7 @@ DECLARE
     __done_key_namespace            INT;
     __ack_key_namespace             INT;
     __shard                         INT;
+    __posts_per_chunk               INT;
 BEGIN
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
@@ -403,12 +390,6 @@ BEGIN
 
     --------------------------------------------------------------------------------
     -- **At initialization: acquire every start_key_i** so that workers block.
-    --
-    --     We'll define:
-    --       start_key_i := 10_000_000 + i
-    --       done_key_i  := 20_000_000 + i
-    --       ack_key_i   := 30_000_000 + i
-
     --
     --     Here, we grab start_key_i and ack_key_i.  done_key_i is left unlocked,
     --     so that as soon as a worker tries to lock it at loop-top, it succeeds.
@@ -458,10 +439,7 @@ BEGIN
         -- RAISE NOTICE 'App_next_iteration returned';
 
         -- check global break conditions
-        __breaking_reason := isbreakingpending(
-                                 __context_name,
-                                 _max_block_limit,
-                                 __blocks_range);
+        __breaking_reason := isbreakingpending(__context_name, _max_block_limit, __blocks_range);
         IF __breaking_reason IS NOT NULL THEN
             ROLLBACK;
             IF __breaking_reason = 'BLOCK_LIMIT_REACHED'
@@ -478,7 +456,7 @@ BEGIN
             CONTINUE;
         END IF;
 
-        -- ── NEW: wait until hivemind has processed through this range ───────────────
+        -- wait until hivemind has processed through this range
         LOOP
             SELECT hive.app_get_current_block_num('hivemind_app')
               INTO __hivemind_current_block;
@@ -487,74 +465,68 @@ BEGIN
                          __blocks_range.last_block,
                          __hivemind_current_block;
             PERFORM pg_sleep(1);
+            __breaking_reason := isbreakingpending(__context_name, _max_block_limit, NULL);
+            IF __breaking_reason IS NOT NULL THEN
+              RETURN;
+            END IF;
         END LOOP;
 
-        -------------------------------------------------------------------
-        -- Split the range into contiguous slices and enqueue one per shard
-        -------------------------------------------------------------------
-        __blocks             := __blocks_range.last_block - __blocks_range.first_block + 1;
-        __chunks_per_worker  := 50;
-        __number_of_chunks   := _workers * __chunks_per_worker;
-        __blocks_per_chunk   := GREATEST(1, CEILING(__blocks / (_workers * __chunks_per_worker)));
-        __extra              := __blocks % __number_of_chunks;      -- first ⟂extra⟂ chunks get +1
-
+        /* ------------------------------------------------------------------
+         * Build ordered list of posts in this range
+         * ----------------------------------------------------------------*/
         __batch_id := nextval('hivesense_app.batch_seq');
-        __from_block := __blocks_range.first_block;
-
-        IF __blocks_range.last_block <> __blocks_range.first_block THEN
-            RAISE NOTICE 'Splitting range % to %', __blocks_range.first_block, __blocks_range.last_block;
-        END IF;
-
-        WHILE __from_block <= __blocks_range.last_block LOOP
-            -- RAISE NOTICE 'SCHEDULER: computing work for';
-            __to_block := __from_block + __blocks_per_chunk - 1;
-            IF __extra > 0 THEN
-                __to_block := __to_block + 1;
-                __extra := __extra - 1;
-            END IF;
-
-            IF __to_block > __blocks_range.last_block THEN
-                __to_block := __blocks_range.last_block;
-            END IF;
-
-            -- only insert if this worker actually has work
-            IF __to_block >= __from_block THEN
-                -- RAISE NOTICE 'SCHEDULER: enqueuing work [%, %]', __from_block, __to_block;
-                INSERT INTO hivesense_app.block_tasks(
-                    batch_id,
-                    shard,
-                    first_block,
-                    last_block
-                )
-                VALUES (
-                    __batch_id,
-                    NULL, -- unclaimed
-                    __from_block,
-                    __to_block
-                );
-            END IF;
-
-            __from_block := __to_block + 1;
-        END LOOP;
-        --------------------------------------------------------------------------------
-        -- bulk-upsert post_data for every post in this batch
-        --------------------------------------------------------------------------------
-        WITH posts_to_seed AS (
-          SELECT DISTINCT hp.id AS post_id
-          FROM   hivemind_app.hive_posts    hp
-          JOIN   hivemind_app.hive_post_data hpd ON hpd.id = hp.id
-          WHERE  (hp.root_id = hp.id OR hp.root_id = 0)
-            AND (
-                 hp.block_num_created BETWEEN __blocks_range.first_block AND __blocks_range.last_block
-              OR hp.block_num          BETWEEN __blocks_range.first_block AND __blocks_range.last_block
-            )
+        WITH posts AS (
+          SELECT hp.id AS post_id,
+                 GREATEST(hp.block_num_created, hp.block_num) AS blk
+            FROM hivemind_app.hive_posts hp
+            JOIN hivemind_app.hive_post_data hpd USING(id)
+           WHERE (hp.root_id = hp.id OR hp.root_id = 0)
+             AND (
+                   hp.block_num_created BETWEEN __blocks_range.first_block AND __blocks_range.last_block
+                OR hp.block_num          BETWEEN __blocks_range.first_block AND __blocks_range.last_block
+             )
+        ),
+        numbered AS (
+          SELECT post_id,
+                 blk,
+                 ROW_NUMBER() OVER (ORDER BY blk)               AS rn,
+                 COUNT(*)    OVER ()                            AS total_posts
+          FROM posts
+        ),
+        chunked AS (
+          SELECT post_id,
+                 blk,
+                 ((rn - 1) / CEILING(total_posts::NUMERIC /
+                       (_workers * 50)))::INT AS chunk_idx
+          FROM numbered
+        ),
+        grouped AS (
+          SELECT chunk_idx,
+                 ARRAY_AGG(post_id ORDER BY post_id) AS pids,
+                 MIN(blk) AS first_blk,
+                 MAX(blk) AS last_blk
+          FROM chunked
+          GROUP BY chunk_idx
         )
+        INSERT INTO hivesense_app.block_tasks(
+            batch_id, shard, post_ids, first_block, last_block
+        )
+        SELECT
+            __batch_id,
+            NULL,
+            pids,
+            first_blk,
+            last_blk
+        FROM grouped;
+
+        /* bulk-upsert post_data for this batch (unchanged but re-uses grouped) */
         INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
-        SELECT post_id, 0, -1
-          FROM posts_to_seed
+        SELECT UNNEST(post_ids), 0, -1
+        FROM hivesense_app.block_tasks
+        WHERE batch_id = __batch_id
         ON CONFLICT (post_id) DO NOTHING;
 
-        COMMIT; -- we have to commit here so the workers can pick up the tasks
+        COMMIT;            -- let workers see tasks
 
         --------------------------------------------------------------------------------
         -- WAKE ALL WORKERS by dropping each start_key_i
@@ -619,6 +591,14 @@ BEGIN
         -- clean up the tasks table, the tasks are all done, we don't need to keep that info around forever
         TRUNCATE hivesense_app.block_tasks;
 
+	-- mark all new sync_seq as visible only after batch completion
+	UPDATE hivesense_app.hivesense_app_status
+	   SET max_visible_sync_seq = GREATEST(
+	     COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors),0),
+	     COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),0)
+	   )
+	 WHERE id = 1;
+
         -------------------------------------------------------------------
         -- After the batch, create indexes when appropriate
         -------------------------------------------------------------------
@@ -636,7 +616,6 @@ BEGIN
     ASSERT FALSE, 'Scheduler: unreachable';
 END
 $$;
-
 
 CREATE OR REPLACE PROCEDURE hivesense_app.worker_loop(
     IN _worker            INT,
@@ -694,11 +673,12 @@ BEGIN
             ------------------------------------------------------------------
             -- RAISE NOTICE 'getting new task for worker %', _worker;
             SELECT task_id,
+                   post_ids,
                    first_block,
                    last_block
-            INTO   __task
-            FROM   hivesense_app.block_tasks
-            WHERE  status = 'pending'
+              INTO __task
+            FROM hivesense_app.block_tasks
+            WHERE status = 'pending'
             FOR UPDATE SKIP LOCKED
             LIMIT 1;
 
@@ -726,26 +706,21 @@ BEGIN
             -- Execute the heavy work for this block sub-range
             ------------------------------------------------------------------
             -- RAISE NOTICE 'worker % processing block range % to %', _worker, __task.first_block, __task.last_block;
-            SELECT hivesense_block_range_data(
-                       __task.first_block,
-                       __task.last_block,
-                       TRUE,             -- logs
-                       _worker           -- keep original param order
-                   )
-                   INTO __done_posts;
-
             IF __task.last_block = __task.first_block THEN
-                RAISE NOTICE 'worker % processed block % containing % posts', _worker, __task.first_block, __done_posts;
+		RAISE NOTICE 'worker % processing block % (% posts)',
+			     _worker,
+			     __task.first_block,
+			     array_length(__task.post_ids,1);
             ELSE
-                RAISE NOTICE 'worker % processed block range % to % (% blocks) containing % posts', _worker, __task.first_block, __task.last_block, __task.last_block - __task.first_block + 1, __done_posts;
+		RAISE NOTICE 'worker % processing blocks % to % (% blocks, % posts)',
+			     LPAD(_worker::text, 2),
+			     __task.first_block,
+			     __task.last_block,
+                             __task.last_block - __task.first_block + 1,
+			     array_length(__task.post_ids,1);
             END IF;
 
-            -- If Hivemind isn’t caught up yet → rollback & wait0
-            IF __done_posts IS NULL THEN
-                ROLLBACK;
-                PERFORM pg_sleep(5);
-                CONTINUE;
-            END IF;
+            SELECT generate_embeddings_for_posts(__task.post_ids, TRUE, _worker) INTO __done_posts;
 
             ------------------------------------------------------------------
             -- Mark task finished

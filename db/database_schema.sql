@@ -40,7 +40,8 @@ BEGIN
     min_token_threshold INT NOT NULL DEFAULT 75, -- don't generate embeddings for posts shorter than this number of tokens
     min_token_search_threshold INT NOT NULL DEFAULT 0, -- ignore posts < this size when *searching* (0 = disabled)
     max_embeddings_per_post INT, -- max number of chunks per post, NULL for unlimited
-    advisory_lock_namespace_begin INT -- start of advisory lock namespace, if running multiple instances, use different values (separated by, say, 10 or so)
+    advisory_lock_namespace_begin INT, -- start of advisory lock namespace, if running multiple instances, use different values (separated by, say, 10 or so)
+    max_visible_sync_seq INT NOT NULL DEFAULT 0 -- highest sync sequence number to publish, anything higher may have gaps that will be filled later
   );
 
   IF NOT hive.app_context_exists(__schema_name) THEN
@@ -58,40 +59,42 @@ BEGIN
   -- Monotonic sequence that orders every logical operation
   CREATE SEQUENCE IF NOT EXISTS hivesense_app.sync_seq;
 
+  -- This table will hold, for every post_id that we generate embeddings for,
+  -- the total number of tokens in that post.  We insert one row per post_id.
+  CREATE TABLE IF NOT EXISTS hivesense_app.post_data
+  (
+      post_id            INT PRIMARY KEY REFERENCES hivemind_app.hive_posts(id),
+      number_of_tokens   INT NOT NULL,
+      last_vectors_block INT NOT NULL DEFAULT -1
+  );
+
   -- extend to public, to find vector from pgvector
   EXECUTE format( 'SET SEARCH_PATH TO %s, public', __schema_name );
   IF __store_halfvec_embeddings THEN
     EXECUTE format($$
       CREATE TABLE IF NOT EXISTS posts_vectors
       (
-          post_id      INT NOT NULL,
+          post_id      INT NOT NULL REFERENCES hivesense_app.post_data(post_id),
           chunk_number INT NOT NULL,
           embedding    public.halfvec(%s) NOT NULL,
-          sync_seq INT,          -- drawn from hivesense_app.sync_seq
-          PRIMARY KEY (sync_seq, post_id, chunk_number)
+          sync_seq     INT NOT NULL,          -- drawn from hivesense_app.sync_seq
+          PRIMARY KEY (post_id, chunk_number)
       );
     $$, __vector_size);
   ELSE
     EXECUTE format($$
       CREATE TABLE IF NOT EXISTS posts_vectors
       (
-          post_id      INT NOT NULL,
+          post_id      INT NOT NULL REFERENCES hivesense_app.post_data(post_id),
           chunk_number INT NOT NULL,
           embedding    vector(%s) NOT NULL,
-          sync_seq INT,          -- drawn from hivesense_app.sync_seq
-          PRIMARY KEY (sync_seq, post_id, chunk_number)
+          sync_seq     INT NOT NULL,          -- drawn from hivesense_app.sync_seq
+          PRIMARY KEY (post_id, chunk_number)
       );
     $$, __vector_size);
   END IF;
-
-  -- This table will hold, for every post_id that we generate embeddings for,
-  -- the total number of tokens in that post.  We insert one row per post_id.
-  CREATE TABLE IF NOT EXISTS hivesense_app.post_data
-  (
-      post_id         INT PRIMARY KEY,
-      number_of_tokens INT NOT NULL,
-      last_vectors_block INT NOT NULL DEFAULT -1
-  );
+  -- Helpful index for “give me everything > after_seq”
+  CREATE INDEX IF NOT EXISTS posts_vectors_sync_seq_idx ON hivesense_app.posts_vectors(sync_seq);
 
   -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'
   EXECUTE format( 'GRANT MAINTAIN ON ALL TABLES IN SCHEMA %s TO hived_group' , __schema_name );
@@ -121,7 +124,8 @@ INSERT INTO hivesense_app_status
   min_token_threshold,
   min_token_search_threshold,
   max_embeddings_per_post,
-  advisory_lock_namespace_begin
+  advisory_lock_namespace_begin,
+  max_visible_sync_seq
 )
 VALUES
 (
@@ -144,7 +148,8 @@ VALUES
     current_setting('PG_TEMP.MIN_TOKEN_THRESHOLD', TRUE)::INT,
     current_setting('PG_TEMP.MIN_TOKEN_SEARCH_THRESHOLD', TRUE)::INT,
     NULLIF(current_setting('PG_TEMP.MAX_EMBEDINGS_PER_POST', TRUE)::INT, 0),
-    10000
+    10000,
+    0
 )
 ON CONFLICT (id)
 DO UPDATE SET
@@ -161,27 +166,18 @@ CREATE TABLE IF NOT EXISTS hivesense_app.block_tasks (
   shard       INT,          -- worker number (1…N), NULL if unclaimed
   first_block INT      NOT NULL,
   last_block  INT      NOT NULL,
+  post_ids    INT[]    NOT NULL DEFAULT '{}',
   status      TEXT     NOT NULL DEFAULT 'pending',   -- pending | running | done
   claimed_at  TIMESTAMPTZ,
   finished_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS block_tasks_pending_idx ON hivesense_app.block_tasks (status, shard);
 
--- Helpful index for “give me everything > after_seq”
-CREATE INDEX IF NOT EXISTS posts_vectors_sync_seq_idx
-    ON hivesense_app.posts_vectors(sync_seq);
-
--- 2️⃣  Table that records logical deletions
+-- Table that records logical deletions
 CREATE TABLE IF NOT EXISTS hivesense_app.deleted_embeddings (
-    post_id  INT     NOT NULL,
-    sync_seq INT     NOT NULL,
-    PRIMARY KEY (sync_seq, post_id)
+    post_id  INT     NOT NULL REFERENCES hivesense_app.post_data (post_id),
+    sync_seq INT     NOT NULL UNIQUE,
+    PRIMARY KEY (post_id, sync_seq)
 );
-
-CREATE INDEX IF NOT EXISTS deleted_embeddings_sync_seq_idx
-    ON hivesense_app.deleted_embeddings(sync_seq);
-
-RESET ROLE;
-
 
 RESET ROLE;
