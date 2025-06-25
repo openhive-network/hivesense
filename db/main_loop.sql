@@ -519,11 +519,17 @@ BEGIN
             last_blk
         FROM grouped;
 
+        LOCK TABLE hivemind_app.hive_posts IN SHARE MODE;
+
         /* bulk-upsert post_data for this batch (unchanged but re-uses grouped) */
-        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
-        SELECT UNNEST(post_ids), 0, -1
-        FROM hivesense_app.block_tasks
-        WHERE batch_id = __batch_id
+        INSERT INTO hivesense_app.post_data (post_id, number_of_tokens, last_vectors_block)
+        SELECT id, 0, -1
+        FROM (
+            SELECT DISTINCT UNNEST(post_ids) AS id
+            FROM   hivesense_app.block_tasks
+            WHERE  batch_id = __batch_id
+        ) AS src
+        ORDER BY id                                -- ☚ guarantees lock order
         ON CONFLICT (post_id) DO NOTHING;
 
         COMMIT;            -- let workers see tasks
