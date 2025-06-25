@@ -298,7 +298,7 @@ add hivesense to `COMPOSE_PROFILES` variable in th `.env` file. To customize set
 
    ```bash
    registry.gitlab.syncad.com/hive/hivesense:<8 digit git sha>
-   registry.gitlab.syncad.com/hive/hivesense/rewiter:<8 digit git sha>
+   registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:<8 digit git sha>
    ```
 
    With using switch '--push' new images will also be pushed to registry

@@ -39,7 +39,7 @@ HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 # Hivesense
 HIVESENSE_IMAGE="registry.gitlab.syncad.com/hive/hivesense"
 HIVESENSE_VERSION="$HIVESENSE_TAG"
-HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/hive/hivesense/rewiter"
+HIVESENSE_REWRITER_IMAGE="registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter"
 
 HIVESENSE_SYNC_ARGS="--stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
