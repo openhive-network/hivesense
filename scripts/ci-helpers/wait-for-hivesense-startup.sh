@@ -13,7 +13,7 @@ wait_for_hivesense_startup() {
     while :
     do
         i=$((i+1))
-        if [ "$i" -gt 20 ]; then
+        if [ "$i" -gt 40 ]; then
             echo "Too long waiting, pending logs dump:"
 
             LOCK_DUMP_COMMAND="SELECT
