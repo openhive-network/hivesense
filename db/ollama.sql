@@ -166,6 +166,35 @@ AS $BODY$
     return embeddings
 $BODY$;
 
+DROP FUNCTION IF EXISTS hivesense_app.pgai_initialize();
+CREATE FUNCTION hivesense_app.pgai_initialize()
+    RETURNS void
+    LANGUAGE plpython3u
+AS $BODY$
+    if "ai.version" not in GD:
+        r = plpy.execute(
+            "SELECT coalesce(current_setting('ai.python_lib_dir', true), "
+            "'/usr/local/lib/pgai') AS python_lib_dir"
+        )
+        python_lib_dir = r[0]["python_lib_dir"]
+        from pathlib import Path
+        import sys, sysconfig, site
+        if "purelib" in sysconfig.get_path_names() and sysconfig.get_path("purelib") in sys.path:
+            sys.path.remove(sysconfig.get_path("purelib"))
+        python_lib_dir = Path(python_lib_dir).joinpath("0.8.0")
+        site.addsitedir(str(python_lib_dir))
+        from ai import __version__ as ai_version
+        assert("0.8.0" == ai_version)
+        GD["ai.version"] = "0.8.0"
+    else:
+        if GD["ai.version"] != "0.8.0":
+            plpy.fatal("the pgai extension version has changed. start a new session")
+$BODY$;
+
 GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO haf_admin WITH GRANT OPTION;
 GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO pg_database_owner WITH GRANT OPTION;
+
+GRANT EXECUTE ON FUNCTION hivesense_app.pgai_initialize() TO haf_admin WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.pgai_initialize() TO hivesense_user;
+GRANT EXECUTE ON FUNCTION hivesense_app.pgai_initialize() TO pg_database_owner WITH GRANT OPTION;

@@ -170,14 +170,14 @@ sync:
       ls -la $(pwd)
       OLDPWD=$(pwd)
       cd submodules/haf_api_node || exit 1
-      docker logs haf-world-haf-1 > ${OLDPWD}/docker/haf.log
-      docker logs haf-world-haproxy-1 > ${OLDPWD}/docker/haproxy.log
-      docker logs haf-world-hivesense-install-schema-1 > ${OLDPWD}/docker/hivesense-install.log
-      docker logs haf-world-hivesense-block-processing-1 > ${OLDPWD}/docker/hivesense-block-processing.log
-      docker logs haf-world-hivesense-postgrest-1 > ${OLDPWD}/docker/hivesense-postgrest.log
-      docker logs haf-world-hivesense-swagger-1 > ${OLDPWD}/docker/hivesense-swagger.log
-      docker logs haf-world-hivesense-postgrest-rewriter-1 > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log
-      docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log
+      docker logs haf-world-haf-1 > ${OLDPWD}/docker/haf.log 2>&1
+      docker logs haf-world-haproxy-1 > ${OLDPWD}/docker/haproxy.log 2>&1
+      docker logs haf-world-hivesense-install-schema-1 > ${OLDPWD}/docker/hivesense-install.log 2>&1
+      docker logs haf-world-hivesense-block-processing-1 > ${OLDPWD}/docker/hivesense-block-processing.log 2>&1
+      docker logs haf-world-hivesense-postgrest-1 > ${OLDPWD}/docker/hivesense-postgrest.log 2>&1
+      docker logs haf-world-hivesense-swagger-1 > ${OLDPWD}/docker/hivesense-swagger.log 2>&1
+      docker logs haf-world-hivesense-postgrest-rewriter-1 > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log 2>&1
+      docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log 2>&1
       cd "$OLDPWD" || exit 1
       
       # Create docker directory if it doesn't exist
