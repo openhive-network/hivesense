@@ -354,6 +354,7 @@ DECLARE
     __context_name                  hive.context_name := _app_context_base_name; -- single context
     __start_block                   INT               := 0;
     __blocks_range                  hive.blocks_range := (0,0);
+    __planned_range                 hive.blocks_range;
     __batch_id                      BIGINT;
     __todo                          INT;
     __breaking_reason               break_reason      := NULL;
@@ -428,12 +429,61 @@ BEGIN
         END IF;
 
         -- RAISE NOTICE 'Past start block...';
-        -- request the next range from HAF
+        -- request the next range from HAF *inside a tx* …
+        -- … but roll it back immediately so we don’t keep xmin.
         CALL hive.app_next_iteration(
             __context_name,
             __blocks_range,
             _override_max_batch => NULL,
             _limit              => _max_block_limit
+        );
+
+        -- keep a copy across the ROLLBACK
+        __planned_range := __blocks_range;
+
+        ROLLBACK;                       -- <<< frees RowExclusiveLock on context & xmin
+        -- pl/pgsql variables survive the ROLLBACK, so __planned_range is safe
+
+        -- nothing to do yet
+        IF __blocks_range IS NULL THEN
+            RAISE NOTICE '__blocks_range IS NULL';
+            CONTINUE;
+        END IF;
+
+        ------------------------------------------------------------------
+        -- Wait for hivemind in a *read-only* loop (no open tx)
+        ------------------------------------------------------------------
+        LOOP
+            SELECT hive.app_get_current_block_num('hivemind_app')
+              INTO __hivemind_current_block;
+
+            EXIT WHEN __hivemind_current_block >= __planned_range.last_block;
+
+            RAISE NOTICE 'Waiting for hivemind to reach block % (currently at %) [not in transaction]',
+                         __planned_range.last_block,
+                         __hivemind_current_block;
+            ----------------------------------------------------------------
+            -- finish the txn *immediately* so backend_xmin is released
+            ----------------------------------------------------------------
+            COMMIT;
+
+            PERFORM pg_sleep(1);
+
+            __breaking_reason := isbreakingpending(__context_name, _max_block_limit, NULL);
+            IF __breaking_reason IS NOT NULL THEN
+                RETURN;
+            END IF;
+        END LOOP;
+
+        ------------------------------------------------------------------
+        -- Re-enter a write tx and (re)claim the same block range.
+        -- This updates hafd.contexts correctly *after* the long wait.
+        ------------------------------------------------------------------
+        CALL hive.app_next_iteration(
+                __context_name,
+                __blocks_range,
+                _override_max_batch => NULL,
+                _limit              => _max_block_limit
         );
 
         -- RAISE NOTICE 'App_next_iteration returned';
@@ -461,7 +511,7 @@ BEGIN
             SELECT hive.app_get_current_block_num('hivemind_app')
               INTO __hivemind_current_block;
             EXIT WHEN __hivemind_current_block >= __blocks_range.last_block;
-            RAISE NOTICE 'Waiting for hivemind to reach block % (currently at %)',
+            RAISE NOTICE 'Waiting for hivemind to reach block % (currently at %) [in transaction]',
                          __blocks_range.last_block,
                          __hivemind_current_block;
             PERFORM pg_sleep(1);
@@ -623,6 +673,45 @@ BEGIN
 END
 $$;
 
+
+CREATE OR REPLACE PROCEDURE hivesense_app.wait_for_advisory_lock(_namespace INT, _worker INT, _timeout_ms INT DEFAULT 5000)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  LOOP
+    -- a) close out any open tx so xmin can advance
+    COMMIT;
+    -- b) bound our blocking lock to _timeout_ms
+    PERFORM set_config('lock_timeout', _timeout_ms::text, true);
+
+    BEGIN
+      -- c) normal blocking advisory lock
+      PERFORM pg_advisory_lock(_namespace, _worker);
+      -- d) on success, clear the timeout and stop looping
+      PERFORM set_config('lock_timeout', '0', true);
+      EXIT;
+    EXCEPTION
+      WHEN SQLSTATE '55P03'  -- lock_timeout
+       OR  SQLSTATE '57014'  -- statement_timeout
+      THEN
+        -- If the race gave us the lock just as the timeout fired,
+        -- detect it in pg_locks, clear timeout, and exit.
+        IF EXISTS (SELECT FROM pg_locks
+           WHERE locktype = 'advisory'
+             AND classid  = _namespace
+             AND objid    = _worker
+             AND pid      = pg_backend_pid()
+        ) THEN
+          PERFORM set_config('lock_timeout', '0', true);
+          EXIT;
+        END IF;
+        -- otherwise fall through to retry
+    END;
+  END LOOP;
+END;
+$$;
+
+
 CREATE OR REPLACE PROCEDURE hivesense_app.worker_loop(
     IN _worker            INT,
     IN _app_context_name  hive.context_name,
@@ -656,17 +745,16 @@ BEGIN
     -- PERFORM set_config('log_lock_waits',    'off',  true);
     -- workers run forever until break conditions tell them to exit
     LOOP
-        --------------------------------------------------------------------------------
-        -- Grab done_key_i so scheduler can wait on it later.  This succeeds 
-        -- immediately the very first time (because we left done_key_i unlocked).
-        --------------------------------------------------------------------------------
+        --------------------------------------------------------------------
+        -- Take done_key_i (never blocks for long)
+        --------------------------------------------------------------------
         PERFORM pg_advisory_lock(__done_key_namespace, _worker);
 
         --------------------------------------------------------------------------------
         -- Now block until the scheduler says “go” by unlocking start_key_i.
         -- As soon as that happens, we acquire start_key_i.
         --------------------------------------------------------------------------------
-        PERFORM pg_advisory_lock(__start_key_namespace, _worker);
+        CALL hivesense_app.wait_for_advisory_lock(__start_key_namespace, _worker);
 
         --------------------------------------------------------------------------------
         -- Immediately release start_key_i so it’s available for the next batch.
@@ -746,7 +834,7 @@ BEGIN
         PERFORM pg_advisory_unlock(__done_key_namespace, _worker);
 
         -- Now block on ack_key_i until the scheduler “acks” our done_key_i.
-        PERFORM pg_advisory_lock(__ack_key_namespace, _worker);
+        CALL hivesense_app.wait_for_advisory_lock(__ack_key_namespace, _worker);
         -- As soon as the scheduler does `UNLOCK(ack_key_i)`, this returns.
 
         --------------------------------------------------------------------------------
