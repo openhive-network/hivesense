@@ -370,7 +370,7 @@ DECLARE
     __done_key_namespace            INT;
     __ack_key_namespace             INT;
     __shard                         INT;
-    __posts_per_chunk               INT;
+    __posts_per_chunk      CONSTANT INT := 100;
 BEGIN
     -- by default, postgresql logs when threads are blocked on a lock for more than a second.
     -- we use locks for synchronization, and expect threads to be blocked for at least 3s
@@ -537,24 +537,25 @@ BEGIN
              )
         ),
         numbered AS (
-          SELECT post_id,
-                 blk,
-                 ROW_NUMBER() OVER (ORDER BY blk)               AS rn,
-                 COUNT(*)    OVER ()                            AS total_posts
+          SELECT
+            post_id,
+            blk,
+            ROW_NUMBER() OVER (ORDER BY blk)  AS rn
           FROM posts
         ),
         chunked AS (
-          SELECT post_id,
-                 blk,
-                 ((rn - 1) / CEILING(total_posts::NUMERIC /
-                       (_workers * 50)))::INT AS chunk_idx
+          SELECT
+            post_id,
+            blk,
+            ((rn - 1) / __posts_per_chunk)::INT AS chunk_idx
           FROM numbered
         ),
         grouped AS (
-          SELECT chunk_idx,
-                 ARRAY_AGG(post_id ORDER BY post_id) AS pids,
-                 MIN(blk) AS first_blk,
-                 MAX(blk) AS last_blk
+          SELECT
+            chunk_idx,
+            ARRAY_AGG(post_id ORDER BY post_id) AS pids,
+            MIN(blk) AS first_blk,
+            MAX(blk) AS last_blk
           FROM chunked
           GROUP BY chunk_idx
         )
