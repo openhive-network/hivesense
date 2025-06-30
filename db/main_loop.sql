@@ -339,6 +339,44 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE PROCEDURE hivesense_app.wait_for_advisory_lock(_namespace INT, _worker INT, _timeout_ms INT DEFAULT 5000)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  LOOP
+    -- a) close out any open tx so xmin can advance
+    COMMIT;
+    -- b) bound our blocking lock to _timeout_ms
+    PERFORM set_config('lock_timeout', _timeout_ms::text, true);
+
+    BEGIN
+      -- c) normal blocking advisory lock
+      PERFORM pg_advisory_lock(_namespace, _worker);
+      -- d) on success, clear the timeout and stop looping
+      PERFORM set_config('lock_timeout', '0', true);
+      EXIT;
+    EXCEPTION
+      WHEN SQLSTATE '55P03'  -- lock_timeout
+       OR  SQLSTATE '57014'  -- statement_timeout
+      THEN
+        -- If the race gave us the lock just as the timeout fired,
+        -- detect it in pg_locks, clear timeout, and exit.
+        IF EXISTS (SELECT FROM pg_locks
+           WHERE locktype = 'advisory'
+             AND classid  = _namespace
+             AND objid    = _worker
+             AND pid      = pg_backend_pid()
+        ) THEN
+          PERFORM set_config('lock_timeout', '0', true);
+          EXIT;
+        END IF;
+        -- otherwise fall through to retry
+    END;
+  END LOOP;
+END;
+$$;
+
+
 /** Application entry point, which starts application main-loop (which iterates infinitely).
   To stop it call `stopProcessing();` from another session and commit its trasaction.
 */
@@ -611,7 +649,8 @@ BEGIN
         FOR __shard IN 1.._workers LOOP
 
           -- Wait for worker_i to signal “done”:
-          PERFORM pg_advisory_lock(__done_key_namespace, __shard);
+          -- PERFORM pg_advisory_lock(__done_key_namespace, __shard);
+          CALL hivesense_app.wait_for_advisory_lock(__done_key_namespace, __shard);
 
           -- Immediately drop done_key_i so that next time the worker can LOCK it:
           PERFORM pg_advisory_unlock(__done_key_namespace, __shard);
@@ -672,44 +711,6 @@ BEGIN
 
     ASSERT FALSE, 'Scheduler: unreachable';
 END
-$$;
-
-
-CREATE OR REPLACE PROCEDURE hivesense_app.wait_for_advisory_lock(_namespace INT, _worker INT, _timeout_ms INT DEFAULT 5000)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  LOOP
-    -- a) close out any open tx so xmin can advance
-    COMMIT;
-    -- b) bound our blocking lock to _timeout_ms
-    PERFORM set_config('lock_timeout', _timeout_ms::text, true);
-
-    BEGIN
-      -- c) normal blocking advisory lock
-      PERFORM pg_advisory_lock(_namespace, _worker);
-      -- d) on success, clear the timeout and stop looping
-      PERFORM set_config('lock_timeout', '0', true);
-      EXIT;
-    EXCEPTION
-      WHEN SQLSTATE '55P03'  -- lock_timeout
-       OR  SQLSTATE '57014'  -- statement_timeout
-      THEN
-        -- If the race gave us the lock just as the timeout fired,
-        -- detect it in pg_locks, clear timeout, and exit.
-        IF EXISTS (SELECT FROM pg_locks
-           WHERE locktype = 'advisory'
-             AND classid  = _namespace
-             AND objid    = _worker
-             AND pid      = pg_backend_pid()
-        ) THEN
-          PERFORM set_config('lock_timeout', '0', true);
-          EXIT;
-        END IF;
-        -- otherwise fall through to retry
-    END;
-  END LOOP;
-END;
 $$;
 
 
