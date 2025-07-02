@@ -25,11 +25,12 @@ CREATE TYPE hivesense_app.post_and_vector_chunk AS (
     vec          vector -- same dimension as before
 );
 
+DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, text, text, text, jsonb);
+DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, text, text, jsonb);
 CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model             TEXT,
     input_text        TEXT,
     host              TEXT    DEFAULT NULL::text,
-    keep_alive        TEXT    DEFAULT NULL::text,
     embedding_options JSONB   DEFAULT NULL::jsonb
 )
 RETURNS vector
@@ -51,7 +52,6 @@ BEGIN
         model,
         batch_in,
         host              => host,
-        keep_alive        => keep_alive,
         embedding_options => embedding_options
     );
 
@@ -62,110 +62,86 @@ $$;
 
 -- batch version of pga ollama embed
 -- because it uses python, then only super user can be owner
--- TODO(mickiewicz@syncad.com) create pull request with the function for pgai
 DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb);
-CREATE FUNCTION hivesense_app.ollama_embed(
-    model               TEXT,
-    posts               hivesense_app.id_and_post_chunk[],
-    host                TEXT          DEFAULT NULL::text,
-    keep_alive          TEXT          DEFAULT NULL::text,
-    embedding_options   JSONB         DEFAULT NULL::jsonb
+DROP FUNCTION IF EXISTS hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb);
+CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
+    model             TEXT,
+    posts             hivesense_app.id_and_post_chunk[],
+    host              TEXT           DEFAULT NULL::text,
+    embedding_options JSONB          DEFAULT NULL::jsonb
 )
 RETURNS hivesense_app.post_and_vector_chunk[]
 LANGUAGE plpython3u
-IMMUTABLE PARALLEL SAFE
+IMMUTABLE
+PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $BODY$
-    if "ai.version" not in GD:
+    import json, requests, time, plpy
+
+    # Resolve host URL
+    if host is None:
         r = plpy.execute(
-            "SELECT coalesce(current_setting('ai.python_lib_dir', true), "
-            "'/usr/local/lib/pgai') AS python_lib_dir"
+          "SELECT coalesce(current_setting('pg_temp.OLLAMA_HOST', true), 'http://localhost:11434') AS host"
         )
-        python_lib_dir = r[0]["python_lib_dir"]
-        from pathlib import Path
-        import sys, sysconfig, site
-        if "purelib" in sysconfig.get_path_names() and \
-           sysconfig.get_path("purelib") in sys.path:
-            sys.path.remove(sysconfig.get_path("purelib"))
-        python_lib_dir = Path(python_lib_dir).joinpath("0.8.0")
-        site.addsitedir(str(python_lib_dir))
-        from ai import __version__ as ai_version
-        assert("0.8.0" == ai_version)
-        GD["ai.version"] = "0.8.0"
+        host_url = r[0]['host']
     else:
-        if GD["ai.version"] != "0.8.0":
-            plpy.fatal("the pgai extension version has changed. start a new session")
+        host_url = host
 
-    import ai.ollama, time, json
-    client = ai.ollama.make_client(plpy, host)
-
-    embedding_options_1 = None
-    if embedding_options is not None:
-        embedding_options_1 = {k: v for k, v in json.loads(embedding_options).items()}
-
-    # — read batch size from the fully-qualified status table —
+    # Batch size from config
     r = plpy.execute(
-        "SELECT embedding_batch_size "
-        "FROM hivesense_app.hivesense_app_status "
-        "LIMIT 1"
+      "SELECT embedding_batch_size FROM hivesense_app.hivesense_app_status LIMIT 1"
     )
-    max_batch = r[0].get("embedding_batch_size", 100)
+    max_batch = r[0].get('embedding_batch_size', 100)
 
-    # — flatten all (post_id, chunk) pairs —
-    flat_texts    = []
-    flat_post_ids = []
-    flat_chunk_numbers = []
+    # Flatten inputs
+    flat_texts, flat_pids, flat_nums = [], [], []
     if posts is not None:
-        for post in posts:
-            pid     = post['post_id']
-            ctext   = post['chunk_text']
-            cnumber = post['chunk_number']
-            flat_texts.append(ctext)
-            flat_post_ids.append(pid)
-            flat_chunk_numbers.append(cnumber)
+        for p in posts:
+            flat_pids.append(p['post_id'])
+            flat_nums.append(p['chunk_number'])
+            flat_texts.append(p['chunk_text'])
 
-    embeddings  = []
-    total       = len(flat_texts)
+    # Parse options
+    opts = json.loads(embedding_options) if embedding_options is not None else None
+
+    embeddings = []
+    total = len(flat_texts)
     max_retries = 120
+    delay_secs = 5
 
-    # — process in slices of up to max_batch —
     for start in range(0, total, max_batch):
-        end         = min(start + max_batch, total)
+        end = min(start + max_batch, total)
         batch_texts = flat_texts[start:end]
-        batch_pids  = flat_post_ids[start:end]
-        batch_nums  = flat_chunk_numbers[start:end]
+        batch_pids  = flat_pids[start:end]
+        batch_nums  = flat_nums[start:end]
 
-        # retry the entire batch up to max_retries
+        payload = {"model": model, "input": batch_texts}
+        if opts is not None:
+            payload["options"] = opts
+
+        url = host_url.rstrip('/') + "/api/embed"
         resp = None
-        for attempt in range(max_retries):
+        for attempt in range(1, max_retries+1):
             try:
-                resp = client.embed(
-                    model,
-                    batch_texts,
-                    options=embedding_options_1,
-                    keep_alive=keep_alive
-                )
-                break
-            except Exception as error:
-                plpy.notice(f"[Batch {start}:{end} Attempt {attempt+1}] {error}")
-                time.sleep(5)
+                resp = requests.post(url, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    break
+                plpy.notice(f"[Batch {start}:{end} Attempt {attempt}] HTTP {resp.status_code}")
+            except Exception as e:
+                plpy.notice(f"[Batch {start}:{end} Attempt {attempt}] {e}")
+            time.sleep(delay_secs)
 
-        if resp is None:
-            plpy.error(
-                f"Could not embed batch {start}:{end} "
-                f"after {max_retries} attempts"
-            )
+        if resp is None or resp.status_code != 200:
+            plpy.error(f"Ollama embed failed after {max_retries} attempts: " +
+                       (resp.text if resp else "no response"))
 
-        # unpack the embeddings array
-        for idx, emb in enumerate(resp.get("embeddings", [])):
-            pid   = batch_pids[idx]
-            cnum  = batch_nums[idx]
-            # append a triple (post_id, chunk_number, emb_vector)
-            embeddings.append((pid, cnum, emb))
+        data = resp.json()
+        for idx, vec in enumerate(data.get("embeddings", [])):
+            embeddings.append((batch_pids[idx], batch_nums[idx], vec))
 
     return embeddings
 $BODY$;
 
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO haf_admin WITH GRANT OPTION;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, text, jsonb) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO haf_admin WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO pg_database_owner WITH GRANT OPTION;
