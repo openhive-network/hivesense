@@ -36,7 +36,6 @@ SELECT hp.id
   JOIN hivemind_app.hive_permlink_data pd ON pd.id = hp.permlink_id
  WHERE ha.name = %s
    AND pd.permlink = %s
-   AND hp.counter_deleted = 0
  LIMIT 1;
 """
 
@@ -46,6 +45,20 @@ def resolve_post_id(cur, author, permlink):
     row = cur.fetchone()
     return row[0] if row else None
 
+def upsert_vectors(cur, post_id, sync_seq, embeddings):
+    rows = [
+        (sync_seq, post_id, idx, emb)
+        for idx, emb in enumerate(embeddings)
+    ]
+    psycopg2.extras.execute_values(
+        cur,
+        """
+        INSERT INTO hivesense_app.posts_vectors
+          (sync_seq, post_id, chunk_number, embedding)
+        VALUES %s
+        """,
+        rows
+    )
 
 def apply_op(cur, op, post_id):
     """
@@ -54,6 +67,20 @@ def apply_op(cur, op, post_id):
     """
     cur.execute("SAVEPOINT op_sp")
     try:
+        # ① always ensure metadata row exists before touching any FKs
+        cur.execute(
+            """
+            INSERT INTO hivesense_app.post_data
+              (post_id, number_of_tokens, last_vectors_block)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (post_id) DO UPDATE
+              SET number_of_tokens   = EXCLUDED.number_of_tokens,
+                  last_vectors_block = EXCLUDED.last_vectors_block
+            """,
+            (post_id,
+             op.get("number_of_tokens", 0),
+             op.get("last_vectors_block", 0))
+        )
         if op["op"] == "delete":
             cur.execute(
                 "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
@@ -73,17 +100,6 @@ def apply_op(cur, op, post_id):
                 (post_id,)
             )
             upsert_vectors(cur, post_id, op["sync_seq"], op["embeddings"])
-            cur.execute(
-                """
-                INSERT INTO hivesense_app.post_data
-                  (post_id, number_of_tokens, last_vectors_block)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (post_id) DO UPDATE
-                  SET number_of_tokens   = EXCLUDED.number_of_tokens,
-                      last_vectors_block = EXCLUDED.last_vectors_block
-                """,
-                (post_id, op["number_of_tokens"], op["last_vectors_block"])
-            )
     except Exception:
         cur.execute("ROLLBACK TO SAVEPOINT op_sp")
         raise
@@ -92,10 +108,10 @@ def apply_op(cur, op, post_id):
 
 
 def main():
-    conn = psycopg2.connect(DB_DSN, autocommit=False)
+    conn = psycopg2.connect(DB_DSN)
     # Fast-fail on deadlocks
-    with conn.cursor() as cur:
-        cur.execute("SET deadlock_timeout = '1s'")
+    #with conn.cursor() as cur:
+    #    cur.execute("SET deadlock_timeout = '1s'")
 
     while True:
         # determine how far we've synced
@@ -119,7 +135,7 @@ def main():
         if max_block is not None:
             while True:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT hive.app_get_current_block_num('hivemind_app')")
+                    cur.execute("SELECT last_completed_block_num FROM hivemind_app.hive_state")
                     head = cur.fetchone()[0]
                 if head >= max_block:
                     break
@@ -157,9 +173,7 @@ def main():
                 (max_seq,)
             )
             cur.execute(
-                "UPDATE hivesense_app.hivesense_app_status
-                   SET max_visible_sync_seq = %s
-                 WHERE id = 1",
+                "UPDATE hivesense_app.hivesense_app_status SET max_visible_sync_seq = %s WHERE id = 1",
                 (max_seq,)
             )
         conn.commit()

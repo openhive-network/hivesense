@@ -94,7 +94,7 @@ BEGIN
     $$, __vector_size);
   END IF;
   -- Helpful index for “give me everything > after_seq”
-  CREATE INDEX IF NOT EXISTS posts_vectors_sync_seq_idx ON hivesense_app.posts_vectors(sync_seq);
+  CREATE INDEX IF NOT EXISTS posts_vectors_sync_seq_post_id_idx ON hivesense_app.posts_vectors(sync_seq, post_id);
 
   -- the current version of sqlfluff doesn't understand 'GRANT MAINTAIN'
   EXECUTE format( 'GRANT MAINTAIN ON ALL TABLES IN SCHEMA %s TO hived_group' , __schema_name );
@@ -179,5 +179,7 @@ CREATE TABLE IF NOT EXISTS hivesense_app.deleted_embeddings (
     sync_seq INT     NOT NULL UNIQUE,
     PRIMARY KEY (post_id, sync_seq)
 );
+
+CREATE INDEX IF NOT EXISTS deleted_embeddings_sync_seq_post_id_idx ON hivesense_app.deleted_embeddings(sync_seq, post_id);
 
 RESET ROLE;
