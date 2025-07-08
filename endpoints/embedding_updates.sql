@@ -33,13 +33,20 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
     "after_seq" INT,
     "page_size"     INT
 )
-RETURNS JSONB
+RETURNS TABLE (
+  sync_seq            INT,
+  op                  TEXT,
+  author              TEXT,
+  permlink            TEXT,
+  number_of_tokens    INT,
+  last_vectors_block  INT,
+  embeddings          REAL[]    -- PostgREST will JSON-encode this array
+)
 -- openapi-generated-code-end
   LANGUAGE plpgsql
   STABLE PARALLEL SAFE
 AS $$
 DECLARE
-  __result      jsonb;
   __max_visible integer;
 BEGIN
   -- 0) fetch the current watermark
@@ -48,23 +55,24 @@ BEGIN
     FROM hivesense_app.hivesense_app_status
    WHERE id = 1;
 
+  RETURN QUERY
   WITH 
   -- 1a) the first N inserts/updates
   pv_limited AS (
-    SELECT sync_seq, post_id
-      FROM hivesense_app.posts_vectors
-     WHERE sync_seq > after_seq
-       AND sync_seq <= __max_visible
-     ORDER BY sync_seq
+    SELECT DISTINCT ON (pv.sync_seq, post_id) pv.sync_seq, post_id
+      FROM hivesense_app.posts_vectors pv
+     WHERE pv.sync_seq > after_seq
+       AND pv.sync_seq <= __max_visible
+     ORDER BY pv.sync_seq
      LIMIT page_size
   ),
   -- 1b) the first N deletes
   de_limited AS (
-    SELECT sync_seq, post_id
-      FROM hivesense_app.deleted_embeddings
-     WHERE sync_seq > after_seq
-       AND sync_seq <= __max_visible
-     ORDER BY sync_seq
+    SELECT DISTINCT ON (de.sync_seq, post_id) de.sync_seq, post_id
+      FROM hivesense_app.deleted_embeddings de
+     WHERE de.sync_seq > after_seq
+       AND de.sync_seq <= __max_visible
+     ORDER BY de.sync_seq
      LIMIT page_size
   ),
   -- 2) union them into your final N changes, classifying op
@@ -97,43 +105,26 @@ BEGIN
     JOIN hivemind_app.hive_accounts      ha  ON ha.id         = hp.author_id
     JOIN hivemind_app.hive_permlink_data hpd ON hpd.id        = hp.permlink_id
     JOIN hivesense_app.post_data         pd  ON pd.post_id    = lo.post_id
-  ),
-  -- 4) fetch embeddings for only those N rows
-  ops_with_embeddings AS (
-    SELECT
-      om.sync_seq,
-      om.op,
-      om.author,
-      om.permlink,
-      om.number_of_tokens,
-      om.last_vectors_block,
-      COALESCE(
-        (
-          SELECT jsonb_agg(to_jsonb(pv2.embedding::real[]) ORDER BY pv2.chunk_number)
-            FROM hivesense_app.posts_vectors pv2
-           WHERE pv2.sync_seq = om.sync_seq
-             AND pv2.post_id  = om.post_id
-        ),
-        '[]'::jsonb
-      ) AS embeddings
-    FROM ops_with_meta om
   )
-  -- 5) build the final JSONB array
-  SELECT jsonb_agg(
-           jsonb_build_object(
-             'sync_seq',           sync_seq,
-             'op',                 op,
-             'author',             author,
-             'permlink',           permlink,
-             'number_of_tokens',   number_of_tokens,
-             'last_vectors_block', last_vectors_block,
-             'embeddings',         embeddings
-           )
-         )
-    INTO __result
-    FROM ops_with_embeddings;
-
-  RETURN COALESCE(__result, '[]'::jsonb);
+  -- 4) fetch embeddings for only those N rows
+  SELECT
+    om.sync_seq,
+    om.op,
+    om.author::text,
+    om.permlink::text,
+    om.number_of_tokens,
+    om.last_vectors_block,
+    -- build a Postgres array of real[] here; PostgREST will turn it into JSON
+    ARRAY(
+      SELECT pv2.embedding::real[]
+        FROM hivesense_app.posts_vectors pv2
+       WHERE pv2.sync_seq = om.sync_seq
+         AND pv2.post_id  = om.post_id
+       ORDER BY pv2.chunk_number
+    ) AS embeddings
+  FROM ops_with_meta om
+  ORDER BY om.sync_seq
+  LIMIT page_size;
 END;
 $$;
 
