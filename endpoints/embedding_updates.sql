@@ -1,5 +1,32 @@
 SET ROLE hivesense_owner;
 
+CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_settings()
+RETURNS TABLE (
+  sync_uuid uuid,
+  llm text,
+  embedding_dimensionality int,
+  document_prefix text,
+  query_prefix text,
+  tokens_per_chunk int,
+  overlap_amount real,
+  min_token_threshold int,
+  max_embeddings_per_post int
+) AS $$
+  SELECT
+    sync_uuid,
+    llm,
+    embedding_dimensionality,
+    document_prefix,
+    query_prefix,
+    tokens_per_chunk,
+    overlap_amount,
+    min_token_threshold,
+    max_embeddings_per_post
+  FROM hivesense_app_status
+  ORDER BY id
+  LIMIT 1;
+$$ LANGUAGE sql STABLE;
+
 /** openapi:paths
 /embedding-updates:
   get:
@@ -31,7 +58,8 @@ SET ROLE hivesense_owner;
 DROP FUNCTION IF EXISTS hivesense_endpoints.embedding_updates;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
     "after_seq" INT,
-    "page_size"     INT
+    "page_size" INT,
+    "sync_uuid" UUID
 )
 RETURNS TABLE (
   sync_seq            INT,
@@ -48,12 +76,19 @@ RETURNS TABLE (
 AS $$
 DECLARE
   __max_visible integer;
+  __our_uuid    UUID;
 BEGIN
-  -- 0) fetch the current watermark
-  SELECT max_visible_sync_seq
-    INTO __max_visible
-    FROM hivesense_app.hivesense_app_status
+  -- 0) fetch the current watermark and uuid
+  SELECT max_visible_sync_seq, has.sync_uuid
+    INTO __max_visible, __our_uuid
+    FROM hivesense_app.hivesense_app_status has
    WHERE id = 1;
+
+  IF sync_uuid != __our_uuid THEN
+    RAISE EXCEPTION 'UUID Mismatch'
+      USING DETAIL = 'Your sync_uuid parameter doesn''t match ours -- perhaps you were syncing with a different server?',
+            HINT = 'To sync with this server, you will need to wipe your hivesense data';
+  END IF;
 
   RETURN QUERY
   WITH 

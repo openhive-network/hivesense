@@ -409,15 +409,24 @@ DECLARE
     __ack_key_namespace             INT;
     __shard                         INT;
     __posts_per_chunk      CONSTANT INT := 100;
+
+    __current_syncing               BOOLEAN;
+    __current_uuid                  UUID;
+    __new_uuid                      UUID;
 BEGIN
-    -- by default, postgresql logs when threads are blocked on a lock for more than a second.
-    -- we use locks for synchronization, and expect threads to be blocked for at least 3s
-    -- at a time.  Disable that logging to avoid spamming the log file
-    --
-    -- turns out we need higher privileges to do this, skip for now
-    --
-    -- PERFORM set_config('deadlock_timeout', '5s', true);
-    -- PERFORM set_config('log_lock_waits',    'off',  true);
+    -- Check our sync UUID -- if we're just starting out (empty database), or if we were downloading pre-computed embeddings
+    -- from another server but are now switching to computing them locally, generate a new UUID here 
+    SELECT syncing_embeddings, sync_uuid INTO __current_syncing, __current_uuid FROM hivesense_app.hivesense_app_status WHERE id = 1;
+
+    IF __current_syncing IS NULL OR __current_syncing THEN
+        -- First run or switching from remote sync to local processing
+        __new_uuid := gen_random_uuid();
+        UPDATE hivesense_app.hivesense_app_status SET sync_uuid = __new_uuid, syncing_embeddings = FALSE WHERE id = 1;
+        RAISE NOTICE 'Sync init: set sync_uuid=%, syncing_embeddings=FALSE', __new_uuid;
+    ELSE
+        -- Already initialized; nothing to do
+        RAISE DEBUG 'Sync init: existing sync_uuid=% (syncing_embeddings=FALSE)', __current_uuid;
+    END IF;
 
     -- read configured start_block
     SELECT start_block, advisory_lock_namespace_begin INTO __start_block, __advisory_lock_namespace_begin
