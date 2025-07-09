@@ -121,48 +121,40 @@ def upsert_vectors(cur, post_id, sync_seq, embeddings):
 def apply_op(cur, op, post_id):
     """
     Apply a single operation; assumes post_id already resolved.
-    Uses a savepoint so individual ops can roll back without aborting the whole batch.
     """
-    cur.execute("SAVEPOINT op_sp")
-    try:
-        # ① always ensure metadata row exists before touching any FKs
+    # ① always ensure metadata row exists before touching any FKs
+    cur.execute(
+        """
+        INSERT INTO hivesense_app.post_data
+          (post_id, number_of_tokens, last_vectors_block)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (post_id) DO UPDATE
+          SET number_of_tokens   = EXCLUDED.number_of_tokens,
+              last_vectors_block = EXCLUDED.last_vectors_block
+        """,
+        (post_id,
+         op.get("number_of_tokens", 0),
+         op.get("last_vectors_block", 0))
+    )
+    if op["op"] == "delete":
+        cur.execute(
+            "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
+            (post_id,)
+        )
         cur.execute(
             """
-            INSERT INTO hivesense_app.post_data
-              (post_id, number_of_tokens, last_vectors_block)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (post_id) DO UPDATE
-              SET number_of_tokens   = EXCLUDED.number_of_tokens,
-                  last_vectors_block = EXCLUDED.last_vectors_block
+            INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
+            VALUES (%s, %s)
+            ON CONFLICT (sync_seq, post_id) DO NOTHING
             """,
-            (post_id,
-             op.get("number_of_tokens", 0),
-             op.get("last_vectors_block", 0))
+            (post_id, op["sync_seq"])
         )
-        if op["op"] == "delete":
-            cur.execute(
-                "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
-                (post_id,)
-            )
-            cur.execute(
-                """
-                INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
-                VALUES (%s, %s)
-                ON CONFLICT (sync_seq, post_id) DO NOTHING
-                """,
-                (post_id, op["sync_seq"])
-            )
-        else:
-            cur.execute(
-                "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
-                (post_id,)
-            )
-            upsert_vectors(cur, post_id, op["sync_seq"], op["embeddings"])
-    except Exception:
-        cur.execute("ROLLBACK TO SAVEPOINT op_sp")
-        raise
-    finally:
-        cur.execute("RELEASE SAVEPOINT op_sp")
+    else:
+        cur.execute(
+            "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
+            (post_id,)
+        )
+        upsert_vectors(cur, post_id, op["sync_seq"], op["embeddings"])
 
 
 def main():

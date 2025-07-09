@@ -425,7 +425,7 @@ BEGIN
         RAISE NOTICE 'Sync init: set sync_uuid=%, syncing_embeddings=FALSE', __new_uuid;
     ELSE
         -- Already initialized; nothing to do
-        RAISE DEBUG 'Sync init: existing sync_uuid=% (syncing_embeddings=FALSE)', __current_uuid;
+        RAISE NOTICE 'Sync init: existing sync_uuid=% (syncing_embeddings=FALSE)', __current_uuid;
     END IF;
 
     -- read configured start_block
