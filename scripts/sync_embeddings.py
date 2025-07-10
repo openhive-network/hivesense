@@ -164,6 +164,12 @@ def main():
     server_status = fetch_server_status()
     sync_uuid = validate_local_state(conn, server_status)
 
+    with conn.cursor() as cur:
+        cur.execute("""SELECT hive.app_context_is_attached('hivesense_app')""")
+        if cur.fetchone()[0]:
+            cur.execute("""SELECT hive.app_context_detach('hivesense_app')""")
+        conn.commit()
+
     while True:
         # determine how far we've synced
         with conn.cursor() as cur:
@@ -207,13 +213,17 @@ def main():
                     )
                 resolved.append((op, post_id))
 
+        max_last_vectors_block = 0
         # apply each operation in one batch transaction
         with conn.cursor() as cur:
             for op, post_id in resolved:
+                last_vectors_block = op.get("last_vectors_block")
+                if last_vectors_block > max_last_vectors_block:
+                    max_last_vectors_block = last_vectors_block
                 logging.info(
                     "Applying %s %s/%s (seq %s, block %s)",
                     op["op"], op["author"], op["permlink"],
-                    op["sync_seq"], op.get("last_vectors_block")
+                    op["sync_seq"], last_vectors_block
                 )
                 apply_op(cur, op, post_id)
 
@@ -227,6 +237,8 @@ def main():
                 "UPDATE hivesense_app.hivesense_app_status SET max_visible_sync_seq = %s WHERE id = 1",
                 (max_seq,)
             )
+            cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
+
         conn.commit()
 
         # Optionally create indexes if caught up
@@ -241,7 +253,7 @@ def main():
                     created_at = row[0].replace(tzinfo=timezone.utc)
                     age = datetime.now(timezone.utc) - created_at
                     if age.total_seconds() <= 60:
-                        logging.info(
+                        logging.debug(
                             "Latest block %s is recent (%.1fs old); creating indexes",
                             max_block, age.total_seconds()
                         )
