@@ -202,6 +202,7 @@ def main():
             cur.execute("""SELECT hive.app_context_detach('hivesense_app')""")
         conn.commit()
 
+    last_seen_current_block_num = None
     while True:
         conn = ensure_connection_alive(conn)
 
@@ -238,8 +239,26 @@ def main():
                 time.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF)
 
+        # manage the current_block_num stored in the context.  The way we manage it isn't perfect, but it's
+        # probably fine for our usage.
+        # When we get a list of ops from the server, we set our current_block_num to the higest one in the
+        # list of ops.
+        # When we get an empty list, we update the current_block_num to match the API server's.
+        # That way, when we're well out-of-sync, we'll keep our current_block_num matching the last embedding
+        # we've synced.  Once we're in sync, we'll advance our current_block_num to match the server, even if
+        # blocks are going by without generating any new embedding-related events.
         if not ops:
-            time.sleep(5)
+            header_block = response.headers.get("X-Current-Block-Num")
+            if header_block is None:
+                logging.error("Missing X-Current-Block-Num header")
+                sys.exit(1)
+            current_block = int(header_block)
+            if current_block != last_seen_current_block_num:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (current_block,))
+                conn.commit()
+                last_seen_current_block_num = current_block
+            time.sleep(3)
             continue
 
         # wait until hivemind has caught up to the highest block in this batch
@@ -294,7 +313,9 @@ def main():
                 "UPDATE hivesense_app.hivesense_app_status SET max_visible_sync_seq = %s WHERE id = 1",
                 (max_seq,)
             )
-            cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
+            if max_last_vectors_block != last_seen_current_block_num:
+                cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
+                last_seen_current_block_num = max_last_vectors_block
 
         conn.commit()
 

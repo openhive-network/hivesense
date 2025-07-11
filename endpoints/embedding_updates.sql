@@ -90,6 +90,8 @@ BEGIN
             HINT = 'To sync with this server, you will need to wipe your hivesense data';
   END IF;
 
+  PERFORM set_config('response.headers', format('[{"X-Current-Block-Num":"%s"}]', hive.app_get_current_block_num('hivesense_app')), true);
+
   RETURN QUERY
   WITH 
   -- 1a) the first N inserts/updates
