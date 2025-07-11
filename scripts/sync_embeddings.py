@@ -1,7 +1,10 @@
+import sys
 import os
 import time
 import logging
 import requests
+import json
+from requests.exceptions import RequestException
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor
 from datetime import datetime, timezone
@@ -16,17 +19,44 @@ EMBEDS_URL = f"{API_URL}/embedding-updates"
 
 BATCH = 1000
 RETRY_SLEEP = 3
+MAX_BACKOFF = 60
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s"
 )
 
+def ensure_connection_alive(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except psycopg2.OperationalError:
+        logging.warning("PostgreSQL connection was lost. Reconnecting.")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return psycopg2.connect(DB_DSN)
 
 def fetch_server_status():
-    resp = requests.get(STATUS_URL, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    backoff = RETRY_SLEEP
+    while True:
+        try:
+            resp = requests.get(STATUS_URL, timeout=30)
+            if not resp.ok:
+                logging.warning("Server status API returned %s; retrying in %s s", resp.status_code, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except (RequestException, json.JSONDecodeError) as e:
+            logging.warning("Error fetching server status: %s; retrying in %s s", e, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, MAX_BACKOFF)
+
     # Unwrap list response from PostgREST composite function
     if isinstance(data, list):
         if not data:
@@ -162,6 +192,8 @@ def main():
 
     # fetch server status and validate
     server_status = fetch_server_status()
+
+    conn = ensure_connection_alive(conn)
     sync_uuid = validate_local_state(conn, server_status)
 
     with conn.cursor() as cur:
@@ -171,17 +203,41 @@ def main():
         conn.commit()
 
     while True:
+        conn = ensure_connection_alive(conn)
+
         # determine how far we've synced
         with conn.cursor() as cur:
             after_seq = get_last_seq(cur)
 
-        response = requests.get(
-            EMBEDS_URL,
-            params={"after_seq": after_seq, "page_size": BATCH, "sync_uuid": sync_uuid},
-            timeout=60
-        )
-        response.raise_for_status()
-        ops = response.json()
+        # fetch ops
+        backoff = RETRY_SLEEP
+        while True:
+            try:
+                response = requests.get(
+                    EMBEDS_URL,
+                    params={"after_seq": after_seq, "page_size": BATCH, "sync_uuid": sync_uuid},
+                    timeout=60
+                )
+                if not response.ok:
+                    logging.warning("Embedding-updates API returned %s; retrying in %s s",
+                                     response.status_code, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                    continue
+                response.raise_for_status()
+                try:
+                    ops = response.json()
+                except (ValueError, json.JSONDecodeError) as e:
+                    logging.warning("Invalid JSON from embedding-updates: %s; retrying in %s s", e, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                    continue
+                break
+            except RequestException as e:
+                logging.warning("Error fetching embeddings: %s; retrying in %s s", e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF)
+
         if not ops:
             time.sleep(5)
             continue
@@ -191,6 +247,7 @@ def main():
         max_block = max(block_nums) if block_nums else None
         if max_block is not None:
             while True:
+                conn = ensure_connection_alive(conn)
                 with conn.cursor() as cur:
                     cur.execute("SELECT last_completed_block_num FROM hivemind_app.hive_state")
                     head = cur.fetchone()[0]
