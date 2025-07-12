@@ -268,7 +268,7 @@ def main():
             while True:
                 conn = ensure_connection_alive(conn)
                 with conn.cursor() as cur:
-                    cur.execute("SELECT last_completed_block_num FROM hivemind_app.hive_state")
+                    cur.execute("SELECT hive.app_get_current_block_num('hivemind_app')")
                     head = cur.fetchone()[0]
                 if head >= max_block:
                     break
