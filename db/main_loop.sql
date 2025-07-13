@@ -52,7 +52,6 @@ DECLARE
     __tokenizer_name         TEXT;
     __max_tokens             INT;
     __min_new_ratio          REAL;
-    __lang_model             TEXT;
     __doc_prefix             TEXT;
     __min_token_threshold    INT;
     __max_embeddings_per_post INT;
@@ -62,14 +61,12 @@ BEGIN
     SELECT tokenizer_model,
            tokens_per_chunk,
            1 - overlap_amount,
-           sentence_language_model,
            document_prefix,
            min_token_threshold,
            max_embeddings_per_post
       INTO __tokenizer_name,
            __max_tokens,
            __min_new_ratio,
-           __lang_model,
            __doc_prefix,
            __min_token_threshold,
            __max_embeddings_per_post
@@ -101,7 +98,6 @@ BEGIN
                __tokenizer_name,
                __max_tokens,
                __min_new_ratio,
-               __lang_model,
                __max_embeddings_per_post,
                TRUE,
                __doc_prefix,

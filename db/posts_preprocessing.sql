@@ -61,7 +61,6 @@ CREATE OR REPLACE FUNCTION chunk_post(
     _tokenizer_name TEXT DEFAULT 'e5-base',
     _max_tokens     INTEGER      DEFAULT 512,
     _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
-    _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
     _max_chunks     INTEGER      DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
     _document_prefix TEXT        DEFAULT 'passage: ',
@@ -81,7 +80,7 @@ from pathlib import Path
 if 'chunk_post_cache' not in globals():
     globals()['chunk_post_cache'] = {}
 
-key = (_tokenizer_name, _lang_model, _document_prefix)
+key = (_tokenizer_name, _document_prefix)
 cache = globals()['chunk_post_cache']
 
 if key not in cache:
@@ -378,7 +377,6 @@ CREATE OR REPLACE FUNCTION preprocess_post(
     _tokenizer_name TEXT DEFAULT 'e5-base',
     _max_tokens     INTEGER      DEFAULT 512,
     _min_new_ratio  DOUBLE PRECISION DEFAULT 0.85,
-    _lang_model     TEXT         DEFAULT 'xx_sent_ud_sm',
     _max_chunks     INTEGER      DEFAULT NULL,
     _truncate_long_sentences BOOLEAN DEFAULT TRUE,
     _document_prefix TEXT        DEFAULT 'passage: ',
@@ -407,7 +405,6 @@ BEGIN
         _tokenizer_name,
         _max_tokens,
         _min_new_ratio,
-        _lang_model,
         _max_chunks,
         _truncate_long_sentences,
         _document_prefix,

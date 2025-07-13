@@ -31,7 +31,6 @@ print_help () {
     echo "  --tokenizer-model=MODEL_NAME          The tokenizer model, must be compatible with 'llm'"
     echo "  --tokens_per_chunk=NUMBER             The maximum number of tokens to break long posts into"
     echo "  --overlap_amount=NUMBER               The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
-    echo "  --sentence_language_model=MODEL_NAME  The model to use for detecting sentence breaks"
     echo "  --use-halfvec-index=TRUE/FALSE        Use HNSW half-precision index (defaults to false)"
     echo "  --store-halfvec-embeddings=TRUE/FALSE Use HNSW half-precision index (defaults to false)"
     echo "  --document-prefix=TEXT                Prefix for documents (defaults to 'passage: ')"
@@ -60,7 +59,6 @@ START_BLOCK=1
 TOKENIZER_MODEL='e5-base' # shipped in haf docker image, compatible with yxchia/multilingual-e5-base:F16
 TOKENS_PER_CHUNK=512
 OVERLAP_AMOUNT='0.15'
-SENTENCE_LANGUAGE_MODEL='xx_sent_ud_sm'
 USE_HALFVEC_INDEX=false
 STORE_HALFVEC_EMBEDDINGS=false
 DOCUMENT_PREFIX='passage: '
@@ -109,9 +107,6 @@ while [ $# -gt 0 ]; do
         ;;
     --overlap_amount=*)
 	    OVERLAP_AMOUNT="${1#*=}"
-        ;;
-    --sentence_language_model=*)
-	    SENTENCE_LANGUAGE_MODEL="${1#*=}"
         ;;
     --use-halfvec-index=*)
         USE_HALFVEC_INDEX="${1#*=}"
@@ -188,7 +183,6 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}';
   SET pg_temp.TOKENS_PER_CHUNK TO ${TOKENS_PER_CHUNK};
   SET pg_temp.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT};
-  SET pg_temp.SENTENCE_LANGUAGE_MODEL TO '${SENTENCE_LANGUAGE_MODEL}';
   SET pg_temp.USE_HALFVEC_INDEX TO ${USE_HALFVEC_INDEX};
   SET pg_temp.STORE_HALFVEC_EMBEDDINGS TO ${STORE_HALFVEC_EMBEDDINGS};
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';

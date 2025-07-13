@@ -31,7 +31,6 @@ BEGIN
     tokenizer_model TEXT, -- model used for counting tokens, must be compatible with `llm`'s tokenizer
     tokens_per_chunk INT, -- for chunking posts, number of tokens per chunk (should not `llm`'s the model's max tokens)
     overlap_amount REAL, -- for chunking posts, try to include this amount of overlap with the prevoius chunk to add context (0.15 = 15%)
-    sentence_language_model TEXT, -- model for detecting sentence boundaries
     use_halfvec_index BOOLEAN NOT NULL DEFAULT false, -- if true, index using 16-bit floats, slight loss of accuracy
     store_halfvec_embeddings BOOLEAN NOT NULL DEFAULT false, -- if true, store embeddings as halfvec
     document_prefix     TEXT    NOT NULL DEFAULT 'passage: ', -- prefix used when generating embeddings from posts
@@ -117,7 +116,6 @@ INSERT INTO hivesense_app_status
   tokenizer_model,
   tokens_per_chunk,
   overlap_amount,
-  sentence_language_model,
   use_halfvec_index,
   store_halfvec_embeddings,
   document_prefix,
@@ -143,7 +141,6 @@ VALUES
     current_setting('PG_TEMP.TOKENIZER_MODEL', TRUE)::TEXT,
     current_setting('PG_TEMP.TOKENS_PER_CHUNK', TRUE)::INT,
     current_setting('PG_TEMP.OVERLAP_AMOUNT', TRUE)::REAL,
-    current_setting('PG_TEMP.SENTENCE_LANGUAGE_MODEL', TRUE)::TEXT,
     current_setting('PG_TEMP.USE_HALFVEC_INDEX', TRUE)::BOOLEAN,
     current_setting('PG_TEMP.STORE_HALFVEC_EMBEDDINGS', TRUE)::BOOLEAN,
     current_setting('PG_TEMP.DOCUMENT_PREFIX', TRUE)::TEXT,
