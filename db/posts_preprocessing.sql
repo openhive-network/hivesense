@@ -1,5 +1,5 @@
 /* ======================================================================
-   1.  post_clean_content – unchanged
+   post_clean_content
    ===================================================================== */
 CREATE OR REPLACE FUNCTION post_clean_content(_text_input TEXT)
 RETURNS TEXT
@@ -363,8 +363,8 @@ while i < len(sentence_tokens):
 # plpy.notice(f"chunked post {_post_id} with token count {__token_count}")
 return (chunks, __token_count)
 $$;
-GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner      WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION chunk_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner      WITH GRANT OPTION;
 
 
 /* ======================================================================
@@ -422,5 +422,5 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, TEXT, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner  WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner  WITH GRANT OPTION;

@@ -35,19 +35,40 @@ BEGIN
 END;
 $BODY$;
 
+DROP TYPE IF EXISTS hivesense_app.embedding_stats CASCADE;
+CREATE TYPE hivesense_app.embedding_stats AS (
+    discarded_posts       INT,
+    processed_posts       INT,
+    embedding_chunks      INT,
+    total_tokens          INT,
+    prep_time_secs        DOUBLE PRECISION,
+    embed_time_secs       DOUBLE PRECISION
+);
+
+DROP FUNCTION IF EXISTS generate_embeddings_for_posts(integer[],boolean,integer);
 CREATE OR REPLACE FUNCTION generate_embeddings_for_posts(
     _post_ids INT[],
     _logs     BOOLEAN,
     _worker   INT
 )
-RETURNS INT
+RETURNS hivesense_app.embedding_stats
 LANGUAGE plpgsql
 VOLATILE
 PARALLEL SAFE
 AS $$
 DECLARE
-    __number_of_posts        INT := 0;
-    __number_of_chunks       INT := 0;
+    -- profiling variables
+    __start_prep      TIMESTAMP := clock_timestamp();
+    __start_embed     TIMESTAMP;
+    __prep_time       DOUBLE PRECISION;
+    __embed_time      DOUBLE PRECISION;
+
+    -- stats
+    __num_discards    INT;
+    __processed_posts INT;
+    __num_chunks      INT;
+    __total_tokens    INT;
+
     __c                      INT;
     __tokenizer_name         TEXT;
     __max_tokens             INT;
@@ -106,7 +127,7 @@ BEGIN
            ON TRUE;
 
     /* =====================================================================
-     * 1️⃣  CHUNKS FOR POSTS THAT ARE STILL “BIG ENOUGH”
+     * CREATE CHUNKS FOR POSTS THAT ARE STILL “BIG ENOUGH”
      * ====================================================================*/
     CREATE TEMP TABLE tmp_chunks ON COMMIT DROP AS
     SELECT
@@ -119,8 +140,15 @@ BEGIN
     WHERE token_count >= __min_token_threshold
       AND array_length(chunks, 1) IS NOT NULL;
 
+
+    -- measure prep time
+    __prep_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_prep);
+
+    -- measure embed start
+    __start_embed := clock_timestamp();
+
     /* =====================================================================
-     * 2️⃣  EMBED THOSE CHUNKS
+     * EMBED THOSE CHUNKSS
      * ====================================================================*/
     CREATE TEMP TABLE tmp_vectors ON COMMIT DROP AS
     WITH all_chunks AS (
@@ -138,9 +166,19 @@ BEGIN
     FROM all_chunks
     CROSS JOIN LATERAL UNNEST(hivesense_app.hivesense_embed(all_chunks.arr)) AS pv;
 
+
+    -- measure embed time
+    __embed_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_embed);
+
+    /* COUNT STATISTICS */
+    SELECT COUNT(*) INTO __num_discards FROM tmp_pre WHERE token_count < __min_token_threshold OR array_length(chunks, 1) IS NULL;
+    SELECT COUNT(DISTINCT post_id) INTO __processed_posts FROM tmp_chunks;
+    SELECT COUNT(*) INTO __num_chunks FROM tmp_vectors;
+    SELECT COALESCE(SUM(token_count),0) INTO __total_tokens FROM tmp_pre WHERE token_count >= __min_token_threshold;
+
     /* =====================================================================
-     * 3️⃣  POSTS THAT NOW PRODUCE ZERO CHUNKS
-     *     (true deletions / under-threshold edits)
+     * POSTS THAT NOW PRODUCE ZERO CHUNKS
+     * (true deletions / under-threshold edits)
      * ====================================================================*/
     CREATE TEMP TABLE tmp_empty_posts ON COMMIT DROP AS
     SELECT post_id,
@@ -178,12 +216,6 @@ BEGIN
                 last_vectors_block = EXCLUDED.last_vectors_block;
     END IF;
 
-    /* =====================================================================
-     *  (the original code starting at
-     *    “-- 3) per-post sync_seq, delete & insert” continues unmodified)
-     * ====================================================================*/
-
-
     -- 3) per-post sync_seq, delete & insert
     FOR rec IN
       SELECT DISTINCT post_id, block_num,
@@ -219,17 +251,15 @@ BEGIN
         ORDER BY chunk_number;
 
         GET DIAGNOSTICS __c = ROW_COUNT;
-        __number_of_chunks := __number_of_chunks + __c;
 
         UPDATE hivesense_app.post_data
            SET number_of_tokens   = rec.tcnt,
                last_vectors_block = rec.block_num
          WHERE post_id = rec.post_id;
-
-        __number_of_posts := __number_of_posts + 1;
     END LOOP;
 
-    RETURN __number_of_posts;
+    /* RETURN PROFILING STATS */
+    RETURN (__num_discards, __processed_posts, __num_chunks, __total_tokens, __prep_time, __embed_time);
 END;
 $$;
 
@@ -489,7 +519,7 @@ BEGIN
 
         -- nothing to do yet
         IF __blocks_range IS NULL THEN
-            RAISE NOTICE '__blocks_range IS NULL';
+            -- RAISE NOTICE '__blocks_range IS NULL';
             CONTINUE;
         END IF;
 
@@ -692,13 +722,13 @@ BEGIN
         -- clean up the tasks table, the tasks are all done, we don't need to keep that info around forever
         TRUNCATE hivesense_app.block_tasks;
 
-	-- mark all new sync_seq as visible only after batch completion
-	UPDATE hivesense_app.hivesense_app_status
-	   SET max_visible_sync_seq = GREATEST(
-	     COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors),0),
-	     COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),0)
-	   )
-	 WHERE id = 1;
+        -- mark all new sync_seq as visible only after batch completion
+        UPDATE hivesense_app.hivesense_app_status
+           SET max_visible_sync_seq = GREATEST(
+             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors),0),
+             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),0)
+           )
+         WHERE id = 1;
 
         -------------------------------------------------------------------
         -- After the batch, create indexes when appropriate
@@ -728,7 +758,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     __task                          RECORD;
-    __done_posts                    INT;
+    __stats                         hivesense_app.embedding_stats;
     __breaking_reason               break_reason := NULL;
     __advisory_lock_namespace_begin INT;
     __start_key_namespace           INT;
@@ -808,20 +838,31 @@ BEGIN
             ------------------------------------------------------------------
             -- RAISE NOTICE 'worker % processing block range % to %', _worker, __task.first_block, __task.last_block;
             IF __task.last_block = __task.first_block THEN
-		RAISE NOTICE 'worker % processing block % (% posts)',
-			     _worker,
-			     __task.first_block,
-			     array_length(__task.post_ids,1);
+                RAISE NOTICE 'worker % processing block % (% posts)',
+                             _worker,
+                             __task.first_block,
+                             array_length(__task.post_ids,1);
             ELSE
-		RAISE NOTICE 'worker % processing blocks % to % (% blocks, % posts)',
-			     LPAD(_worker::text, 2),
-			     __task.first_block,
-			     __task.last_block,
+                RAISE NOTICE 'worker % processing blocks % to % (% blocks, % posts)',
+                             LPAD(_worker::text, 2),
+                             __task.first_block,
+                             __task.last_block,
                              __task.last_block - __task.first_block + 1,
-			     array_length(__task.post_ids,1);
+                             array_length(__task.post_ids,1);
             END IF;
 
-            SELECT generate_embeddings_for_posts(__task.post_ids, TRUE, _worker) INTO __done_posts;
+            __stats := generate_embeddings_for_posts(__task.post_ids, TRUE, _worker);
+
+            RAISE NOTICE
+              'worker % profile: discarded_posts=% processed_posts=% embedding_chunks=% total_tokens=% prep_time=%s embed_time=%s tokens_per_sec=%s',
+              _worker,
+              __stats.discarded_posts,
+              __stats.processed_posts,
+              __stats.embedding_chunks,
+              __stats.total_tokens,
+              ROUND(__stats.prep_time_secs::numeric, 3),
+              ROUND(__stats.embed_time_secs::numeric, 3),
+              ROUND(__stats.embedding_chunks::numeric / NULLIF(__stats.embed_time_secs::numeric, 0), 2);
 
             ------------------------------------------------------------------
             -- Mark task finished
