@@ -106,8 +106,10 @@ AS $BODY$
 
     embeddings = []
     total = len(flat_texts)
-    max_retries = 120
-    delay_secs = 5
+    # exponential backoff parameters
+    initial_delay = 5
+    max_delay     = 120
+    delay_secs    = initial_delay
 
     for start in range(0, total, max_batch):
         end = min(start + max_batch, total)
@@ -120,20 +122,18 @@ AS $BODY$
             payload["options"] = opts
 
         url = host_url.rstrip('/') + "/api/embed"
-        resp = None
-        for attempt in range(1, max_retries+1):
+        while True:
             try:
-                resp = requests.post(url, json=payload, timeout=30)
+                resp = requests.post(url, json=payload, timeout=300)
                 if resp.status_code == 200:
                     break
-                plpy.notice(f"[Batch {start}:{end} Attempt {attempt}] HTTP {resp.status_code}")
+                plpy.notice(f"[Batch {start}:{end}] HTTP {resp.status_code}, retrying in {delay_secs}s")
             except Exception as e:
-                plpy.notice(f"[Batch {start}:{end} Attempt {attempt}] {e}")
+                plpy.notice(f"[Batch {start}:{end}] Exception: {e}, retrying in {delay_secs}s")
             time.sleep(delay_secs)
-
-        if resp is None or resp.status_code != 200:
-            plpy.error(f"Ollama embed failed after {max_retries} attempts: " +
-                       (resp.text if resp else "no response"))
+            delay_secs = min(delay_secs * 2, max_delay)
+        # reset backoff for next batch
+        delay_secs = initial_delay
 
         data = resp.json()
         for idx, vec in enumerate(data.get("embeddings", [])):

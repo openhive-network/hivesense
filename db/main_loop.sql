@@ -854,7 +854,7 @@ BEGIN
             __stats := generate_embeddings_for_posts(__task.post_ids, TRUE, _worker);
 
             RAISE NOTICE
-              'worker % profile: discarded_posts=% processed_posts=% embedding_chunks=% total_tokens=% prep_time=%s embed_time=%s tokens_per_sec=%s',
+              'worker % profile: discarded_posts=% processed_posts=% embedding_chunks=% total_tokens=% prep_time=%s embed_time=%s tokens_per_sec=%',
               _worker,
               __stats.discarded_posts,
               __stats.processed_posts,
