@@ -1,5 +1,33 @@
 SET ROLE hivesense_owner;
 
+/** openapi:paths
+/embedding-updates:
+  get:
+    tags:
+      - AI
+    summary: Stream post-level embedding operations since a given sequence number
+    operationId: hivesense_endpoints.embedding_updates
+    parameters:
+      - in: query
+        name: after_seq
+        required: true
+        schema: { type: integer }
+        description: |
+          Clients pass the highest sync_seq they have applied.  
+          The server returns every operation with sync_seq > after_seq.
+      - in: query
+        name: page_size
+        required: true
+        schema: { type: integer }
+        description: Maximum number of operations to return.
+    responses:
+      '200':
+        description: JSON array of operations, ordered by sync_seq.
+        content:
+          application/json:
+            schema: { type: string, x-sql-datatype: JSONB }
+*/
+-- openapi-generated-code-begin
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_settings()
 RETURNS TABLE (
   sync_uuid uuid,
@@ -11,7 +39,9 @@ RETURNS TABLE (
   overlap_amount real,
   min_token_threshold int,
   max_embeddings_per_post int
-) AS $$
+)
+-- openapi-generated-code-end
+AS $$
   SELECT
     sync_uuid,
     llm,

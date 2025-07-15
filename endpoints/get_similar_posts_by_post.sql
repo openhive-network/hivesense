@@ -131,7 +131,7 @@ BEGIN
     __post_id = hivemind_app.find_comment_id( author, permlink, True );
 
     SELECT jsonb_agg (
-                   hivemind_postgrest_utilities.create_bridge_post_object(__observer_id, row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order ASC
+                   hivemind_postgrest_utilities.create_bridge_post_object(__observer_id, row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order, row.id
            ) FROM (
                       SELECT
                           hp.id,

@@ -83,13 +83,20 @@ BEGIN
                       WHERE m.observer_id = $3
                         AND m.muted_id    = hp.author_id
                    ))
-             ORDER BY similarity
+             ORDER BY similarity, hpv.post_id
              LIMIT %s
         $q$, dist_clause, batch_size);
 
         FOR rec IN EXECUTE sql
             USING _embedding, _exclude_post_id, _observer_id
         LOOP
+            -- global duplicate filter
+            IF rec.post_id = ANY(seen_ids) THEN
+                CONTINUE;
+            END IF;
+            -- mark as seen
+            seen_ids := array_append(seen_ids, rec.post_id);
+
             -- handle start_post_id: skip everything until we see that post_id
             IF NOT collecting THEN
                 IF rec.post_id = _start_post_id THEN
@@ -97,12 +104,9 @@ BEGIN
                 END IF;
                 CONTINUE;
             END IF;
+
             -- never return the start_post_id itself
             IF rec.post_id = _start_post_id THEN
-                CONTINUE;
-            END IF;
-            -- skip duplicates
-            IF rec.post_id = ANY(seen_ids) THEN
                 CONTINUE;
             END IF;
 
@@ -118,7 +122,6 @@ BEGIN
             END IF;
 
             -- emit this post
-            seen_ids      := array_append(seen_ids, rec.post_id);
             count_posts   := count_posts + 1;
             RAISE NOTICE 'Adding post with similarity %', rec.similarity;
             RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
@@ -261,7 +264,7 @@ BEGIN
                             WHERE m.observer_id = $2
                               AND m.muted_id    = hp.author_id
                        ))
-                ORDER  BY similarity
+                ORDER  BY similarity, hpv.post_id
                 LIMIT %s
             $qry$, dist_clause, batch_size)
         USING _embedding, _observer_id
