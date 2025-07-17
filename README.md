@@ -60,9 +60,25 @@ pipelines manually.
 
 #### Install dockerized version of ollama server
 
-##### Requirements
+Because the process of computing the embeddings is very resource-intensive, there are two
+ways to configure HiveSense: you can have it generate the embeddings locally, or you can download 
+embeddings generated from another HiveSense instance.  If you want to generate embeddings locally,
+you will absolutely need a GPU, the fastest CPUs available today will not be able to keep up with
+the rate new posts are being added.
 
-- PC with NVIDIA graphics card(s)
+If you sync embeddings from another HiveSense instance, your node will be storing and indexing
+the embeddings for posts, but it won't be doing the expensive work of computing them.  Your node
+will still need to run an ollama instance to generate embeddings for the search terms.  Since 
+it's faster to generate embeddings for short things like search terms, a decent server CPU will
+be able to create an embedding for a typical search term in a few hundred milliseconds.  As long
+as the rate of search API calls is relatively low, a CPU-only node can still provide a good
+search experience.
+
+##### Requirements for GPU
+
+- PC with AMD or NVIDIA graphics card(s)
+
+For NVIDIA graphics cards, you'll also need:
 - installed the [latest drivers](https://www.nvidia.com/en-us/drivers/) for the NVIDIA card
 - installed [CUDA toolkit](https://developer.nvidia.com/cuda-downloads)
 - installed [docker container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to run containers with GPU support
@@ -177,37 +193,35 @@ launches an endpoint on port 11434, which will distribute traffic among several 
 
 For searching among vectorized posts, an HNSW index is used. This index requires a large amount of shared memory 
 to be available to the PostgreSQL server. Therefore, the HAF container must be configured
-with at least 8 GB of shared memory, which can be set using the --shm-size option when running the container
+with at least 8 GB of shared memory, which can be set using the --shm-size option when running the container.
 
 ### Vectorization
 
 - Only root posts are vectorized
 - Posts are cleaned from links and other tags
-- Posts which contain less than 50 words after cleanup are discarded
-- Posts are chunking: 1000 words per chunk with 100 overlap with previous chunk
-- Only first 3 chunks from a post are vectorized
-- there is a limit to find only first 1000 of nearest posts (searching performance reason)
+- Posts which contain less than 75 tokens (about 55 words) after cleanup are discarded
+- Posts are chunked: 512 tokens (about 380 words) per chunk with 15% of those being overlapped with the previous chunk
+- For performance reasons, we will only return the 1000 nearest posts when searching
+
+Most of the numbers above can be tweaked via config settings.
 
 #### HAF application(s)
 
 ##### Parallel LLM Queries using Workers
 
-HiverSense uses **workers**—HAF applications with their own contexts—to query
+HiveSense uses multiple **workers** to query
 the LLM in parallel. Each worker runs as a separate process, started by the
 [`./scripts/process_blocks.sh`](./scripts/process_blocks.sh) script.
 
-These HAF applications operate independently, processing similar ranges of
-blocks while **exclusively** selecting Hive posts to vectorize according to
-their individual criteria.
+There is one **scheduler** task which is a HAF application.  It gets a range
+of blocks from HAF, divides up the posts from that range of blocks into smaller 
+batches, and puts them in a queue for the workers to crunch on.
 
-Applications use HAF contexts to determine the range of blocks to process.
-They then check if Hivemind has already synchronized these blocks. If not,
-the transaction is rolled back, the application waits a few seconds, and
-then retries.
+Before working on a range of blocks, Hivemind must have already completed
+processing that range.
 
 ##### Contexts
 
-- contexts name: **hivesense_app**{*worker nr*} each worker got separated context name that includes worker number
 - context schema(default): **hivesense_app**
 
 ##### Stages
