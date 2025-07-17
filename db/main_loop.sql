@@ -111,7 +111,7 @@ BEGIN
     JOIN   hivemind_app.hive_posts     hp  ON hp.id = sel.id
     LEFT   JOIN LATERAL preprocess_post(
                /* body ---------------------------------------------------- */
-               (SELECT hpd.title || '.\n\n' || hpd.body
+               (SELECT hpd.title || E'.\n\n' || hpd.body
                   FROM hivemind_app.hive_post_data hpd
                   WHERE hpd.id = hp.id),
                hp.id,
