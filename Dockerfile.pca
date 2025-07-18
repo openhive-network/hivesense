@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+# Install system dependencies for psycopg2 and numpy
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set work directory
+WORKDIR /app
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    psycopg2-binary \
+    numpy \
+    scikit-learn \
+    matplotlib
+
+# Copy your scripts
+COPY scripts/run_pca.py /app
+
+# Default command (can be overridden)
+CMD ["python", "run_pca.py"]
