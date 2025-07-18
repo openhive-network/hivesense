@@ -161,7 +161,7 @@ BEGIN
         END IF;
     END IF;
 END;
-$$
+$$;
 
 CREATE OR REPLACE PROCEDURE ENSURE_INDEXES_ARE_CREATED()
 LANGUAGE plpgsql
@@ -336,6 +336,6 @@ BEGIN
     EXECUTE FORMAT('SET maintenance_work_mem TO %L', __original_maintenance_work_mem);
     RAISE NOTICE 'Restored maintenance_work_mem to original value: %', __original_maintenance_work_mem;
 END;
-$$
+$$;
 
 RESET ROLE;
