@@ -409,7 +409,7 @@ $$;
 CREATE OR REPLACE PROCEDURE hivesense_app.scheduler(
     IN  _app_context_base_name  hive.context_name,
     IN  _workers                INT,
-    IN  _max_block_limit        INT      DEFAULT NULL
+    IN  _max_block_limit        INT      DEFAULT null
 )
 LANGUAGE plpgsql
 AS $$
@@ -421,7 +421,7 @@ DECLARE
     __planned_range                 hive.blocks_range;
     __batch_id                      BIGINT;
     __todo                          INT;
-    __breaking_reason               break_reason      := NULL;
+    __breaking_reason               break_reason      := null;
     __blocks                        INT;
     __blocks_per_chunk              INT;
     __number_of_chunks              INT;
