@@ -53,6 +53,7 @@ SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 docker build -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "${SCRIPTPATH}/.."
 docker build -t "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
 docker build -t "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.syncer"  "${SCRIPTPATH}/.."
+docker build -t "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.pca"  "${SCRIPTPATH}/.."
 
 echo "Build images tag ${TAG}"
 
@@ -60,5 +61,6 @@ if [ -n "${PUSH:-}" ]; then
   docker push "registry.gitlab.syncad.com/hive/hivesense:${TAG}"
   docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}"
   docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}"
+  docker push "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}"
   echo "Pushed images tag ${TAG}"
 fi
