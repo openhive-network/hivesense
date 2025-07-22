@@ -245,7 +245,7 @@ BEGIN
         
         -- Determine appropriate maintenance_work_mem based on system memory
         IF __system_memory_gb >= 120 THEN
-            __new_maintenance_work_mem := '96GB';
+            __new_maintenance_work_mem := '90GB';
             RAISE NOTICE 'System has sufficient memory (% GB >= 120 GB). Setting maintenance_work_mem to %', 
                         ROUND(__system_memory_gb, 1), __new_maintenance_work_mem;
         ELSE
@@ -286,7 +286,7 @@ BEGIN
     __start_time := CLOCK_TIMESTAMP();
     RAISE NOTICE 'Starting HNSW index creation at %', __start_time;
     
-    CALL CREATE_HNSW_INDEX();
+    CALL hivesense_app.CREATE_HNSW_INDEX();
     
     -- Record end time and calculate duration
     __end_time := CLOCK_TIMESTAMP();
