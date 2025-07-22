@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir \
 # Copy your scripts
 COPY scripts/run_pca.py /app
 COPY scripts/recall.py /app
+COPY scripts/convert_embeddings.py /app
 
 # Default command (can be overridden)
 CMD ["python", "run_pca.py"]
