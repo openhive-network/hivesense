@@ -41,98 +41,103 @@ def sample(args):
     print(f"Saved {len(queries)} queries to {out}")
 
 def search(args):
-    """Run nearest-neighbor search in Postgres for each query."""
-    import json
-
-    # load queries
-    with open(args.queries, "r") as f:
-        queries = json.load(f)
-
-    table     = args.table
-    K         = args.topk
-    disable_index = args.disable_index
-    out       = args.output
+    import json, os
+    from psycopg2 import sql
 
     conn = get_conn()
-    # 1) enable autocommit so parallel plans are allowed
     conn.autocommit = True
     cur = conn.cursor()
 
-    # Force Postgres to always build a custom (parallel‐capable) plan,
-    # even for extended‐protocol/prepared statements.
+    # force custom plans + parallel as before
     cur.execute("SET plan_cache_mode = force_custom_plan;")
-
-    # 2) tune parallel settings aggressively
     cur.execute(f"""
         SET max_parallel_workers_per_gather = {args.parallel_workers};
         SET parallel_setup_cost = 0;
         SET parallel_tuple_cost = 0;
     """)
 
-    if disable_index:
-        cur.execute("""
-            SET enable_indexscan = off;
-            SET enable_indexonlyscan = off;
-            SET enable_bitmapscan = off;
-        """)
-        print("Index scans disabled (exact search).")
-
-    # 3) use MATERIALIZED to force a single eval of the target vector
-    sql = f"""
-    WITH target_post AS MATERIALIZED (
-      SELECT pv.post_id, pv.embedding
-      FROM {table} pv
-      JOIN hivemind_app.hive_posts hp  ON pv.post_id   = hp.id
-      JOIN hivemind_app.hive_accounts ha ON hp.author_id = ha.id
-      JOIN hivemind_app.hive_permlink_data hpl ON hp.permlink_id = hpl.id
-      WHERE ha.name     = %s
-        AND hpl.permlink = %s
-        AND pv.chunk_number = %s
-    ),
-    best_matches AS (
-      SELECT
-        pv.post_id,
-        pv.chunk_number,
-        pv.embedding <=> tp.embedding AS distance
-      FROM {table} pv
-      CROSS JOIN target_post tp
-      WHERE NOT (
-        pv.post_id     = tp.post_id
-        AND pv.chunk_number = %s
-      )
-      ORDER BY distance
-      LIMIT %s
-    )
-    SELECT
-      ha.name        AS author,
-      hpl.permlink,
-      bm.chunk_number,
-      bm.distance
-    FROM best_matches bm
-    JOIN hivemind_app.hive_posts hp  ON bm.post_id   = hp.id
-    JOIN hivemind_app.hive_accounts ha ON hp.author_id = ha.id
-    JOIN hivemind_app.hive_permlink_data hpl ON hp.permlink_id = hpl.id
-    ORDER BY bm.distance;
-    """
-
     results = []
+    queries = json.load(open(args.queries))
     for idx, q in enumerate(queries, start=1):
         author, permlink, chunk = q["author"], q["permlink"], q["chunk_number"]
         print(f"[{idx}/{len(queries)}] @{author}/{permlink} chunk {chunk}")
-        cur.execute(sql, (author, permlink, chunk, chunk, K))
 
-        neigh = [
-            {"author": row[0], "permlink": row[1],
-             "chunk_number": row[2], "distance": row[3]}
-            for row in cur.fetchall()
+        # split schema and table so Identifier() works correctly
+        schema, tbl = args.table.split(".", 1)
+        tbl_ident = sql.Identifier(schema, tbl)
+
+        # 1) Fetch target embedding
+        cur.execute(sql.SQL("""
+            SELECT embedding
+              FROM {table}
+             WHERE post_id = (
+               SELECT hp.id
+               FROM hivemind_app.hive_accounts ha
+               JOIN hivemind_app.hive_posts hp
+                 ON ha.id = hp.author_id
+               JOIN hivemind_app.hive_permlink_data hpl
+                 ON hp.permlink_id = hpl.id
+               WHERE ha.name = %s
+                 AND hpl.permlink = %s
+             )
+               AND chunk_number = %s
+        """).format(table=tbl_ident),
+        (author, permlink, chunk))
+        (emb,) = cur.fetchone()
+
+        # 2) Nearest‐neighbor brute‐force over vectors only
+        cur.execute("SET enable_indexscan = off; SET enable_indexonlyscan = off;")
+        cur.execute(sql.SQL("""
+            WITH best AS (
+              SELECT post_id, chunk_number,
+                     embedding <=> %s AS distance
+                FROM {table}
+               WHERE NOT (post_id = (
+                   SELECT hp.id
+                     FROM hivemind_app.hive_accounts ha
+                     JOIN hivemind_app.hive_posts hp
+                       ON ha.id = hp.author_id
+                     JOIN hivemind_app.hive_permlink_data hpl
+                       ON hp.permlink_id = hpl.id
+                    WHERE ha.name = %s
+                      AND hpl.permlink = %s
+                 )
+                 AND chunk_number = %s)
+               ORDER BY distance
+               LIMIT %s
+            )
+            SELECT post_id, chunk_number, distance FROM best
+        """).format(table=tbl_ident),
+        (emb, author, permlink, chunk, args.topk))
+        neighbors = cur.fetchall()
+        # make sure the distance is a float
+        neighbors = [(pid, chunk, float(dist)) for (pid,chunk,dist) in neighbors]
+
+        # re-enable index scans for the join
+        cur.execute("RESET enable_indexscan; RESET enable_indexonlyscan;")
+
+        # 3) Join just those K rows back to names & permlinks via B-trees
+        vals = sql.SQL(',').join(sql.SQL("(%s,%s,%s)") for _ in neighbors)
+        flat = [col for row in neighbors for col in row]
+        cur.execute(sql.SQL("""
+            SELECT ha.name, hpl.permlink, b.chunk_number, b.distance
+              FROM (VALUES {vals}) AS b(post_id,chunk_number,distance)
+              JOIN hivemind_app.hive_posts       hp  ON b.post_id = hp.id
+              JOIN hivemind_app.hive_permlink_data hpl ON hp.permlink_id = hpl.id
+              JOIN hivemind_app.hive_accounts   ha  ON hp.author_id = ha.id
+             ORDER BY b.distance;
+        """).format(vals=vals), flat)
+
+        final = [
+          {"author": a, "permlink": p, "chunk_number": c, "distance": float(d)}
+          for (a,p,c,d) in cur.fetchall()
         ]
-        results.append({"query": q, "neighbors": neigh})
 
-        # keep the output file live
-        with open(out, "w") as f:
+        results.append({"query": q, "neighbors": final})
+        with open(args.output, "w") as f:
             json.dump(results, f)
 
-    print(f"Saved {len(results)} queries × top {K} to {out}")
+    print(f"Saved {len(results)} queries × top {args.topk} to {args.output}")
 
 def analyze(args):
     """Compute recall@k between two result files."""
