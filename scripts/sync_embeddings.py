@@ -265,7 +265,8 @@ def main():
             continue
 
         # wait until hivemind has caught up to the highest block in this batch
-        block_nums = [op.get('last_vectors_block') for op in ops if op.get('last_vectors_block') is not None]
+        # deletes can have last_vectors_blocks that are higher than the block where the deletion took place
+        block_nums = [op.get('last_vectors_block') for op in ops if op.get('last_vectors_block') is not None and op.get('op') != 'delete']
         max_block = max(block_nums) if block_nums else None
         if max_block is not None:
             while True:
