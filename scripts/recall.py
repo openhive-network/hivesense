@@ -140,28 +140,72 @@ def search(args):
     print(f"Saved {len(results)} queries × top {args.topk} to {args.output}")
 
 def analyze(args):
-    """Compute recall@k between two result files."""
+    """Compute recall@k and simulated reranking recall@k@c between two result files."""
+    import json
+
+    # Load ground truth and ANN results
     gt = json.load(open(args.gt))
     ann = json.load(open(args.ann))
 
+    # Helper to build a unique key for each query
     def key_of(entry):
         q = entry["query"]
         return f"{q['author']}:{q['permlink']}:{q['chunk_number']}"
 
+    # Helper to extract the neighbor keys from an entry
     def neighbor_keys(entry):
-        return [f"{n['author']}:{n['permlink']}:{n['chunk_number']}"
-                for n in entry["neighbors"]]
+        return [
+            f"{n['author']}:{n['permlink']}:{n['chunk_number']}"
+            for n in entry["neighbors"]
+        ]
 
-    gt_map  = {key_of(e): neighbor_keys(e) for e in gt}
-    ann_map = {key_of(e): neighbor_keys(e) for e in ann}
+    # Build maps: query key -> list of true neighbor keys / ANN neighbor keys
+    gt_map  = { key_of(e): neighbor_keys(e) for e in gt  }
+    ann_map = { key_of(e): neighbor_keys(e) for e in ann }
 
-    for k in args.k:
-        vals = []
-        for key, true_list in gt_map.items():
-            pred = ann_map.get(key, [])
-            vals.append(len(set(true_list[:k]) & set(pred[:k])) / k)
-        avg = sum(vals) / len(vals) if vals else 0.0
-        print(f"recall@{k}: {avg:.4f} (n={len(vals)})")
+    ks = args.k
+    cs = sorted(args.candidates)
+
+    # Prepare storage: for each k, a base list and one list per candidate-pool c
+    # results[k]["base"] = [recall@k for each query]
+    # results[k][c]    = [simulated recall@k@c for each query]
+    results = {
+        k: {"base": [], **{c: [] for c in cs}}
+        for k in ks
+    }
+
+    # Compute recalls
+    for key, true_list in gt_map.items():
+        pred_list = ann_map.get(key, [])
+        for k in ks:
+            top_true = set(true_list[:k])
+
+            # base recall@k using the ANN top-k
+            top_pred_k = set(pred_list[:k])
+            results[k]["base"].append(len(top_true & top_pred_k) / k)
+
+            # simulated rerank: true@k within ANN top-c
+            for c in cs:
+                candidate_set = set(pred_list[:c])
+                results[k][c].append(len(top_true & candidate_set) / k)
+
+    # Print a table:
+    #    k   base   @c100   @c500   @c1000   ...
+    header = ["k", "base"] + [f"@c{c}" for c in cs]
+    print("  ".join(f"{h:>7}" for h in header))
+
+    for k in ks:
+        line = [str(k)]
+        # base recall
+        base_vals = results[k]["base"]
+        base_avg  = sum(base_vals) / len(base_vals) if base_vals else 0.0
+        line.append(f"{base_avg:.4f}")
+        # each candidate-pool recall
+        for c in cs:
+            vals = results[k][c]
+            avg  = sum(vals) / len(vals) if vals else 0.0
+            line.append(f"{avg:.4f}")
+        print("  ".join(f"{v:>7}" for v in line))
 
 def main():
     p = argparse.ArgumentParser("Recall@k tool")
@@ -189,7 +233,12 @@ def main():
     an = sub.add_parser("analyze", help="Compute recall@k")
     an.add_argument("--gt", required=True)
     an.add_argument("--ann", required=True)
-    an.add_argument("-k", type=int, nargs="+", default=[1,5,10,20])
+    an.add_argument("-k", type=int, nargs="+", default=[1,5,10,20],
+                    help="List of k values for recall@k")
+    an.add_argument("-c","--candidates", type=int, nargs="+",
+                    default=[100,500,1000],
+                    help="Candidate-pool sizes to simulate reranking (default: 100 500 1000)")
+
     an.set_defaults(func=analyze)
 
     args = p.parse_args()
