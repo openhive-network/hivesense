@@ -239,6 +239,9 @@ def main():
                 time.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF)
 
+        # Make sure the DB handle is still alive after the (potentially long) HTTP loop above
+        conn = ensure_connection_alive(conn)
+
         # manage the current_block_num stored in the context.  The way we manage it isn't perfect, but it's
         # probably fine for our usage.
         # When we get a list of ops from the server, we set our current_block_num to the higest one in the
