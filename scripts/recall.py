@@ -41,15 +41,16 @@ def sample(args):
         json.dump(queries, f)
     print(f"Saved {len(queries)} queries to {out}")
 
+
 def search(args):
-    import json, time
+    import json, time, re
     from psycopg2 import sql
 
     conn = get_conn()
     conn.autocommit = True
     cur = conn.cursor()
 
-    # force custom plans + parallel as before
+    # 1) session tuning
     cur.execute("SET plan_cache_mode = force_custom_plan;")
     cur.execute(f"""
         SET max_parallel_workers_per_gather = {args.parallel_workers};
@@ -57,71 +58,116 @@ def search(args):
         SET parallel_tuple_cost = 0;
     """)
 
+    # split schema/table
+    schema, tbl = args.table.split(".", 1)
+    tbl_ident = sql.Identifier(schema, tbl)
+    qualified = f"{schema}.{tbl}"
+
+    # 2) inspect column to find its type & dimensionality
+    cur.execute(
+        sql.SQL("""
+            SELECT pg_typeof(embedding)::text,
+                   vector_dims(embedding)
+              FROM {tbl} LIMIT 1
+        """).format(tbl=tbl_ident)
+    )
+    col_type, dim = cur.fetchone()
+
+    # 2) detect any HNSW index on this table
+    cur.execute("""
+        SELECT 1
+          FROM pg_indexes
+         WHERE schemaname = %s
+           AND tablename  = %s
+           AND indexdef   LIKE '%%USING hnsw%%'
+         LIMIT 1
+    """, (schema, tbl))
+    has_index = cur.fetchone() is not None
+    print(f"→ embedding column is {col_type}({dim}), "
+          f"{'found' if has_index else 'no'} HNSW index")
+
     results = []
     queries = json.load(open(args.queries))
     for idx, q in enumerate(queries, start=1):
         author, permlink, chunk = q["author"], q["permlink"], q["chunk_number"]
         print(f"[{idx}/{len(queries)}] @{author}/{permlink} chunk {chunk}")
 
-        schema, tbl = args.table.split(".", 1)
-        tbl_ident = sql.Identifier(schema, tbl)
-        qualified = f"{schema}.{tbl}"
+        # 4) fetch target vector + its post_id
+        cur.execute(
+            sql.SQL("""
+                SELECT embedding::text, post_id
+                  FROM {tbl}
+                 WHERE post_id = (
+                   SELECT hp.id
+                     FROM hivemind_app.hive_accounts ha
+                     JOIN hivemind_app.hive_posts hp
+                       ON ha.id = hp.author_id
+                     JOIN hivemind_app.hive_permlink_data hpl
+                       ON hp.permlink_id = hpl.id
+                    WHERE ha.name     = %s
+                      AND hpl.permlink = %s
+                 )
+                   AND chunk_number = %s
+            """).format(tbl=tbl_ident),
+            (author, permlink, chunk)
+        )
+        vect, post_id = cur.fetchone()
 
-        # 1) Fetch the target embedding AS TEXT
-        cur.execute(sql.SQL("""
-            SELECT embedding::text, post_id
-              FROM {table}
-             WHERE post_id = (
-               SELECT hp.id
-                 FROM hivemind_app.hive_accounts ha
-                 JOIN hivemind_app.hive_posts hp
-                   ON ha.id = hp.author_id
-                 JOIN hivemind_app.hive_permlink_data hpl
-                   ON hp.permlink_id = hpl.id
-                WHERE ha.name     = %s
-                  AND hpl.permlink = %s
-             )
-               AND chunk_number = %s
-        """).format(table=tbl_ident),
-        (author, permlink, chunk))
-        (vect, post_id) = cur.fetchone()  # vect is "[0.1,-0.2,…]"
-
-        # 2) Do the ANN scan, either forcing a full scan (disable-index)
-        #    or forcing index usage (default)
-        if args.disable_index:
+        # choose planner flags
+        use_index = has_index and not args.disable_index
+        if not use_index:
             cur.execute(
-                "SET enable_indexscan = off; "
-                "SET enable_indexonlyscan = off; "
-                "SET enable_bitmapscan = off;"
+              "SET enable_indexscan = off;"
+              "SET enable_indexonlyscan = off;"
+              "SET enable_bitmapscan = off;"
             )
-            print("  → index scans disabled; doing full scan for ground truth")
+            print("  → full scan mode (no index)")
+            distance_expr = "embedding <=> %s"
+            params = (vect, post_id, chunk, args.topk)
         else:
             cur.execute(
-                "SET enable_seqscan = off; "
-                "SET enable_bitmapscan = off;"
+              "SET enable_seqscan = off;"
+              "SET enable_bitmapscan = off;"
             )
-            print("  → seqscan disabled; will use HNSW index")
+            cur.execute(f"SET hnsw.ef_search = {args.ef_search};")
+            print(f"  → ANN mode via HNSW({col_type}({dim})) ef_search={args.ef_search}")
 
-        cur.execute(f"SET hnsw.ef_search = {args.ef_search};")
+            # build exactly the expr your index needs:
+            if col_type == "vector":
+                # original table: index was on embedding::halfvec(N)
+                col_expr    = f"(embedding::halfvec({dim}))"
+                literal_ct  = f"%s::halfvec({dim})"
+            else:
+                # reduced table: column itself is halfvec(N)
+                col_expr    = "embedding"
+                literal_ct  = f"%s::halfvec({dim})"
 
+            distance_expr = f"{col_expr} <=> {literal_ct}"
+            params = (vect, post_id, chunk, args.topk)
+
+        # now run the top-k
         start = time.perf_counter()
-        cur.execute(f"""
-            WITH best AS (
-              SELECT post_id, chunk_number,
-                     embedding::halfvec(128) <=> '{vect}'::halfvec(128) AS distance
-                FROM {qualified}
-               WHERE NOT (post_id = %s AND chunk_number = %s)
-               ORDER BY distance
-               LIMIT %s
-            )
-            SELECT post_id, chunk_number, distance
-              FROM best
-        """, (post_id, chunk, args.topk))
+        cur.execute(
+            sql.SQL(f"""
+              WITH best AS (
+                SELECT post_id,
+                       chunk_number,
+                       {distance_expr} AS distance
+                  FROM {qualified}
+                 WHERE NOT (post_id = %s AND chunk_number = %s)
+                 ORDER BY distance
+                 LIMIT %s
+              )
+              SELECT post_id, chunk_number, distance
+                FROM best;
+            """),
+            params
+        )
         neighbors = cur.fetchall()
         elapsed = time.perf_counter() - start
-        print(f"    ANN scan took {elapsed:.3f}s")
+        print(f"    scan took {elapsed:.3f}s")
 
-        # 3) Reset all planner tweaks so the join uses normal indexes again
+        # 7) reset everything
         cur.execute(
             "RESET enable_indexscan; "
             "RESET enable_indexonlyscan; "
@@ -129,12 +175,10 @@ def search(args):
             "RESET enable_seqscan;"
         )
 
-        # normalize to Python types
-        neighbors = [(pid, ch, float(dist)) for (pid, ch, dist) in neighbors]
-
-        # 4) Join just those rows back to names/permlinks via B-trees
+        # 8) re‐join via VALUES(...)
+        neighbors = [(pid, ch, float(dist)) for pid, ch, dist in neighbors]
         vals = sql.SQL(",").join(sql.SQL("(%s,%s,%s)") for _ in neighbors)
-        flat = [col for row in neighbors for col in row]
+        flat = [c for row in neighbors for c in row]
         join_q = sql.SQL("""
             SELECT ha.name,
                    hpl.permlink,
@@ -152,8 +196,9 @@ def search(args):
             {"author": a, "permlink": p, "chunk_number": c, "distance": float(d)}
             for (a, p, c, d) in cur.fetchall()
         ]
-
         results.append({"query": q, "neighbors": final})
+
+        # 9) incremental write
         with open(args.output, "w") as f:
             json.dump(results, f)
 
