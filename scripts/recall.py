@@ -4,6 +4,7 @@ import json
 import ast
 import argparse
 import psycopg2
+import time
 
 def get_conn():
     uri = os.getenv("POSTGRES_URI")
@@ -41,7 +42,7 @@ def sample(args):
     print(f"Saved {len(queries)} queries to {out}")
 
 def search(args):
-    import json, os
+    import json, time
     from psycopg2 import sql
 
     conn = get_conn()
@@ -62,75 +63,94 @@ def search(args):
         author, permlink, chunk = q["author"], q["permlink"], q["chunk_number"]
         print(f"[{idx}/{len(queries)}] @{author}/{permlink} chunk {chunk}")
 
-        # split schema and table so Identifier() works correctly
         schema, tbl = args.table.split(".", 1)
         tbl_ident = sql.Identifier(schema, tbl)
+        qualified = f"{schema}.{tbl}"
 
-        # 1) Fetch target embedding
+        # 1) Fetch the target embedding AS TEXT
         cur.execute(sql.SQL("""
-            SELECT embedding
+            SELECT embedding::text, post_id
               FROM {table}
              WHERE post_id = (
                SELECT hp.id
-               FROM hivemind_app.hive_accounts ha
-               JOIN hivemind_app.hive_posts hp
-                 ON ha.id = hp.author_id
-               JOIN hivemind_app.hive_permlink_data hpl
-                 ON hp.permlink_id = hpl.id
-               WHERE ha.name = %s
-                 AND hpl.permlink = %s
+                 FROM hivemind_app.hive_accounts ha
+                 JOIN hivemind_app.hive_posts hp
+                   ON ha.id = hp.author_id
+                 JOIN hivemind_app.hive_permlink_data hpl
+                   ON hp.permlink_id = hpl.id
+                WHERE ha.name     = %s
+                  AND hpl.permlink = %s
              )
                AND chunk_number = %s
         """).format(table=tbl_ident),
         (author, permlink, chunk))
-        (emb,) = cur.fetchone()
+        (vect, post_id) = cur.fetchone()  # vect is "[0.1,-0.2,…]"
 
-        # 2) Nearest‐neighbor brute‐force over vectors only
-        cur.execute("SET enable_indexscan = off; SET enable_indexonlyscan = off;")
-        cur.execute(sql.SQL("""
+        # 2) Do the ANN scan, either forcing a full scan (disable-index)
+        #    or forcing index usage (default)
+        if args.disable_index:
+            cur.execute(
+                "SET enable_indexscan = off; "
+                "SET enable_indexonlyscan = off; "
+                "SET enable_bitmapscan = off;"
+            )
+            print("  → index scans disabled; doing full scan for ground truth")
+        else:
+            cur.execute(
+                "SET enable_seqscan = off; "
+                "SET enable_bitmapscan = off;"
+            )
+            print("  → seqscan disabled; will use HNSW index")
+
+        cur.execute(f"SET hnsw.ef_search = {args.ef_search};")
+
+        start = time.perf_counter()
+        cur.execute(f"""
             WITH best AS (
               SELECT post_id, chunk_number,
-                     embedding <=> %s AS distance
-                FROM {table}
-               WHERE NOT (post_id = (
-                   SELECT hp.id
-                     FROM hivemind_app.hive_accounts ha
-                     JOIN hivemind_app.hive_posts hp
-                       ON ha.id = hp.author_id
-                     JOIN hivemind_app.hive_permlink_data hpl
-                       ON hp.permlink_id = hpl.id
-                    WHERE ha.name = %s
-                      AND hpl.permlink = %s
-                 )
-                 AND chunk_number = %s)
+                     embedding::halfvec(128) <=> '{vect}'::halfvec(128) AS distance
+                FROM {qualified}
+               WHERE NOT (post_id = %s AND chunk_number = %s)
                ORDER BY distance
                LIMIT %s
             )
-            SELECT post_id, chunk_number, distance FROM best
-        """).format(table=tbl_ident),
-        (emb, author, permlink, chunk, args.topk))
+            SELECT post_id, chunk_number, distance
+              FROM best
+        """, (post_id, chunk, args.topk))
         neighbors = cur.fetchall()
-        # make sure the distance is a float
-        neighbors = [(pid, chunk, float(dist)) for (pid,chunk,dist) in neighbors]
+        elapsed = time.perf_counter() - start
+        print(f"    ANN scan took {elapsed:.3f}s")
 
-        # re-enable index scans for the join
-        cur.execute("RESET enable_indexscan; RESET enable_indexonlyscan;")
+        # 3) Reset all planner tweaks so the join uses normal indexes again
+        cur.execute(
+            "RESET enable_indexscan; "
+            "RESET enable_indexonlyscan; "
+            "RESET enable_bitmapscan; "
+            "RESET enable_seqscan;"
+        )
 
-        # 3) Join just those K rows back to names & permlinks via B-trees
-        vals = sql.SQL(',').join(sql.SQL("(%s,%s,%s)") for _ in neighbors)
+        # normalize to Python types
+        neighbors = [(pid, ch, float(dist)) for (pid, ch, dist) in neighbors]
+
+        # 4) Join just those rows back to names/permlinks via B-trees
+        vals = sql.SQL(",").join(sql.SQL("(%s,%s,%s)") for _ in neighbors)
         flat = [col for row in neighbors for col in row]
-        cur.execute(sql.SQL("""
-            SELECT ha.name, hpl.permlink, b.chunk_number, b.distance
+        join_q = sql.SQL("""
+            SELECT ha.name,
+                   hpl.permlink,
+                   b.chunk_number,
+                   b.distance
               FROM (VALUES {vals}) AS b(post_id,chunk_number,distance)
-              JOIN hivemind_app.hive_posts       hp  ON b.post_id = hp.id
+              JOIN hivemind_app.hive_posts          hp  ON b.post_id    = hp.id
               JOIN hivemind_app.hive_permlink_data hpl ON hp.permlink_id = hpl.id
-              JOIN hivemind_app.hive_accounts   ha  ON hp.author_id = ha.id
+              JOIN hivemind_app.hive_accounts      ha  ON hp.author_id  = ha.id
              ORDER BY b.distance;
-        """).format(vals=vals), flat)
+        """).format(vals=vals)
+        cur.execute(join_q, flat)
 
         final = [
-          {"author": a, "permlink": p, "chunk_number": c, "distance": float(d)}
-          for (a,p,c,d) in cur.fetchall()
+            {"author": a, "permlink": p, "chunk_number": c, "distance": float(d)}
+            for (a, p, c, d) in cur.fetchall()
         ]
 
         results.append({"query": q, "neighbors": final})
@@ -223,6 +243,7 @@ def main():
     sch = sub.add_parser("search", help="Run search in Postgres")
     sch.add_argument("--queries", "-i", required=True)
     sch.add_argument("--topk", type=int, default=20)
+    sch.add_argument("--ef-search", type=int, default=40)
     sch.add_argument("--disable-index", action="store_true")
     sch.add_argument("--output", "-o", required=True)
     sch.add_argument("-p","--parallel-workers", type=int,
