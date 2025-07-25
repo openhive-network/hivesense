@@ -341,4 +341,50 @@ BEGIN
 END;
 $$;
 
+/* ---------- explode a JSON matrix [[…],[…],…] into reducing_matrix ---------- */
+CREATE OR REPLACE FUNCTION hivesense_app.load_reducing_matrix(_json jsonb)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    i  INT := 0;
+    v  jsonb;
+BEGIN
+    TRUNCATE hivesense_app.reducing_matrix;
+    FOR v IN SELECT * FROM jsonb_array_elements(_json)
+    LOOP
+        INSERT INTO hivesense_app.reducing_matrix(row_idx, row_vec)
+        VALUES (i, (v::text)::public.vector);
+        i := i + 1;
+    END LOOP;
+END;
+$$;
+
+/* ---------- compute reduced vector (always returns FP32) ---------- */
+CREATE OR REPLACE FUNCTION hivesense_app.reduce_embedding(_emb public.vector)
+RETURNS public.vector
+LANGUAGE plpgsql
+IMMUTABLE PARALLEL SAFE
+AS $$
+DECLARE
+    proj  REAL[];
+BEGIN
+    SELECT array_agg(row_vec <#> _emb ORDER BY row_idx)
+      INTO proj
+      FROM hivesense_app.reducing_matrix;
+    RETURN proj::public.vector;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION hivesense_app.use_reduced_embeddings()
+RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT use_reduced_embeddings FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
+
+CREATE OR REPLACE FUNCTION hivesense_app.reduced_dims()
+RETURNS int
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT reduced_dim FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
+
+
 RESET ROLE;

@@ -68,6 +68,11 @@ MIN_TOKEN_THRESHOLD=75
 MIN_TOKEN_SEARCH_THRESHOLD=0
 MAX_EMBEDINGS_PER_POST=0
 MAINTENANCE_WORK_MEM=28    # GB
+USE_REDUCED_EMBEDDINGS=false
+REDUCED_DIM=0          # must be set when flag=true
+REDUCED_MATRIX_JSON=""
+HNSW_M=32
+HNSW_EF_CONSTRUCTION=400
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -134,6 +139,21 @@ while [ $# -gt 0 ]; do
     --maintenance-work-mem=*)
       MAINTENANCE_WORK_MEM="${1#*=}"
       ;;
+    --use-reduced-embeddings=*)
+	USE_REDUCED_EMBEDDINGS="${1#*=}"
+	;;
+    --reduced-dim=*)
+	REDUCED_DIM="${1#*=}"
+	;;
+    --reduced-matrix-json=*)
+	REDUCED_MATRIX_JSON="${1#*=}"
+	;;
+    --hnsw-m=*)
+	HNSW_M="${1#*=}"
+	;;
+    --hnsw-ef-construction=*)
+	HNSW_EF_CONSTRUCTION="${1#*=}"
+	;;
     --start_block=*)
             START_BLOCK="${1#*=}"
         ;;
@@ -196,9 +216,27 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.MIN_TOKEN_SEARCH_THRESHOLD TO ${MIN_TOKEN_SEARCH_THRESHOLD};
   SET pg_temp.MAX_EMBEDINGS_PER_POST TO '${MAX_EMBEDINGS_PER_POST}';
   SET pg_temp.MAINTENANCE_WORK_MEM TO ${MAINTENANCE_WORK_MEM};
+  SET pg_temp.USE_REDUCED_EMBEDDINGS TO ${USE_REDUCED_EMBEDDINGS};
+  SET pg_temp.REDUCED_DIM           TO ${REDUCED_DIM};
+  SET pg_temp.HNSW_M                TO ${HNSW_M};
+  SET pg_temp.HNSW_EF_CONSTRUCTION  TO ${HNSW_EF_CONSTRUCTION};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
+
+if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
+  if [ -z "$REDUCED_MATRIX_JSON" ]; then
+    echo "ERROR: --reduced-matrix-json is required when --use-reduced-embeddings=true"
+    exit 1
+  fi
+  echo "Loading projection matrix ($REDUCED_MATRIX_JSON)…"
+  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on <<EOF
+    SET ROLE hivesense_owner;
+    SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
+    SELECT hivesense_app.load_reducing_matrix(\$\$$(cat "$REDUCED_MATRIX_JSON")\$\$::jsonb);
+EOF
+fi
+
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/ollama.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/search.sql"
