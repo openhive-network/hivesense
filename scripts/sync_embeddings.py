@@ -282,15 +282,18 @@ def main():
                 )
                 time.sleep(1)
 
-        # resolve all post_ids (should now exist)
+        # resolve all post_ids (retry on missing posts)
         resolved = []  # list of tuples (op, post_id)
         with conn.cursor() as cur:
             for op in ops:
                 post_id = resolve_post_id(cur, op["author"], op["permlink"])
-                if post_id is None:
-                    raise RuntimeError(
-                        f"Post {op['author']}/{op['permlink']} not found after block {max_block}"
+                while post_id is None:
+                    logging.warning(
+                        "Post %s/%s not found after block %s; retrying in 1s",
+                        op["author"], op["permlink"], max_block
                     )
+                    time.sleep(1)
+                    post_id = resolve_post_id(cur, op["author"], op["permlink"])
                 resolved.append((op, post_id))
 
         max_last_vectors_block = 0
