@@ -64,7 +64,7 @@ BEGIN
   -- the total number of tokens in that post.  We insert one row per post_id.
   CREATE TABLE IF NOT EXISTS hivesense_app.post_data
   (
-      post_id            INT PRIMARY KEY REFERENCES hivemind_app.hive_posts(id),
+      post_id            INT PRIMARY KEY REFERENCES hivemind_app.hive_posts(id) DEFERRABLE INITIALLY DEFERRED,
       number_of_tokens   INT NOT NULL,
       last_vectors_block INT NOT NULL DEFAULT -1
   );
