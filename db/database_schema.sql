@@ -62,9 +62,11 @@ BEGIN
 
   -- This table will hold, for every post_id that we generate embeddings for,
   -- the total number of tokens in that post.  We insert one row per post_id.
+  -- note: the commented-out foreign key to hivemind_app is believed to cause deadlock,
+  -- particularly when hivesense is syncing alongside hivemind
   CREATE TABLE IF NOT EXISTS hivesense_app.post_data
   (
-      post_id            INT PRIMARY KEY REFERENCES hivemind_app.hive_posts(id) DEFERRABLE INITIALLY DEFERRED,
+      post_id            INT PRIMARY KEY, -- REFERENCES hivemind_app.hive_posts(id) DEFERRABLE INITIALLY DEFERRED,
       number_of_tokens   INT NOT NULL,
       last_vectors_block INT NOT NULL DEFAULT -1
   );
