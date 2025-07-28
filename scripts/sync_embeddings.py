@@ -209,6 +209,8 @@ def main():
         # determine how far we've synced
         with conn.cursor() as cur:
             after_seq = get_last_seq(cur)
+        # we may sleep just below, so rollback to avoid holding any locks
+        conn.rollback()
 
         # fetch ops
         backoff = RETRY_SLEEP
@@ -274,6 +276,10 @@ def main():
                 with conn.cursor() as cur:
                     cur.execute("SELECT hive.app_get_current_block_num('hivemind_app')")
                     head = cur.fetchone()[0]
+
+                # rollback to avoid hold any locks on the context if we sleep below
+                conn.rollback()
+
                 if head >= max_block:
                     break
                 logging.info(
@@ -292,6 +298,8 @@ def main():
                         "Post %s/%s not found after block %s; retrying in 1s",
                         op["author"], op["permlink"], max_block
                     )
+                    # rollback to close the transaction and release the lock on hive_posts
+                    conn.rollback()
                     time.sleep(1)
                     post_id = resolve_post_id(cur, op["author"], op["permlink"])
                 resolved.append((op, post_id))
