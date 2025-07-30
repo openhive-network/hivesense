@@ -166,15 +166,20 @@ def apply_op(cur, op, post_id):
          op.get("number_of_tokens", 0),
          op.get("last_vectors_block", 0))
     )
+    cur.execute("""
+        SELECT hivesense_app.use_reduced_embeddings()
+    """)
+    use_reduced_embeddings = cur.fetchone()[0]
     if op["op"] == "delete":
         cur.execute(
             "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
             (post_id,)
         )
-        cur.execute(
-            "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
-            (post_id,)
-        )
+        if use_reduced_embeddings:
+            cur.execute(
+                "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
+                (post_id,)
+            )
         cur.execute(
             """
             INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
@@ -188,16 +193,14 @@ def apply_op(cur, op, post_id):
             "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
             (post_id,)
         )
-        cur.execute(
-            "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
-            (post_id,)
-        )
+        if use_reduced_embeddings:
+            cur.execute(
+                "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
+                (post_id,)
+            )
         upsert_vectors(cur, post_id, op["sync_seq"], op["embeddings"])
-        # insert reduced vectors, but only if feature enabled
-        cur.execute("""
-            SELECT hivesense_app.use_reduced_embeddings()
-        """)
-        if cur.fetchone()[0]:
+        # insert reduced vectors
+        if use_reduced_embeddings:
             cur.execute("""
                 INSERT INTO hivesense_app.posts_vectors_reduced
                     (post_id, chunk_number, reduced_embedding)

@@ -98,67 +98,74 @@ CREATE OR REPLACE PROCEDURE CREATE_HNSW_INDEX()
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    dim   int     := hivesense_app.EMBEDDING_DIMS();
-    half  boolean := hivesense_app.USE_HALFVEC_INDEX();
-    store boolean := hivesense_app.STORE_HALFVEC_EMBEDDINGS();
-    idx_exists boolean;
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    dim         int     := CASE WHEN use_reduced
+                                THEN hivesense_app.reduced_dims()
+                                ELSE hivesense_app.embedding_dims()
+                           END;
+    half        boolean := hivesense_app.use_halfvec_index();
+    store       boolean := hivesense_app.store_halfvec_embeddings();
+    m           int     := (SELECT hnsw_m              FROM hivesense_app.hivesense_app_status LIMIT 1);
+    efc         int     := (SELECT hnsw_ef_construction FROM hivesense_app.hivesense_app_status LIMIT 1);
+    idx_exists  boolean;
+    tgt_table   text;
+    tgt_col     text;
+    idx_name    text;
 BEGIN
-    IF store THEN
-        -- half‐precision on‐disk embedding index
-        SELECT EXISTS(
-           SELECT 1
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'hivesense_app'
-              AND c.relname  = 'posts_vectors_embedding_half_hnsw'
-        ) INTO idx_exists;
-
-        IF NOT idx_exists THEN
-            RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
-            CREATE INDEX posts_vectors_embedding_half_hnsw
-              ON hivesense_app.posts_vectors
-            USING hnsw (embedding public.halfvec_cosine_ops)
-            WITH (m = 32, ef_construction = 400);
-        END IF;
-
-    ELSIF half THEN
-        -- half‐precision casted at index time
-        SELECT EXISTS(
-           SELECT 1
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'hivesense_app'
-              AND c.relname  = 'posts_vectors_embedding_half_hnsw'
-        ) INTO idx_exists;
-
-        IF NOT idx_exists THEN
-            RAISE NOTICE 'Creating half-precision HNSW index (%s-d)…', dim;
-            EXECUTE format(
-              'CREATE INDEX posts_vectors_embedding_half_hnsw
-                 ON hivesense_app.posts_vectors
-               USING hnsw ((embedding::public.halfvec(%1$s)) public.halfvec_cosine_ops)
-               WITH (m = 32, ef_construction = 400)',
-              dim
-            );
-        END IF;
-
+    /* -----------------------------------------------------------
+     * Decide which table/column we are indexing
+     * ----------------------------------------------------------*/
+    IF use_reduced THEN
+        tgt_table := 'hivesense_app.posts_vectors_reduced';
+        tgt_col   := 'reduced_embedding';
     ELSE
-        -- full‐precision embedding index
-        SELECT EXISTS(
-           SELECT 1
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'hivesense_app'
-              AND c.relname  = 'posts_vectors_embedding_hnsw'
-        ) INTO idx_exists;
+        tgt_table := 'hivesense_app.posts_vectors';
+        tgt_col   := 'embedding';
+    END IF;
 
-        IF NOT idx_exists THEN
-            RAISE NOTICE 'Creating full-precision HNSW index (%s-d)…', dim;
-            CREATE INDEX posts_vectors_embedding_hnsw
-              ON hivesense_app.posts_vectors
-            USING hnsw (embedding public.vector_cosine_ops)
-            WITH (m = 32, ef_construction = 400);
-        END IF;
+    /* -----------------------------------------------------------
+     * Build index name and existence check
+     * ----------------------------------------------------------*/
+    idx_name := format(
+       '%s_%s_%s_hnsw',
+       substring(tgt_table from '[^.]+$'),        -- strip schema
+       tgt_col,
+       CASE
+         WHEN store OR half THEN 'half' ELSE 'full'
+       END
+    );
+
+    SELECT EXISTS(
+       SELECT 1
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'hivesense_app'
+          AND c.relname  = idx_name
+    ) INTO idx_exists;
+
+    IF idx_exists THEN
+        RETURN;
+    END IF;
+
+    /* -----------------------------------------------------------
+     * Compose CREATE INDEX statement
+     * ----------------------------------------------------------*/
+
+    IF store THEN
+        EXECUTE format(
+          'CREATE INDEX %I ON %s USING hnsw (%I public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, m, efc
+        );
+    ELSIF half THEN
+        EXECUTE format(
+          'CREATE INDEX %I ON %s USING hnsw ((%I::public.halfvec(%s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, m, efc
+        );
+    ELSE
+        EXECUTE format(
+          'CREATE INDEX %I ON %s USING hnsw (%I public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, m, efc
+        );
     END IF;
 END;
 $$;
@@ -180,7 +187,11 @@ DECLARE
     __index_size BIGINT;
     __creation_rate NUMERIC;
     __creation_time_info TEXT;
-    __vector_dimensions INT;
+    __vector_dimensions INT := CASE
+          WHEN hivesense_app.use_reduced_embeddings()
+               THEN hivesense_app.reduced_dims()
+          ELSE hivesense_app.embedding_dims()
+         END;
     __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
                                   FROM   hivesense_app.hivesense_app_status
                                   LIMIT  1);
