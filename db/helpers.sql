@@ -367,9 +367,9 @@ LANGUAGE plpgsql
 IMMUTABLE PARALLEL SAFE
 AS $$
 DECLARE
-    proj  REAL[];
+    proj  float4[];
 BEGIN
-    SELECT array_agg(row_vec <#> _emb ORDER BY row_idx)
+    SELECT array_agg((row_vec::public.vector) <#> (_emb::public.vector) ORDER BY row_idx)
       INTO proj
       FROM hivesense_app.reducing_matrix;
     RETURN proj::public.vector;

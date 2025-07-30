@@ -172,6 +172,10 @@ def apply_op(cur, op, post_id):
             (post_id,)
         )
         cur.execute(
+            "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
+            (post_id,)
+        )
+        cur.execute(
             """
             INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
             VALUES (%s, %s)
@@ -184,7 +188,31 @@ def apply_op(cur, op, post_id):
             "DELETE FROM hivesense_app.posts_vectors WHERE post_id = %s",
             (post_id,)
         )
+        cur.execute(
+            "DELETE FROM hivesense_app.posts_vectors_reduced WHERE post_id = %s",
+            (post_id,)
+        )
         upsert_vectors(cur, post_id, op["sync_seq"], op["embeddings"])
+        # insert reduced vectors, but only if feature enabled
+        cur.execute("""
+            SELECT hivesense_app.use_reduced_embeddings()
+        """)
+        if cur.fetchone()[0]:
+            cur.execute("""
+                INSERT INTO hivesense_app.posts_vectors_reduced
+                    (post_id, chunk_number, reduced_embedding)
+                SELECT
+                    post_id,
+                    chunk_number,
+                    CASE
+                        WHEN hivesense_app.store_halfvec_embeddings()
+                             THEN hivesense_app.reduce_embedding(embedding::public.vector)::public.halfvec
+                        ELSE hivesense_app.reduce_embedding(embedding::public.vector)
+                    END
+                FROM hivesense_app.posts_vectors
+                WHERE post_id = %s
+                ORDER BY chunk_number
+            """, (post_id,))
 
 
 def main():

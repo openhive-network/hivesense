@@ -79,6 +79,7 @@ DECLARE
     rec RECORD;
     __sync_seq INT;
 BEGIN
+    SET search_path = hivesense_app, public;
     SELECT tokenizer_model,
            tokens_per_chunk,
            1 - overlap_amount,
@@ -249,6 +250,23 @@ BEGIN
         FROM tmp_vectors
         WHERE post_id = rec.post_id
         ORDER BY chunk_number;
+
+        IF hivesense_app.use_reduced_embeddings() THEN
+            INSERT INTO hivesense_app.posts_vectors_reduced(
+                post_id, chunk_number, reduced_embedding
+            )
+            SELECT
+                post_id,
+                chunk_number,
+                CASE
+                    WHEN hivesense_app.store_halfvec_embeddings()
+                         THEN hivesense_app.reduce_embedding(vec::public.vector)::public.halfvec
+                    ELSE hivesense_app.reduce_embedding(vec::public.vector)
+                END
+            FROM tmp_vectors
+            WHERE post_id = rec.post_id
+            ORDER BY chunk_number;
+        END IF;
 
         GET DIAGNOSTICS __c = ROW_COUNT;
 
