@@ -39,6 +39,7 @@ BEGIN
     min_token_threshold INT NOT NULL DEFAULT 75, -- don't generate embeddings for posts shorter than this number of tokens
     min_token_search_threshold INT NOT NULL DEFAULT 0, -- ignore posts < this size when *searching* (0 = disabled)
     max_embeddings_per_post INT, -- max number of chunks per post, NULL for unlimited
+    desired_maintenance_work_mem_gb INT NOT NULL DEFAULT 28, -- target maintenance_work_mem (GB)
     advisory_lock_namespace_begin INT, -- start of advisory lock namespace, if running multiple instances, use different values (separated by, say, 10 or so)
     max_visible_sync_seq INT NOT NULL DEFAULT 0, -- highest sync sequence number to publish, anything higher may have gaps that will be filled later
     syncing_embeddings BOOLEAN, -- true if we're syncing emeddings, false if computing locally
@@ -126,6 +127,7 @@ INSERT INTO hivesense_app_status
   min_token_threshold,
   min_token_search_threshold,
   max_embeddings_per_post,
+  desired_maintenance_work_mem_gb,
   advisory_lock_namespace_begin,
   max_visible_sync_seq,
   syncing_embeddings,
@@ -151,6 +153,7 @@ VALUES
     current_setting('PG_TEMP.MIN_TOKEN_THRESHOLD', TRUE)::INT,
     current_setting('PG_TEMP.MIN_TOKEN_SEARCH_THRESHOLD', TRUE)::INT,
     NULLIF(current_setting('PG_TEMP.MAX_EMBEDINGS_PER_POST', TRUE)::INT, 0),
+    current_setting('PG_TEMP.MAINTENANCE_WORK_MEM', TRUE)::INT,
     10000, -- advisory_lock_namespace_begin
     0,     -- max_visible_sync_seq
     NULL,  -- syncing_embeddings

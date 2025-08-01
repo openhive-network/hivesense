@@ -41,6 +41,18 @@ DECLARE
     batch_size         int;
     sql                text;
     __min_search_tokens int;
+
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    tgt_table   text    := CASE WHEN use_reduced
+                                THEN 'hivesense_app.posts_vectors_reduced'
+                                ELSE 'hivesense_app.posts_vectors'
+                           END;
+    tgt_column  text    := CASE WHEN use_reduced
+                                THEN 'reduced_embedding'
+                                ELSE 'embedding'
+                           END;
+    -- when reduced, we’ll keep ANN distance in a CTE column “d” (float4)
+    prv_clause  text;   -- prepared ORDER BY clause
 BEGIN
     -- grab the incoming headers JSON (if any)
     SELECT current_setting('request.headers', true)::json
@@ -69,13 +81,25 @@ BEGIN
      WHERE id = 1;
 
     RAISE NOTICE 'In find_nearest_posts_with_embedding(vec, %, %, %, %)', _limit, _exclude_post_id, _observer_id, _start_post_id;
+    
+    /* ------------------------------------------------------------
+     * Compose column list for ANN search
+     * -----------------------------------------------------------*/
+    IF use_reduced THEN
+        -- ANN on reduced_embedding; we’ll later JOIN to full table for rerank
+        prv_clause := format('%I <#> $1', tgt_column);   -- distance on reduced
+    ELSE
+        prv_clause := dist_clause;                       -- existing helper (full)
+    END IF;
 
     LOOP
         RAISE NOTICE 'Getting % posts (batch_size: %)', batch_size, batch_size;
         sql := format($q$
-            SELECT hpv.post_id, %s AS similarity
-              FROM hivesense_app.posts_vectors hpv
-              JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+            WITH ann AS (
+                SELECT hpv.post_id,
+                       %s AS d
+                  FROM %s hpv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
              WHERE ($2 IS NULL OR hpv.post_id <> $2)
                AND ($3 = 0 OR NOT EXISTS (
                      SELECT 1
@@ -83,9 +107,25 @@ BEGIN
                       WHERE m.observer_id = $3
                         AND m.muted_id    = hp.author_id
                    ))
-             ORDER BY similarity, hpv.post_id
-             LIMIT %s
-        $q$, dist_clause, batch_size);
+                ORDER BY d, hpv.post_id
+                LIMIT %s
+            )
+            SELECT ann.post_id,
+                   CASE
+                       WHEN %L THEN  -- use_reduced?  (passed as literal)
+                         -- compute **true** cosine distance with full embedding
+                         (pv.embedding <=> $1)::float4
+                       ELSE ann.d
+                   END AS similarity
+            FROM ann
+            JOIN hivesense_app.posts_vectors pv
+              ON pv.post_id = ann.post_id
+        $q$,
+          prv_clause,               -- %s 1
+          tgt_table,                -- %s 2
+          batch_size,               -- %s 3
+          use_reduced               -- %L literal
+        );
 
         FOR rec IN EXECUTE sql
             USING _embedding, _exclude_post_id, _observer_id

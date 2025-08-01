@@ -38,6 +38,7 @@ print_help () {
     echo "  --min-token-threshold=INT             Don't generate embeddings for posts with fewer than this number of tokens"
     echo "  --min-token-search-threshold=INT      Don't return search results for posts with fewer than this number of tokens"
     echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
+    echo "  --maintenance-work-mem                Desired setting of maintenance_work_mem to use while creating the HNSW index"
     echo "  --help                                Display this help screen and exit"
     echo
 }
@@ -66,6 +67,7 @@ QUERY_PREFIX='query: '
 MIN_TOKEN_THRESHOLD=75
 MIN_TOKEN_SEARCH_THRESHOLD=0
 MAX_EMBEDINGS_PER_POST=0
+MAINTENANCE_WORK_MEM=28    # GB
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -129,6 +131,9 @@ while [ $# -gt 0 ]; do
     --max-embeddings-per-post=*)
         MAX_EMBEDINGS_PER_POST="${1#*=}"
         ;;
+    --maintenance-work-mem=*)
+      MAINTENANCE_WORK_MEM="${1#*=}"
+      ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
         ;;
@@ -190,6 +195,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};
   SET pg_temp.MIN_TOKEN_SEARCH_THRESHOLD TO ${MIN_TOKEN_SEARCH_THRESHOLD};
   SET pg_temp.MAX_EMBEDINGS_PER_POST TO '${MAX_EMBEDINGS_PER_POST}';
+  SET pg_temp.MAINTENANCE_WORK_MEM TO ${MAINTENANCE_WORK_MEM};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"

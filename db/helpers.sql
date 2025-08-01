@@ -181,6 +181,9 @@ DECLARE
     __creation_rate NUMERIC;
     __creation_time_info TEXT;
     __vector_dimensions INT;
+    __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
+                                  FROM   hivesense_app.hivesense_app_status
+                                  LIMIT  1);
 BEGIN
     -- Check if index already exists
     SELECT EXISTS (
@@ -244,14 +247,14 @@ BEGIN
         __max_parallel_maintenance_workers := LEAST(32, __max_parallel_workers);
         
         -- Determine appropriate maintenance_work_mem based on system memory
-        IF __system_memory_gb >= 120 THEN
-            __new_maintenance_work_mem := '90GB';
-            RAISE NOTICE 'System has sufficient memory (% GB >= 120 GB). Setting maintenance_work_mem to %', 
-                        ROUND(__system_memory_gb, 1), __new_maintenance_work_mem;
+        IF __system_memory_gb >= (__desired_work_mem_gb + 30) THEN
+            __new_maintenance_work_mem := __desired_work_mem_gb || 'GB';
+            RAISE NOTICE 'System has ≥ desired + 30 GB (%.1f GB).  Setting maintenance_work_mem to %',
+                        __system_memory_gb, __new_maintenance_work_mem;
         ELSE
             __new_maintenance_work_mem := __current_maintenance_work_mem;
-            RAISE NOTICE 'System has limited memory (% GB < 120 GB). Keeping maintenance_work_mem at current value: %', 
-                        ROUND(__system_memory_gb, 1), __new_maintenance_work_mem;
+            RAISE NOTICE 'System memory (%.1f GB) < desired + 30 GB (target %.0f GB + 30).  Leaving maintenance_work_mem at %',
+                        __system_memory_gb, __desired_work_mem_gb, __new_maintenance_work_mem;
         END IF;
         
         -- Set maintenance_work_mem based on memory check
