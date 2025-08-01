@@ -154,6 +154,9 @@ while [ $# -gt 0 ]; do
     --hnsw-ef-construction=*)
 	HNSW_EF_CONSTRUCTION="${1#*=}"
 	;;
+    --maintenance-work-mem=*)
+      MAINTENANCE_WORK_MEM="${1#*=}"
+      ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
         ;;

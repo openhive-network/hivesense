@@ -1,79 +1,104 @@
 SET ROLE hivesense_owner;
 
-DROP TYPE IF EXISTS similar_post_result CASCADE;
-CREATE TYPE similar_post_result AS (
+DROP TYPE IF EXISTS hivesense_app.similar_post_result CASCADE;
+CREATE TYPE hivesense_app.similar_post_result AS (
     similarity_order INT,
     post_id INT
 );
 
 DROP FUNCTION IF EXISTS find_nearest_posts_with_embedding;
 CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding(
-  _embedding       vector,
+  _embedding       public.vector,  -- full-size query embedding
   _limit           int     DEFAULT 10,
   _exclude_post_id int     DEFAULT NULL,
   _observer_id     int     DEFAULT 0,
   _start_post_id   int     DEFAULT 0
 )
-RETURNS SETOF similar_post_result
+RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $$
 DECLARE
-    -- Build the distance expression against $1 (our _embedding)
-    dist_clause   text := hivesense_app.distance_clause(1);
+    ----------------------------------------------------------------
+    -- global flags & dimensions
+    ----------------------------------------------------------------
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    store_half  boolean := hivesense_app.store_halfvec_embeddings();
+    half_index  boolean := hivesense_app.use_halfvec_index();
+
+    full_dim    int := hivesense_app.embedding_dims();
+    red_dim     int := hivesense_app.reduced_dims();
+
+    -- reduced query vector (only used when use_reduced)
+    query_red   public.vector;
+
+    ----------------------------------------------------------------
+    -- dynamic clauses
+    ----------------------------------------------------------------
+    dist_full   text := hivesense_app.distance_clause(1);  -- for rerank
+    dist_red    text;                                      -- for ANN
+
+    tgt_tbl     text := CASE WHEN use_reduced
+                              THEN 'hivesense_app.posts_vectors_reduced'
+                              ELSE 'hivesense_app.posts_vectors'
+                         END;
+    tgt_col     text := CASE WHEN use_reduced
+                              THEN 'reduced_embedding'
+                              ELSE 'embedding'
+                         END;
+
+    ----------------------------------------------------------------
+    -- legacy variables (unchanged)
+    ----------------------------------------------------------------
     rec           RECORD;
-    _num_tokens   int;
-    -- track which post_ids we’ve already returned
     seen_ids      int[] := ARRAY[]::int[];
-    -- how many DISTINCT posts we’ve returned so far
     count_posts   int   := 0;
-    -- we stop once we’ve hit either _limit or 1000, whichever is smaller
     max_posts     int   := LEAST(_limit, 1000);
-    -- if _start_post_id=0 we collect immediately; otherwise skip until we see it
     collecting    bool  := (_start_post_id = 0);
 
-    -- pull headers and defaults
     req_headers        json;
-    batch_multiplier   int   := 5;     -- default multiplier
-    exploratory_factor int   := 1000;  -- default ef_search
-
-    -- batch size will be set in BEGIN
+    batch_multiplier   int := 5;
+    exploratory_factor int := 1000;
     batch_size         int;
     sql                text;
     __min_search_tokens int;
-
-    use_reduced boolean := hivesense_app.use_reduced_embeddings();
-    tgt_table   text    := CASE WHEN use_reduced
-                                THEN 'hivesense_app.posts_vectors_reduced'
-                                ELSE 'hivesense_app.posts_vectors'
-                           END;
-    tgt_column  text    := CASE WHEN use_reduced
-                                THEN 'reduced_embedding'
-                                ELSE 'embedding'
-                           END;
-    -- when reduced, we’ll keep ANN distance in a CTE column “d” (float4)
-    prv_clause  text;   -- prepared ORDER BY clause
+    _num_tokens         int;
 BEGIN
-    -- grab the incoming headers JSON (if any)
-    SELECT current_setting('request.headers', true)::json
-      INTO req_headers;
+    ----------------------------------------------------------------
+    -- Build reduced query once (if needed)
+    ----------------------------------------------------------------
+    IF use_reduced THEN
+        query_red := hivesense_app.reduce_embedding(_embedding);
+    END IF;
 
-    -- override defaults if headers are present
-    batch_multiplier := COALESCE(
-        (req_headers->>'x-batch-size-multiplier')::int,
-        batch_multiplier
-    );
-    exploratory_factor := COALESCE(
-        (req_headers->>'x-exploratory-factor')::int,
-        exploratory_factor
-    );
+    ----------------------------------------------------------------
+    -- Build ANN distance clause for reduced or full path
+    ----------------------------------------------------------------
+    IF NOT use_reduced THEN
+        dist_red := dist_full;        -- same column & same param pos
+    ELSE
+        IF store_half THEN
+            dist_red := format('%I <=> $2::public.halfvec(%s)', tgt_col, red_dim);
+        ELSIF half_index THEN
+            dist_red := format('(%I::public.halfvec(%2$s)) <=> $2::public.halfvec(%2$s)',
+                                tgt_col, red_dim);
+        ELSE
+            dist_red := format('%I <=> $2', tgt_col);
+        END IF;
+    END IF;
 
-    -- initialize batch_size using the (possibly overridden) multiplier
+    ----------------------------------------------------------------
+    -- operator tuning & header overrides (unchanged)
+    ----------------------------------------------------------------
+    SELECT current_setting('request.headers', true)::json INTO req_headers;
+    batch_multiplier := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
+                                 batch_multiplier);
+    exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
+                                   exploratory_factor);
     batch_size := GREATEST(_limit * batch_multiplier, 50);
 
-    -- tune pgvector index parameters
-    PERFORM set_config('ivfflat.probes',    '4',                        true);
-    PERFORM set_config('hnsw.ef_search',    exploratory_factor::text,   true);
+    PERFORM set_config('ivfflat.probes', '4', true);
+    PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
 
     SELECT min_token_search_threshold
       INTO __min_search_tokens
@@ -82,99 +107,145 @@ BEGIN
 
     RAISE NOTICE 'In find_nearest_posts_with_embedding(vec, %, %, %, %)', _limit, _exclude_post_id, _observer_id, _start_post_id;
     
-    /* ------------------------------------------------------------
-     * Compose column list for ANN search
-     * -----------------------------------------------------------*/
-    IF use_reduced THEN
-        -- ANN on reduced_embedding; we’ll later JOIN to full table for rerank
-        prv_clause := format('%I <#> $1', tgt_column);   -- distance on reduced
-    ELSE
-        prv_clause := dist_clause;                       -- existing helper (full)
-    END IF;
 
+    ----------------------------------------------------------------
+    -- MAIN retrieval loop
+    ----------------------------------------------------------------
     LOOP
-        RAISE NOTICE 'Getting % posts (batch_size: %)', batch_size, batch_size;
-        sql := format($q$
-            WITH ann AS (
-                SELECT hpv.post_id,
-                       %s AS d
-                  FROM %s hpv
-                  JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
-             WHERE ($2 IS NULL OR hpv.post_id <> $2)
-               AND ($3 = 0 OR NOT EXISTS (
-                     SELECT 1
-                       FROM hivemind_app.muted_accounts_by_id_view m
-                      WHERE m.observer_id = $3
-                        AND m.muted_id    = hp.author_id
-                   ))
-                ORDER BY d, hpv.post_id
-                LIMIT %s
-            )
-            SELECT ann.post_id,
-                   CASE
-                       WHEN %L THEN  -- use_reduced?  (passed as literal)
-                         -- compute **true** cosine distance with full embedding
-                         (pv.embedding <=> $1)::float4
-                       ELSE ann.d
-                   END AS similarity
-            FROM ann
-            JOIN hivesense_app.posts_vectors pv
-              ON pv.post_id = ann.post_id
-        $q$,
-          prv_clause,               -- %s 1
-          tgt_table,                -- %s 2
-          batch_size,               -- %s 3
-          use_reduced               -- %L literal
-        );
+        /* ============== 1️⃣  compose the ANN query ============== */
+        IF use_reduced THEN
+            sql := format($q$
+                WITH ann AS (
+                    SELECT hpv.post_id,
+                           %s AS ann_dist
+                      FROM hivesense_app.posts_vectors_reduced hpv
+                      JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+                     WHERE ($3 IS NULL OR hpv.post_id <> $3)
+                       AND ($4 = 0 OR NOT EXISTS (
+                             SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                              WHERE m.observer_id = $4
+                                AND m.muted_id    = hp.author_id))
+                     ORDER BY ann_dist, hpv.post_id
+                     LIMIT %s
+                )
+                SELECT ann.post_id,
+                       (pv.embedding <=> $1)::float4 AS similarity
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id = ann.post_id
+            $q$, dist_red, batch_size);
 
-        FOR rec IN EXECUTE sql
-            USING _embedding, _exclude_post_id, _observer_id
-        LOOP
-            -- global duplicate filter
-            IF rec.post_id = ANY(seen_ids) THEN
-                CONTINUE;
-            END IF;
-            -- mark as seen
-            seen_ids := array_append(seen_ids, rec.post_id);
-
-            -- handle start_post_id: skip everything until we see that post_id
-            IF NOT collecting THEN
-                IF rec.post_id = _start_post_id THEN
-                    collecting := true;
+            FOR rec IN EXECUTE sql
+                USING _embedding,               -- $1  full 768-d
+                      query_red,                -- $2  reduced 128-d
+                      _exclude_post_id,         -- $3
+                      _observer_id              -- $4
+            LOOP
+                -- global duplicate filter
+                IF rec.post_id = ANY(seen_ids) THEN
+                    CONTINUE;
                 END IF;
-                CONTINUE;
-            END IF;
+                -- mark as seen
+                seen_ids := array_append(seen_ids, rec.post_id);
 
-            -- never return the start_post_id itself
-            IF rec.post_id = _start_post_id THEN
-                CONTINUE;
-            END IF;
+                -- handle start_post_id: skip everything until we see that post_id
+                IF NOT collecting THEN
+                    IF rec.post_id = _start_post_id THEN
+                        collecting := true;
+                    END IF;
+                    CONTINUE;
+                END IF;
 
-            -- skip posts below the token threshold
-            IF __min_search_tokens > 0 THEN
-              SELECT number_of_tokens
-                INTO _num_tokens
-                FROM hivesense_app.post_data
-               WHERE post_id = rec.post_id;
-              IF _num_tokens < __min_search_tokens THEN
-                CONTINUE;
-              END IF;
-            END IF;
+                -- never return the start_post_id itself
+                IF rec.post_id = _start_post_id THEN
+                    CONTINUE;
+                END IF;
 
-            -- emit this post
-            count_posts   := count_posts + 1;
-            RAISE NOTICE 'Adding post with similarity %', rec.similarity;
-            RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
+                -- skip posts below the token threshold
+                IF __min_search_tokens > 0 THEN
+                  SELECT number_of_tokens
+                    INTO _num_tokens
+                    FROM hivesense_app.post_data
+                   WHERE post_id = rec.post_id;
+                  IF _num_tokens < __min_search_tokens THEN
+                    CONTINUE;
+                  END IF;
+                END IF;
 
-            -- stop once we’ve emitted enough
-            EXIT WHEN count_posts >= max_posts;
-        END LOOP;
+                -- emit this post
+                count_posts   := count_posts + 1;
+                RAISE NOTICE 'Adding post with similarity %', rec.similarity;
+                RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
 
+                -- stop once we've emitted enough
+                EXIT WHEN count_posts >= max_posts;
+            END LOOP;
+
+        ELSE   /* ---------- full-vector path (original query) ---------- */
+
+            sql := format($q$
+                SELECT hpv.post_id, %s AS similarity
+                  FROM hivesense_app.posts_vectors hpv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+                 WHERE ($2 IS NULL OR hpv.post_id <> $2)
+                   AND ($3 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $3
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY similarity, hpv.post_id
+                 LIMIT %s
+            $q$, dist_full, batch_size);
+
+            FOR rec IN EXECUTE sql
+                USING _embedding,               -- $1
+                      _exclude_post_id,         -- $2
+                      _observer_id              -- $3
+            LOOP
+                -- global duplicate filter
+                IF rec.post_id = ANY(seen_ids) THEN
+                    CONTINUE;
+                END IF;
+                -- mark as seen
+                seen_ids := array_append(seen_ids, rec.post_id);
+
+                -- handle start_post_id: skip everything until we see that post_id
+                IF NOT collecting THEN
+                    IF rec.post_id = _start_post_id THEN
+                        collecting := true;
+                    END IF;
+                    CONTINUE;
+                END IF;
+
+                -- never return the start_post_id itself
+                IF rec.post_id = _start_post_id THEN
+                    CONTINUE;
+                END IF;
+
+                -- skip posts below the token threshold
+                IF __min_search_tokens > 0 THEN
+                  SELECT number_of_tokens
+                    INTO _num_tokens
+                    FROM hivesense_app.post_data
+                   WHERE post_id = rec.post_id;
+                  IF _num_tokens < __min_search_tokens THEN
+                    CONTINUE;
+                  END IF;
+                END IF;
+
+                -- emit this post
+                count_posts   := count_posts + 1;
+                RAISE NOTICE 'Adding post with similarity %', rec.similarity;
+                RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
+
+                -- stop once we've emitted enough
+                EXIT WHEN count_posts >= max_posts;
+            END LOOP;
+
+        END IF;
+
+        /* ---------- stop / expand batch logic (unchanged) ---------- */
         EXIT WHEN count_posts >= max_posts;
-
-        -- if we ran out of rows (batch too small), double it and try again
         batch_size := batch_size * 2;
-        RAISE NOTICE 'Doubling batch size to %, count_posts is %, still less than max_posts %', batch_size, count_posts, max_posts;
     END LOOP;
 END;
 $$;
@@ -186,7 +257,7 @@ CREATE FUNCTION find_nearest_posts(
     _observer_id int = 0,
     _start_post_id int = 0
 )
-RETURNS SETOF similar_post_result
+RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $BODY$
@@ -213,7 +284,7 @@ CREATE FUNCTION find_nearest_posts_to_post(
     _limit integer DEFAULT 1,
     _observer_id int = 0
 )
-RETURNS SETOF similar_post_result
+RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $BODY$
