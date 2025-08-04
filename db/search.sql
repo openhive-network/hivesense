@@ -2,9 +2,179 @@ SET ROLE hivesense_owner;
 
 DROP TYPE IF EXISTS hivesense_app.similar_post_result CASCADE;
 CREATE TYPE hivesense_app.similar_post_result AS (
-    similarity_order INT,
-    post_id INT
+    similarity_order INT,     -- 1-based rank
+    similarity       REAL,    -- cosine distance (smaller = closer)
+    post_id          INT,
+    chunk_number     INT      -- chunk with best similarity
 );
+
+/* ────────────────────────────────────────────────────────────────
+ * 2.  One-shot nearest-posts function
+ * ────────────────────────────────────────────────────────────────*/
+CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(
+    _embedding       public.vector,      -- full-size query embedding (768-d)
+    _limit           int     DEFAULT 1000,
+    _exclude_post_id int     DEFAULT NULL,
+    _observer_id     int     DEFAULT 0
+)
+RETURNS SETOF hivesense_app.similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    /* ───────── flags & dims ───────── */
+    use_reduced   boolean := hivesense_app.use_reduced_embeddings();
+    store_half    boolean := hivesense_app.store_halfvec_embeddings();
+    half_index    boolean := hivesense_app.use_halfvec_index();
+
+    full_dim int := hivesense_app.embedding_dims();
+    red_dim  int := hivesense_app.reduced_dims();
+
+    query_red public.vector;          -- reduced query when needed
+
+    /* ───────── distance clauses ───────── */
+    dist_full text := hivesense_app.distance_clause(1);    -- uses $1
+    dist_red  text;                                        -- uses $2 when reduced
+
+    /* ───────── runtime tunables ───────── */
+    req_headers        json;
+    batch_multiplier   int := 5;
+    exploratory_factor int := 1000;
+    ann_candidates     int;             -- computed below
+
+    /* ───────── misc ───────── */
+    __min_tokens int;
+BEGIN
+    /* — clamp limit to 1000 — */
+    _limit := LEAST(GREATEST(_limit,1), 1000);
+
+    /* — read request headers (if any) — */
+    SELECT current_setting('request.headers', true)::json
+      INTO req_headers;
+    batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
+                                   batch_multiplier);
+    exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
+                                   exploratory_factor);
+
+    /* — apply tunables — */
+    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
+    PERFORM set_config('ivfflat.probes', '4', true);
+    PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
+
+    /* — token threshold — */
+    SELECT min_token_search_threshold
+      INTO __min_tokens
+      FROM hivesense_app.hivesense_app_status
+     WHERE id = 1;
+
+    /* — build reduced query vector & distance clause — */
+    IF use_reduced THEN
+        query_red := hivesense_app.reduce_embedding(_embedding);
+
+        IF store_half THEN
+            dist_red := format(
+              'reduced_embedding <=> $2::public.halfvec(%s)', red_dim);
+        ELSIF half_index THEN
+            dist_red := format(
+              '(reduced_embedding::public.halfvec(%1$s)) <=> $2::public.halfvec(%1$s)',
+              red_dim);
+        ELSE
+            dist_red := 'reduced_embedding <=> $2';
+        END IF;
+    END IF;
+
+    /* ────────────────────────────────────────────────────────────
+     *  MAIN one-shot query (two variants)
+     * ────────────────────────────────────────────────────────────*/
+    IF use_reduced THEN
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pr.post_id,
+                       pr.chunk_number,
+                       %s                           AS ann_dist
+                  FROM hivesense_app.posts_vectors_reduced pr
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($3 IS NULL OR pr.post_id <> $3)
+                   AND ($4 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $4
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY ann_dist, pr.post_id
+                 LIMIT %s
+            ),
+            best_chunk AS (
+                SELECT DISTINCT ON (pv.post_id)
+                       pv.post_id,
+                       pv.chunk_number,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id     = ann.post_id
+                   AND pv.chunk_number = ann.chunk_number
+                 ORDER BY pv.post_id, sim
+            )
+            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+                   sim        AS similarity,
+                   post_id,
+                   chunk_number
+              FROM best_chunk
+             ORDER BY sim, post_id
+             LIMIT %s
+        $q$,
+          dist_red,                     -- %s  ann distance expr
+          (__min_tokens = 0),           -- %L  token filter off?
+          __min_tokens,                 -- %s
+          ann_candidates,               -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, query_red, _exclude_post_id, _observer_id;
+
+    ELSE   /* ───────── full-vector path ───────── */
+
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pv.post_id,
+                       pv.chunk_number,
+                       %s                           AS sim
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($2 IS NULL OR pv.post_id <> $2)
+                   AND ($3 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $3
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY sim, pv.post_id
+                 LIMIT %s
+            ),
+            best_chunk AS (
+                SELECT DISTINCT ON (post_id)
+                       post_id, chunk_number, sim
+                  FROM ann
+                 ORDER BY post_id, sim
+            )
+            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+                   sim        AS similarity,
+                   post_id,
+                   chunk_number
+              FROM best_chunk
+             ORDER BY sim, post_id
+             LIMIT %s
+        $q$,
+          dist_full,                  -- %s
+          (__min_tokens = 0),         -- %L
+          __min_tokens,               -- %s
+          ann_candidates,             -- %s
+          _limit                      -- %s
+        )
+        USING _embedding, _exclude_post_id, _observer_id;
+
+    END IF;
+END;
+$$;
 
 DROP FUNCTION IF EXISTS find_nearest_posts_with_embedding;
 CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding(
@@ -117,6 +287,7 @@ BEGIN
             sql := format($q$
                 WITH ann AS (
                     SELECT hpv.post_id,
+                           hpv.chunk_number,
                            %s AS ann_dist
                       FROM hivesense_app.posts_vectors_reduced hpv
                       JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
@@ -129,6 +300,7 @@ BEGIN
                      LIMIT %s
                 )
                 SELECT ann.post_id,
+                       ann.chunk_number,
                        (pv.embedding <=> $1)::float4 AS similarity
                   FROM ann
                   JOIN hivesense_app.posts_vectors pv
@@ -175,7 +347,7 @@ BEGIN
                 -- emit this post
                 count_posts   := count_posts + 1;
                 RAISE NOTICE 'Adding post with similarity %', rec.similarity;
-                RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
+                RETURN NEXT (count_posts, rec.similarity, rec.post_id, rec.chunk_number)::hivesense_app.similar_post_result;
 
                 -- stop once we've emitted enough
                 EXIT WHEN count_posts >= max_posts;
@@ -184,7 +356,7 @@ BEGIN
         ELSE   /* ---------- full-vector path (original query) ---------- */
 
             sql := format($q$
-                SELECT hpv.post_id, %s AS similarity
+                SELECT hpv.post_id, hpv.chunk_number, %s AS similarity
                   FROM hivesense_app.posts_vectors hpv
                   JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
                  WHERE ($2 IS NULL OR hpv.post_id <> $2)
@@ -235,7 +407,7 @@ BEGIN
                 -- emit this post
                 count_posts   := count_posts + 1;
                 RAISE NOTICE 'Adding post with similarity %', rec.similarity;
-                RETURN NEXT (count_posts, rec.post_id)::hivesense_app.similar_post_result;
+                RETURN NEXT (count_posts, rec.similarity, rec.post_id, rec.chunk_number)::hivesense_app.similar_post_result;
 
                 -- stop once we've emitted enough
                 EXIT WHEN count_posts >= max_posts;
@@ -249,6 +421,7 @@ BEGIN
     END LOOP;
 END;
 $$;
+
 
 DROP FUNCTION IF EXISTS find_nearest_posts;
 CREATE FUNCTION find_nearest_posts(
@@ -267,7 +440,7 @@ BEGIN
     PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
     SELECT query_prefix INTO __query_prefix FROM hivesense_app.hivesense_app_status WHERE id = 1;
 
-    RETURN QUERY SELECT similarity_order, post_id FROM hivesense_app.find_nearest_posts_with_embedding(
+    RETURN QUERY SELECT similarity_order, similarity, post_id, chunk_number FROM hivesense_app.find_nearest_posts_with_embedding(
            hivesense_app.hivesense_embed(__query_prefix || _query)
          , _limit
          , _observer_id => _observer_id
@@ -275,6 +448,39 @@ BEGIN
      );
 END;
 $BODY$;
+
+/*───────────────────────────────────────────────────────────────*
+ * Wrapper that embeds the query prefix and observer filtering   *
+ *───────────────────────────────────────────────────────────────*/
+DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts_one_shot;
+CREATE FUNCTION hivesense_app.find_nearest_posts_one_shot(
+    _query        text,
+    _limit        int   DEFAULT 1000,
+    _observer_id  int   DEFAULT 0
+)
+RETURNS SETOF hivesense_app.similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __query_prefix text;
+BEGIN
+    -- ensure pgvector ops visible
+    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
+
+    SELECT query_prefix INTO __query_prefix
+      FROM hivesense_app.hivesense_app_status
+     WHERE id = 1;
+
+    RETURN QUERY
+      SELECT similarity_order, similarity, post_id, chunk_number
+        FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(
+               hivesense_app.hivesense_embed(__query_prefix || _query),
+               _limit,
+               _observer_id => _observer_id
+           );
+END;
+$$;
 
 
 DROP FUNCTION IF EXISTS find_nearest_posts_to_post;
@@ -308,7 +514,7 @@ BEGIN
         RAISE EXCEPTION 'Post @%/% is not vectorized yet or was discarded because is to short', _author, _permlink;
     END IF;
 
-    RETURN QUERY SELECT similarity_order, post_id FROM hivesense_app.find_nearest_posts_with_embedding(
+    RETURN QUERY SELECT similarity_order, similarity, post_id, chunk_number FROM hivesense_app.find_nearest_posts_with_embedding(
          __post_embedding
         , _limit
         , __post_id
