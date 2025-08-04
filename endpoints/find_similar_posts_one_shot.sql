@@ -1,5 +1,5 @@
 /** openapi:paths
-/similarposts_one_shot:
+/similarposts-one-shot:
   get:
     tags: [AI]
     summary: Full semantic search results in a single call
@@ -58,10 +58,10 @@ RETURNS JSON
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
-    __observer_id      INT := 0;
-    __result           JSON;
+    __observer_id INT := 0;
+    __result      JSON;
 BEGIN
-    /* ─── validate parameters ─────────────────────────────── */
+    /* ─── validate parameters ───────────────────────────── */
     IF posts_limit < 1 OR posts_limit > 1000 THEN
         RAISE EXCEPTION 'posts_limit must be between 1 and 1000';
     END IF;
@@ -73,40 +73,74 @@ BEGIN
                         full_posts, posts_limit;
     END IF;
 
-    /* ─── observer handling ──────────────────────────────── */
+    /* ─── observer ⇒ id ─────────────────────────────────── */
     IF observer <> '' THEN
         __observer_id := hivemind_postgrest_utilities.find_account_id(
                            hivemind_postgrest_utilities.valid_account(observer),
                            TRUE);
     END IF;
 
-    /* ─── main query: ANN + (optional) full-post join ────── */
-    SELECT jsonb_agg(obj ORDER BY similarity_order)
+    /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
+    WITH ranked AS (
+        SELECT *
+          FROM hivesense_app.find_nearest_posts_one_shot(
+                   pattern,
+                   posts_limit,
+                   __observer_id
+               )
+    ),
+
+    /* ---------- 1️⃣  full objects for top N ---------- */
+    top_full AS (
+        SELECT hbpo.obj
+          FROM (
+            SELECT sr.post_id
+              FROM ranked sr
+             ORDER BY sr.similarity_order
+             LIMIT full_posts
+          ) lim
+          JOIN LATERAL (SELECT fv.*, fv.source AS blacklists
+                        FROM hivemind_app.get_full_post_view_by_id(lim.post_id, __observer_id) fv) fpv ON TRUE
+          JOIN LATERAL (
+                SELECT hivemind_postgrest_utilities.create_bridge_post_object(
+                           __observer_id,
+                           fpv.*,
+                           tr_body,
+                           NULL,
+                           fpv.is_pinned,
+                           TRUE
+                       ) AS obj
+          ) hbpo ON TRUE
+    ),
+
+    /* ---------- 2️⃣  lightweight stubs for the rest ---------- */
+    rest_stub AS (
+        SELECT jsonb_build_object(
+                   'author',   ha.name,
+                   'permlink', hpd.permlink
+               ) AS obj
+          FROM (
+            SELECT sr.post_id
+              FROM ranked sr
+             ORDER BY sr.similarity_order
+             OFFSET full_posts
+             LIMIT  (posts_limit - full_posts)
+          ) lim
+          JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
+          JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id
+          JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+    )
+
+    /* ---------- aggregate in original order ---------- */
+    SELECT jsonb_agg(obj)  /* order already preserved */
       INTO __result
       FROM (
-        SELECT
-            sr.similarity_order,
-            CASE
-              WHEN sr.similarity_order <= full_posts THEN
-                   hivemind_postgrest_utilities.create_bridge_post_object(
-                       __observer_id, hp, tr_body, NULL, hp.is_pinned, TRUE)
-              ELSE
-                   jsonb_build_object(
-                       'author',  hp.author,
-                       'permlink',hp.permlink)
-            END AS obj
-        FROM hivesense_app.find_nearest_posts_one_shot(
-                 pattern,
-                 posts_limit,
-                 __observer_id
-             ) AS sr
-JOIN LATERAL (
-    SELECT fv.*, fv.source AS blacklists
-      FROM hivemind_app.get_full_post_view_by_id(
-               sr.post_id, __observer_id) fv
-) hp ON TRUE
-      ) sub;
+        SELECT obj FROM top_full
+        UNION ALL
+        SELECT obj FROM rest_stub
+      ) unioned
+      ORDER BY 1;   -- UNION ALL keeps original order, but ORDER BY makes it explicit
 
     RETURN COALESCE(__result, '[]'::JSON);
-END
+END;
 $$;

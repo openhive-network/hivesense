@@ -39,6 +39,9 @@ print_help () {
     echo "  --min-token-search-threshold=INT      Don't return search results for posts with fewer than this number of tokens"
     echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
     echo "  --maintenance-work-mem                Desired setting of maintenance_work_mem to use while creating the HNSW index"
+    echo "  --default-ef-search                   Default exploratory factor when searching"
+    echo "  --minimum-ann-candidates              Always consider at least this many candidates for reranking"
+    echo "  --allow-debugging                     Set to true to enable debugging flags for API calls"
     echo "  --help                                Display this help screen and exit"
     echo
 }
@@ -73,6 +76,9 @@ REDUCED_DIM=0          # must be set when flag=true
 REDUCED_MATRIX_JSON=""
 HNSW_M=32
 HNSW_EF_CONSTRUCTION=400
+DEFAULT_EF_SEARCH=500
+MINIMUM_ANN_CANDIDATES=1000
+ALLOW_DEBUGGING=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -155,8 +161,17 @@ while [ $# -gt 0 ]; do
 	HNSW_EF_CONSTRUCTION="${1#*=}"
 	;;
     --maintenance-work-mem=*)
-      MAINTENANCE_WORK_MEM="${1#*=}"
-      ;;
+        MAINTENANCE_WORK_MEM="${1#*=}"
+        ;;
+    --default-ef-search=*)
+        DEFAULT_EF_SEARCH="${1#*=}"
+        ;;
+    --minimum-ann-candidates=*)
+        MINIMUM_ANN_CANDIDATES="${1#*=}"
+        ;;
+    --allow-debugging=*)
+        ALLOW_DEBUGGING="${1#*=}"
+        ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
         ;;
@@ -223,6 +238,9 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.REDUCED_DIM           TO ${REDUCED_DIM};
   SET pg_temp.HNSW_M                TO ${HNSW_M};
   SET pg_temp.HNSW_EF_CONSTRUCTION  TO ${HNSW_EF_CONSTRUCTION};
+  SET pg_temp.DEFAULT_EF_SEARCH TO ${DEFAULT_EF_SEARCH};
+  SET pg_temp.MINIMUM_ANN_CANDIDATES TO ${MINIMUM_ANN_CANDIDATES};
+  SET pg_temp.ALLOW_DEBUGGING   TO ${ALLOW_DEBUGGING};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"

@@ -37,9 +37,12 @@ DECLARE
     dist_red  text;                                        -- uses $2 when reduced
 
     /* ───────── runtime tunables ───────── */
-    req_headers        json;
+    default_ef   int := (SELECT default_ef_search FROM hivesense_app.hivesense_app_status LIMIT 1);
+    minimum_ann_candidates int := (SELECT minimum_ann_candidates FROM hivesense_app.hivesense_app_status LIMIT 1);
+    allow_dbg    boolean := hivesense_app.allow_debugging();
+    req_headers        jsonb := current_setting('request.headers', true)::jsonb;
     batch_multiplier   int := 5;
-    exploratory_factor int := 1000;
+    exploratory_factor int := default_ef;
     ann_candidates     int;             -- computed below
 
     /* ───────── misc ───────── */
@@ -48,16 +51,34 @@ BEGIN
     /* — clamp limit to 1000 — */
     _limit := LEAST(GREATEST(_limit,1), 1000);
 
-    /* — read request headers (if any) — */
-    SELECT current_setting('request.headers', true)::json
-      INTO req_headers;
-    batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
-                                   batch_multiplier);
-    exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
-                                   exploratory_factor);
+
+    /* ─── detect debug headers ─── */
+    IF NOT allow_dbg AND (
+           req_headers ? 'x-batch-size-multiplier' OR
+           req_headers ? 'x-exploratory-factor' OR
+           req_headers ? 'x-ann-candidates'
+       ) THEN
+        RAISE EXCEPTION 'Debugging headers are disabled on this server'
+              USING ERRCODE = '42504';  -- insufficient_privilege (4xx style)
+    END IF;
+
+    /* ─── apply overrides only if allowed ─── */
+    IF allow_dbg THEN
+        batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
+                                       batch_multiplier);
+        exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
+                                       exploratory_factor);
+    END IF;
+
+    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
+    IF allow_dbg THEN
+        ann_candidates := COALESCE((req_headers->>'x-ann-candidates')::int,
+                                   ann_candidates);
+    END IF;
+    ann_candidates := GREATEST(ann_candidates, minimum_ann_candidates);
+
 
     /* — apply tunables — */
-    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
     PERFORM set_config('ivfflat.probes', '4', true);
     PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
 

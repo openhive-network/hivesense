@@ -17,6 +17,7 @@ OUTPUT="$SCRIPTDIR/output"
 ENDPOINTS_IN_ORDER="
 ../$endpoints/endpoint_schema.sql
 ../$endpoints/find_similar_posts.sql
+../$endpoints/find_similar_posts_one_shot.sql
 ../$endpoints/get_similar_posts_by_post.sql
 ../$endpoints/find_thematic_contributors.sql
 ../$endpoints/embedding_updates.sql"

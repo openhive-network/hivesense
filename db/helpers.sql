@@ -397,5 +397,10 @@ RETURNS int
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 AS $$ SELECT reduced_dim FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
 
+CREATE OR REPLACE FUNCTION hivesense_app.allow_debugging()
+RETURNS boolean IMMUTABLE PARALLEL SAFE LANGUAGE sql AS
+$$ SELECT allow_debugging FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
+
+
 
 RESET ROLE;
