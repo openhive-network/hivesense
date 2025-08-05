@@ -44,9 +44,15 @@ DECLARE
     batch_multiplier   int := 5;
     exploratory_factor int := default_ef;
     ann_candidates     int;             -- computed below
+    exhaustive boolean := false;
 
     /* ───────── misc ───────── */
     __min_tokens int;
+
+    /* ------ for exhaustive ------ */
+    post_ids      int[];    -- candidate post_ids
+    chunk_numbers int[];    -- their chunk_numbers
+    sims          real[];   -- their similarity scores
 BEGIN
     /* — clamp limit to 1000 — */
     _limit := LEAST(GREATEST(_limit,1), 1000);
@@ -56,7 +62,8 @@ BEGIN
     IF NOT allow_dbg AND (
            req_headers ? 'x-batch-size-multiplier' OR
            req_headers ? 'x-exploratory-factor' OR
-           req_headers ? 'x-ann-candidates'
+           req_headers ? 'x-ann-candidates' OR
+           req_headers ? 'x-exhaustive-search'
        ) THEN
         RAISE EXCEPTION 'Debugging headers are disabled on this server'
               USING ERRCODE = '42504';  -- insufficient_privilege (4xx style)
@@ -68,6 +75,8 @@ BEGIN
                                        batch_multiplier);
         exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
                                        exploratory_factor);
+
+        exhaustive := lower(coalesce(req_headers->>'x-exhaustive-search','false')) = 'true';
     END IF;
 
     ann_candidates := LEAST(_limit * batch_multiplier, 50000);
@@ -105,9 +114,88 @@ BEGIN
     END IF;
 
     /* ────────────────────────────────────────────────────────────
-     *  MAIN one-shot query (two variants)
+     *  MAIN one-shot query (three variants)
      * ────────────────────────────────────────────────────────────*/
-    IF use_reduced THEN
+    IF exhaustive THEN
+        -- note: this branch is only used for benchmarking debugging
+        -- and will be very slow (20s+)
+        ----------------------------------------------------------------
+        -- 1️⃣ Disable only vector index scans, enable parallel seqscans
+        ----------------------------------------------------------------
+        PERFORM set_config('enable_indexscan',      'off', TRUE);
+        PERFORM set_config('enable_bitmapscan',     'off', TRUE);
+        PERFORM set_config('enable_indexonlyscan',  'off', TRUE);
+        PERFORM set_config('max_parallel_workers_per_gather', '4', TRUE);
+
+        ----------------------------------------------------------------
+        -- 2️⃣ Brute‐force gather top (limit×10) embeddings into arrays
+        ----------------------------------------------------------------
+        SELECT
+          array_agg(b.post_id     ORDER BY b.sim),
+          array_agg(b.chunk_number ORDER BY b.sim),
+          array_agg(b.sim         ORDER BY b.sim)
+        INTO post_ids, chunk_numbers, sims
+        FROM (
+          SELECT
+            pv.post_id,
+            pv.chunk_number,
+            (pv.embedding <=> _embedding)::real AS sim
+          FROM hivesense_app.posts_vectors pv
+          ORDER  BY sim
+          LIMIT LEAST(_limit * 10, 100000)
+        ) AS b;
+
+        ----------------------------------------------------------------
+        -- 3️⃣ Re‐enable all index scans for the joins & filtering below
+        ----------------------------------------------------------------
+        PERFORM set_config('enable_indexscan',     'on', TRUE);
+        PERFORM set_config('enable_bitmapscan',    'on', TRUE);
+        PERFORM set_config('enable_indexonlyscan', 'on', TRUE);
+
+        ----------------------------------------------------------------
+        -- 4️⃣ Filter, DISTINCT‐ON, rank, and LIMIT to _limit
+        ----------------------------------------------------------------
+        RETURN QUERY
+        WITH brute AS (
+            SELECT
+              post_ids[i]      AS post_id,
+              chunk_numbers[i] AS chunk_number,
+              sims[i]          AS sim
+            FROM generate_subscripts(post_ids,1) AS s(i)
+        ),
+        filtered AS (
+            SELECT b.post_id, b.chunk_number, b.sim
+              FROM brute b
+              JOIN hivemind_app.hive_posts      hp ON hp.id      = b.post_id
+              JOIN hivesense_app.post_data      pd ON pd.post_id = b.post_id
+             WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
+               AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
+               AND (_observer_id = 0 OR NOT EXISTS (
+                     SELECT 1
+                       FROM hivemind_app.muted_accounts_by_id_view m
+                      WHERE m.observer_id = _observer_id
+                        AND m.muted_id    = hp.author_id
+                   ))
+        ),
+        best AS (
+            SELECT DISTINCT ON (post_id)
+              post_id,
+              chunk_number,
+              sim
+            FROM filtered
+            ORDER BY post_id, sim
+        )
+        SELECT
+          (row_number() OVER (ORDER BY sim, post_id))::int AS similarity_order,
+          sim        AS similarity,
+          post_id,
+          chunk_number
+        FROM best
+        ORDER BY sim, post_id
+        LIMIT _limit;
+	RETURN;
+    ELSIF use_reduced THEN
+        -- this is the branch we expect most configurations to use
         RETURN QUERY EXECUTE format($q$
             WITH ann AS (
                 SELECT pr.post_id,
@@ -137,7 +225,7 @@ BEGIN
                  ORDER BY pv.post_id, sim
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim        AS similarity,
+                   sim::real AS similarity,
                    post_id,
                    chunk_number
               FROM best_chunk
@@ -153,7 +241,6 @@ BEGIN
         USING _embedding, query_red, _exclude_post_id, _observer_id;
 
     ELSE   /* ───────── full-vector path ───────── */
-
         RETURN QUERY EXECUTE format($q$
             WITH ann AS (
                 SELECT pv.post_id,
