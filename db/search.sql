@@ -632,6 +632,56 @@ BEGIN
 END;
 $BODY$;
 
+DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts_to_post_one_shot;
+CREATE FUNCTION hivesense_app.find_nearest_posts_to_post_one_shot(
+    _author      text,
+    _permlink    text,
+    _limit       int  DEFAULT 1000,
+    _observer_id int  DEFAULT 0
+)
+RETURNS SETOF hivesense_app.similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __post_id        int;
+    __post_embedding public.vector;
+BEGIN
+    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
+
+    _limit := LEAST(GREATEST(_limit,1), 1000);  -- clamp
+
+    -- resolve post ID & embedding
+    __post_id := hivemind_app.find_comment_id(_author, _permlink, TRUE);
+
+    SELECT CASE
+             WHEN hivesense_app.store_halfvec_embeddings()
+                  THEN embedding::public.vector
+             ELSE embedding
+           END
+      INTO __post_embedding
+      FROM hivesense_app.posts_vectors
+     WHERE post_id = __post_id;
+
+    IF __post_embedding IS NULL THEN
+        RAISE EXCEPTION
+          'Post @%/% has no stored embedding (too short or not yet processed)',
+          _author, _permlink;
+    END IF;
+
+    RETURN QUERY
+      SELECT similarity_order, similarity, post_id, chunk_number
+        FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(
+                 __post_embedding,
+                 _limit,
+                 _exclude_post_id => __post_id,
+                 _observer_id     => _observer_id
+             );
+END;
+$$;
+
+
+
 DROP TYPE IF EXISTS contributors_result CASCADE;
 CREATE TYPE contributors_result AS (
    rank INT,
