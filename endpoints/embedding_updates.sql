@@ -33,6 +33,7 @@ CREATE TYPE EmbeddingUpdate AS (
 /** openapi:paths
 /embedding-updates:
   get:
+    x-internal: true
     tags:
       - AI
     summary: Stream post-level embedding operations since a given sequence number
@@ -199,6 +200,7 @@ CREATE TYPE SyncSettings AS (
 /** openapi:paths
 /sync-settings:
   get:
+    x-internal: true
     tags:
       - AI
     summary: Get synchronization settings for embedding updates

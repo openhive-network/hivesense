@@ -1,9 +1,9 @@
 [submodule "submodules/haf"]
 	path = submodules/haf
-	url = https://gitlab.syncad.com/hive/haf.git
+	url = ../haf.git
 [submodule "submodules/haf_api_node"]
 	path = submodules/haf_api_node
-	url = https://gitlab.syncad.com/hive/haf_api_node.git
+	url = ../haf_api_node.git
 [submodule "submodules/hivemind"]
 	path = submodules/hivemind
-	url = https://gitlab.syncad.com/hive/hivemind.git
+	url = ../hivemind.git
