@@ -152,36 +152,37 @@ DO $__$
         }
       }
     },
-    "/similarposts-one-shot": {
+    "/posts/search": {
       "get": {
         "tags": [
           "AI"
         ],
         "summary": "Full semantic search results in a single call",
         "description": "Returns an ordered list of posts most similar to a given query.\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*.  Paging is now done entirely on the client side.\n",
-        "operationId": "hivesense_endpoints.get_similar_posts_one_shot",
+        "operationId": "hivesense_endpoints.posts_search",
         "parameters": [
           {
             "in": "query",
-            "name": "pattern",
+            "name": "q",
             "required": true,
             "schema": {
               "type": "string"
             },
-            "description": "Query text, e.g. `\"vector databases\"`"
+            "description": "Search query text for semantic similarity, e.g. `\"vector databases\"`"
           },
           {
             "in": "query",
-            "name": "tr_body",
-            "required": true,
+            "name": "truncate",
+            "required": false,
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "default": 0
             },
-            "description": "0 = full body, otherwise truncate to this many chars"
+            "description": "Body truncation length (0 = full content, >0 = truncate to N chars)"
           },
           {
             "in": "query",
-            "name": "posts_limit",
+            "name": "limit",
             "required": false,
             "schema": {
               "type": "integer",
@@ -311,17 +312,17 @@ DO $__$
         }
       }
     },
-    "/similarpostsbypost-one-shot": {
+    "/posts/{author}/{permlink}/similar": {
       "get": {
         "tags": [
           "AI"
         ],
         "summary": "Full semantic search results for similar posts in a single call",
-        "description": "Performs semantic similarity search to find posts that are contextually\nsimilar to a specified Hive post. Returns an ordered list of posts most \nsimilar to the given post.\n\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*. Paging is done entirely on the client side.\n\nKey features:\n- Semantic analysis considers post content and context\n- Results are ordered by similarity (most similar first)\n- Optional content filtering through observer blacklists\n- Configurable body length truncation for preview purposes\n- Split response: full data for top results, stubs for remainder\n\nThe similarity analysis takes into account:\n- Post content and context\n- Semantic relationships between posts\n- Topic relevance and contextual meaning\n\nSQL example:\nSELECT * FROM hivesense_endpoints.get_similar_posts_by_post_one_shot(''bue-witness'', ''bue-witness-post'', 20, 100, 10);\n\nREST call example:\nGET ''https://%1$s/hivesense-api/similarpostsbypost-one-shot?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=100&full_posts=10''\n",
-        "operationId": "hivesense_endpoints.get_similar_posts_by_post_one_shot",
+        "description": "Performs semantic similarity search to find posts that are contextually\nsimilar to a specified Hive post. Returns an ordered list of posts most \nsimilar to the given post.\n\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*. Paging is done entirely on the client side.\n\nKey features:\n- Semantic analysis considers post content and context\n- Results are ordered by similarity (most similar first)\n- Optional content filtering through observer blacklists\n- Configurable body length truncation for preview purposes\n- Split response: full data for top results, stubs for remainder\n\nThe similarity analysis takes into account:\n- Post content and context\n- Semantic relationships between posts\n- Topic relevance and contextual meaning\n\nSQL example:\nSELECT * FROM hivesense_endpoints.posts_similar(''bue-witness'', ''bue-witness-post'', 20, 100, 10);\n\nREST call example:\nGET ''https://%1$s/hivesense-api/posts/bue-witness/my-blog-post/similar?truncate=20&limit=100&full_posts=10''\n",
+        "operationId": "hivesense_endpoints.posts_similar",
         "parameters": [
           {
-            "in": "query",
+            "in": "path",
             "name": "author",
             "required": true,
             "schema": {
@@ -331,7 +332,7 @@ DO $__$
             "example": "bue-witness"
           },
           {
-            "in": "query",
+            "in": "path",
             "name": "permlink",
             "required": true,
             "schema": {
@@ -342,19 +343,20 @@ DO $__$
           },
           {
             "in": "query",
-            "name": "tr_body",
-            "required": true,
+            "name": "truncate",
+            "required": false,
             "schema": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 65535
+              "maximum": 65535,
+              "default": 0
             },
             "description": "Controls the length of returned post bodies in the results. When set to 0,\nreturns complete post content. Any other positive value will truncate the\npost body to that many characters. Useful for generating previews or\nreducing response size. Maximum value is 65535 characters.\n",
             "example": 20
           },
           {
             "in": "query",
-            "name": "posts_limit",
+            "name": "limit",
             "required": false,
             "schema": {
               "type": "integer",
@@ -375,7 +377,7 @@ DO $__$
               "minimum": 0,
               "maximum": 50
             },
-            "description": "How many of the top results should include full post data. Any \nremaining posts (up to posts_limit) will be stub entries with only \nauthor & permlink. Set this to the size of your first page of results.\n",
+            "description": "How many of the top results should include full post data. Any \nremaining posts (up to limit) will be stub entries with only \nauthor & permlink. Set this to the size of your first page of results.\n",
             "example": 10
           },
           {
@@ -406,33 +408,36 @@ DO $__$
         }
       }
     },
-    "/thematiccontributors": {
+    "/authors/search": {
       "get": {
         "tags": [
           "AI"
         ],
         "summary": "List of Hive accounts thematically aligned with a given pattern, ranked by the semantic similarity of their posts.",
         "description": "This endpoint returns a JSON array of author names ranked by their thematic alignment\nwith a given text pattern. The ranking is based on the semantic similarity of their\nposts to the input pattern, with higher-ranked posts contributing more to the author\u2019s score.\nEach authors score is computed as the sum of 1 / sqrt(r), where r is the rank of each post\nassociated with the author. Authors with more frequent and higher-ranked posts receive higher scores.\nThe result is a sorted list of author names, from most to least thematically aligned.\n",
-        "operationId": "hivesense_endpoints.find_thematic_contributors",
+        "operationId": "hivesense_endpoints.authors_search",
         "parameters": [
           {
             "in": "query",
-            "name": "thematic",
+            "name": "topic",
             "required": true,
             "schema": {
               "type": "string"
             },
-            "description": "Text pattern used for semantic search. The query text (e.g., \"astronauts on moon\", \"climate change\") to find contributors.",
+            "description": "Topic or theme to search for. Authors whose posts are semantically related to this topic will be returned.",
             "example": "Make witness node secure against hackers attack and emergency situations"
           },
           {
             "in": "query",
-            "name": "authors_limit",
-            "required": true,
+            "name": "limit",
+            "required": false,
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "default": 10,
+              "minimum": 1,
+              "maximum": 100
             },
-            "description": "Specifies how many authors to return in the results.",
+            "description": "Maximum number of authors to return (1-100).",
             "example": 10
           },
           {
@@ -467,81 +472,6 @@ DO $__$
                   "masteryoda",
                   "ihashfury"
                 ]
-              }
-            }
-          }
-        }
-      }
-    },
-    "/embedding-updates": {
-      "get": {
-        "tags": [
-          "AI"
-        ],
-        "summary": "Stream post-level embedding operations since a given sequence number",
-        "operationId": "hivesense_endpoints.embedding_updates",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "after_seq",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            },
-            "description": "Clients pass the highest sync_seq they have applied.  \nThe server returns every operation with sync_seq > after_seq.\n"
-          },
-          {
-            "in": "query",
-            "name": "page_size",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            },
-            "description": "Maximum number of operations to return."
-          },
-          {
-            "in": "query",
-            "name": "sync_uuid",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "UUID to verify synchronization with the correct server."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "JSON array of operations, ordered by sync_seq.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/EmbeddingUpdate"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/sync-settings": {
-      "get": {
-        "tags": [
-          "AI"
-        ],
-        "summary": "Get synchronization settings for embedding updates",
-        "operationId": "hivesense_endpoints.get_sync_settings",
-        "responses": {
-          "200": {
-            "description": "Synchronization settings including UUID and embedding configuration",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SyncSettings"
-                }
               }
             }
           }

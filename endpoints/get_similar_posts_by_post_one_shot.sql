@@ -1,6 +1,6 @@
 SET ROLE hivesense_owner;
 /** openapi:paths
-/similarpostsbypost-one-shot:
+/posts/{author}/{permlink}/similar:
   get:
     tags:
       - AI
@@ -28,13 +28,13 @@ SET ROLE hivesense_owner;
       - Topic relevance and contextual meaning
 
       SQL example:
-      SELECT * FROM hivesense_endpoints.get_similar_posts_by_post_one_shot(''bue-witness'', ''bue-witness-post'', 20, 100, 10);
+      SELECT * FROM hivesense_endpoints.posts_similar(''bue-witness'', ''bue-witness-post'', 20, 100, 10);
 
       REST call example:
-      GET ''https://%1$s/hivesense-api/similarpostsbypost-one-shot?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=100&full_posts=10''
-    operationId: hivesense_endpoints.get_similar_posts_by_post_one_shot
+      GET ''https://%1$s/hivesense-api/posts/bue-witness/my-blog-post/similar?truncate=20&limit=100&full_posts=10''
+    operationId: hivesense_endpoints.posts_similar
     parameters:
-      - in: query
+      - in: path
         name: author
         required: true
         schema:
@@ -44,7 +44,7 @@ SET ROLE hivesense_owner;
           created the original post for which you want to find similar content.
           Must be a valid Hive account name.
         example: "bue-witness"
-      - in: query
+      - in: path
         name: permlink
         required: true
         schema:
@@ -55,12 +55,13 @@ SET ROLE hivesense_owner;
           Together with the author name, it uniquely identifies the post.
         example: "my-blog-post"
       - in: query
-        name: tr_body
-        required: true
+        name: truncate
+        required: false
         schema:
           type: integer
           minimum: 0
           maximum: 65535
+          default: 0
         description: |
           Controls the length of returned post bodies in the results. When set to 0,
           returns complete post content. Any other positive value will truncate the
@@ -68,7 +69,7 @@ SET ROLE hivesense_owner;
           reducing response size. Maximum value is 65535 characters.
         example: 20
       - in: query
-        name: posts_limit
+        name: limit
         required: false
         schema:
           type: integer
@@ -91,7 +92,7 @@ SET ROLE hivesense_owner;
           maximum: 50
         description: |
           How many of the top results should include full post data. Any 
-          remaining posts (up to posts_limit) will be stub entries with only 
+          remaining posts (up to limit) will be stub entries with only 
           author & permlink. Set this to the size of your first page of results.
         example: 10
       - in: query
@@ -117,12 +118,12 @@ SET ROLE hivesense_owner;
             example: {}
  */
 -- openapi-generated-code-begin
-DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_by_post_one_shot;
-CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_by_post_one_shot(
+DROP FUNCTION IF EXISTS hivesense_endpoints.posts_similar;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_similar(
     "author" TEXT,
     "permlink" TEXT,
-    "tr_body" INT,
-    "posts_limit" INT = 100,
+    "truncate" INT = 0,
+    "limit" INT = 100,
     "full_posts" INT = 10,
     "observer" TEXT = ''
 )
@@ -135,15 +136,15 @@ DECLARE
     __result      JSON;
 BEGIN
     /* validate args */
-    IF posts_limit < 1 OR posts_limit > 1000 THEN
-        RAISE EXCEPTION 'posts_limit must be between 1 and 1000';
+    IF "limit" < 1 OR "limit" > 1000 THEN
+        RAISE EXCEPTION 'limit must be between 1 and 1000';
     END IF;
     IF full_posts < 0 OR full_posts > 50 THEN
         RAISE EXCEPTION 'full_posts must be between 0 and 50';
     END IF;
-    IF full_posts > posts_limit THEN
-        RAISE EXCEPTION 'full_posts (%s) cannot exceed posts_limit (%s)',
-                        full_posts, posts_limit;
+    IF full_posts > "limit" THEN
+        RAISE EXCEPTION 'full_posts (%s) cannot exceed limit (%s)',
+                        full_posts, "limit";
     END IF;
 
     /* observer → id */
@@ -157,7 +158,7 @@ BEGIN
     WITH ranked AS (
         SELECT *
           FROM hivesense_app.find_nearest_posts_to_post_one_shot(
-                   author, permlink, posts_limit, __observer_id)
+                   author, permlink, "limit", __observer_id)
     ),
 
     top_full AS (
@@ -179,7 +180,7 @@ BEGIN
                 SELECT hivemind_postgrest_utilities.create_bridge_post_object(
                            __observer_id,
                            fpv.*,
-                           tr_body,
+                           "truncate",
                            NULL,
                            fpv.is_pinned,
                            TRUE) AS obj
@@ -196,7 +197,7 @@ BEGIN
               FROM ranked
              ORDER BY similarity_order
              OFFSET full_posts
-             LIMIT (posts_limit - full_posts)
+             LIMIT ("limit" - full_posts)
           ) lim
           JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
           JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id

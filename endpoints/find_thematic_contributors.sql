@@ -1,7 +1,7 @@
 SET ROLE hivesense_owner;
 
 /** openapi:paths
-/thematiccontributors:
+/authors/search:
   get:
     tags:
       - AI
@@ -14,21 +14,24 @@ SET ROLE hivesense_owner;
       associated with the author. Authors with more frequent and higher-ranked posts receive higher scores.
       The result is a sorted list of author names, from most to least thematically aligned.
 
-    operationId: hivesense_endpoints.find_thematic_contributors
+    operationId: hivesense_endpoints.authors_search
     parameters:
       - in: query
-        name: thematic
+        name: topic
         required: true
         schema:
           type: string
-        description: Text pattern used for semantic search. The query text (e.g., "astronauts on moon", "climate change") to find contributors.
+        description: Topic or theme to search for. Authors whose posts are semantically related to this topic will be returned.
         example: "Make witness node secure against hackers attack and emergency situations"
       - in: query
-        name: authors_limit
-        required: true
+        name: limit
+        required: false
         schema:
           type: integer
-        description: Specifies how many authors to return in the results.
+          default: 10
+          minimum: 1
+          maximum: 100
+        description: Maximum number of authors to return (1-100).
         example: 10
       - in: query
         name: observer
@@ -60,10 +63,10 @@ SET ROLE hivesense_owner;
             ]
  */
 -- openapi-generated-code-begin
-DROP FUNCTION IF EXISTS hivesense_endpoints.find_thematic_contributors;
-CREATE OR REPLACE FUNCTION hivesense_endpoints.find_thematic_contributors(
-    "thematic" TEXT,
-    "authors_limit" INT,
+DROP FUNCTION IF EXISTS hivesense_endpoints.authors_search;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.authors_search(
+    "topic" TEXT,
+    "limit" INT = 10,
     "observer" TEXT = ''
 )
 RETURNS JSON 
@@ -87,8 +90,8 @@ BEGIN
     SELECT jsonb_agg (
             ha.name ORDER BY search.rank ASC
     ) FROM hivesense_app.find_thematic_contributors_with_embedding(
-                   hivesense_app.hivesense_embed(__query_prefix || thematic)
-                 , authors_limit
+                   hivesense_app.hivesense_embed(__query_prefix || topic)
+                 , "limit"
                  , _observer_id => __observer_id
     ) as search
     JOIN hivemind_app.hive_accounts ha ON ha.id = search.author_id

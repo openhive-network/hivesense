@@ -71,7 +71,7 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
     "page_size" INT,
     "sync_uuid" TEXT
 )
-RETURNS EmbeddingUpdate[] 
+RETURNS SETOF EmbeddingUpdate 
 -- openapi-generated-code-end
   LANGUAGE plpgsql
   STABLE PARALLEL SAFE

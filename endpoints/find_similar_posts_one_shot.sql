@@ -1,5 +1,5 @@
 /** openapi:paths
-/similarposts-one-shot:
+/posts/search:
   get:
     tags: [AI]
     summary: Full semantic search results in a single call
@@ -9,20 +9,20 @@
       bridge-post JSON objects; the remaining results (up to **posts_limit**,
       default 100, max 1000) are stub entries containing only *author* and
       *permlink*.  Paging is now done entirely on the client side.
-    operationId: hivesense_endpoints.get_similar_posts_one_shot
+    operationId: hivesense_endpoints.posts_search
     parameters:
       - in: query
-        name: pattern
+        name: q
         required: true
         schema: {type: string}
-        description: Query text, e.g. `"vector databases"`
+        description: Search query text for semantic similarity, e.g. `"vector databases"`
       - in: query
-        name: tr_body
-        required: true
-        schema: {type: integer}
-        description: 0 = full body, otherwise truncate to this many chars
+        name: truncate
+        required: false
+        schema: {type: integer, default: 0}
+        description: Body truncation length (0 = full content, >0 = truncate to N chars)
       - in: query
-        name: posts_limit
+        name: limit
         required: false
         schema: {type: integer, default: 100, minimum: 1, maximum: 1000}
         description: Total number of posts (full + stub) to return
@@ -45,11 +45,11 @@
             example: {}
  */
 -- openapi-generated-code-begin
-DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_one_shot;
-CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_one_shot(
-    "pattern" TEXT,
-    "tr_body" INT,
-    "posts_limit" INT = 100,
+DROP FUNCTION IF EXISTS hivesense_endpoints.posts_search;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_search(
+    "q" TEXT,
+    "truncate" INT = 0,
+    "limit" INT = 100,
     "full_posts" INT = 10,
     "observer" TEXT = ''
 )
@@ -62,15 +62,15 @@ DECLARE
     __result      JSON;
 BEGIN
     /* ─── validate parameters ───────────────────────────── */
-    IF posts_limit < 1 OR posts_limit > 1000 THEN
-        RAISE EXCEPTION 'posts_limit must be between 1 and 1000';
+    IF "limit" < 1 OR "limit" > 1000 THEN
+        RAISE EXCEPTION 'limit must be between 1 and 1000';
     END IF;
     IF full_posts < 0 OR full_posts > 50 THEN
         RAISE EXCEPTION 'full_posts must be between 0 and 50';
     END IF;
-    IF full_posts > posts_limit THEN
-        RAISE EXCEPTION 'full_posts (%s) cannot exceed posts_limit (%s)',
-                        full_posts, posts_limit;
+    IF full_posts > "limit" THEN
+        RAISE EXCEPTION 'full_posts (%s) cannot exceed limit (%s)',
+                        full_posts, "limit";
     END IF;
 
     /* ─── observer ⇒ id ─────────────────────────────────── */
@@ -84,8 +84,8 @@ BEGIN
     WITH ranked AS (
         SELECT *
           FROM hivesense_app.find_nearest_posts_one_shot(
-                   pattern,
-                   posts_limit,
+                   q,
+                   "limit",
                    __observer_id
                )
     ),
@@ -105,7 +105,7 @@ BEGIN
                 SELECT hivemind_postgrest_utilities.create_bridge_post_object(
                            __observer_id,
                            fpv.*,
-                           tr_body,
+                           "truncate",
                            NULL,
                            fpv.is_pinned,
                            TRUE
@@ -124,7 +124,7 @@ BEGIN
               FROM ranked sr
              ORDER BY sr.similarity_order
              OFFSET full_posts
-             LIMIT  (posts_limit - full_posts)
+             LIMIT  ("limit" - full_posts)
           ) lim
           JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
           JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id
