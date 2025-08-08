@@ -1,61 +1,34 @@
 SET ROLE hivesense_owner;
 
-/** openapi:paths
-/embedding-updates:
-  get:
-    tags:
-      - AI
-    summary: Stream post-level embedding operations since a given sequence number
-    operationId: hivesense_endpoints.embedding_updates
-    parameters:
-      - in: query
-        name: after_seq
-        required: true
-        schema: { type: integer }
-        description: |
-          Clients pass the highest sync_seq they have applied.  
-          The server returns every operation with sync_seq > after_seq.
-      - in: query
-        name: page_size
-        required: true
-        schema: { type: integer }
-        description: Maximum number of operations to return.
-    responses:
-      '200':
-        description: JSON array of operations, ordered by sync_seq.
-        content:
-          application/json:
-            schema: { type: string, x-sql-datatype: JSONB }
+/** openapi:components
+schemas:
+  EmbeddingUpdate:
+    type: object
+    properties:
+      sync_seq: { type: integer }
+      op: { type: string }
+      author: { type: string }
+      permlink: { type: string }
+      number_of_tokens: { type: integer }
+      last_vectors_block: { type: integer }
+      embeddings: 
+        type: array
+        items: 
+          type: array
+          items: { type: number }
 */
 -- openapi-generated-code-begin
-CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_settings()
-RETURNS TABLE (
-  sync_uuid uuid,
-  llm text,
-  embedding_dimensionality int,
-  document_prefix text,
-  query_prefix text,
-  tokens_per_chunk int,
-  overlap_amount real,
-  min_token_threshold int,
-  max_embeddings_per_post int
-)
+DROP TYPE IF EXISTS EmbeddingUpdate CASCADE;
+CREATE TYPE EmbeddingUpdate AS (
+    "sync_seq" INT,
+    "op" TEXT,
+    "author" TEXT,
+    "permlink" TEXT,
+    "number_of_tokens" INT,
+    "last_vectors_block" INT,
+    "embeddings" FLOAT[][]
+);
 -- openapi-generated-code-end
-AS $$
-  SELECT
-    sync_uuid,
-    llm,
-    embedding_dimensionality,
-    document_prefix,
-    query_prefix,
-    tokens_per_chunk,
-    overlap_amount,
-    min_token_threshold,
-    max_embeddings_per_post
-  FROM hivesense_app_status
-  ORDER BY id
-  LIMIT 1;
-$$ LANGUAGE sql STABLE;
 
 /** openapi:paths
 /embedding-updates:
@@ -77,29 +50,27 @@ $$ LANGUAGE sql STABLE;
         required: true
         schema: { type: integer }
         description: Maximum number of operations to return.
+      - in: query
+        name: sync_uuid
+        required: true
+        schema: { type: string, format: uuid }
+        description: UUID to verify synchronization with the correct server.
     responses:
       '200':
         description: JSON array of operations, ordered by sync_seq.
         content:
           application/json:
-            schema: { type: string, x-sql-datatype: JSONB }
+            schema:
+              x-sql-datatype: SETOF EmbeddingUpdate
 */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.embedding_updates;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
-    "after_seq" int,
-    "page_size" int,
-    "sync_uuid" uuid
+    "after_seq" INT,
+    "page_size" INT,
+    "sync_uuid" TEXT
 )
-RETURNS TABLE (
-  sync_seq            int,
-  op                  text,
-  author              text,
-  permlink            text,
-  number_of_tokens    int,
-  last_vectors_block  int,
-  embeddings          real[]    -- PostgREST will JSON-encode this array
-)
+RETURNS EmbeddingUpdate[] 
 -- openapi-generated-code-end
   LANGUAGE plpgsql
   STABLE PARALLEL SAFE
@@ -114,7 +85,7 @@ BEGIN
     FROM hivesense_app.hivesense_app_status has
    WHERE id = 1;
 
-  IF sync_uuid != __our_uuid THEN
+  IF sync_uuid::uuid != __our_uuid THEN
     RAISE EXCEPTION 'UUID Mismatch'
       USING DETAIL = 'Your sync_uuid parameter doesn''t match ours -- perhaps you were syncing with a different server?',
             HINT = 'To sync with this server, you will need to wipe your hivesense data';
@@ -194,5 +165,71 @@ BEGIN
   LIMIT page_size;
 END;
 $$;
+
+/** openapi:components
+schemas:
+  SyncSettings:
+    type: object
+    properties:
+      sync_uuid: { type: string, format: uuid }
+      llm: { type: string }
+      embedding_dimensionality: { type: integer }
+      document_prefix: { type: string }
+      query_prefix: { type: string }
+      tokens_per_chunk: { type: integer }
+      overlap_amount: { type: number }
+      min_token_threshold: { type: integer }
+      max_embeddings_per_post: { type: integer }
+*/
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS SyncSettings CASCADE;
+CREATE TYPE SyncSettings AS (
+    "sync_uuid" TEXT,
+    "llm" TEXT,
+    "embedding_dimensionality" INT,
+    "document_prefix" TEXT,
+    "query_prefix" TEXT,
+    "tokens_per_chunk" INT,
+    "overlap_amount" FLOAT,
+    "min_token_threshold" INT,
+    "max_embeddings_per_post" INT
+);
+-- openapi-generated-code-end
+
+/** openapi:paths
+/sync-settings:
+  get:
+    tags:
+      - AI
+    summary: Get synchronization settings for embedding updates
+    operationId: hivesense_endpoints.get_sync_settings
+    responses:
+      '200':
+        description: Synchronization settings including UUID and embedding configuration
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncSettings'
+*/
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS hivesense_endpoints.get_sync_settings;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_settings()
+RETURNS SyncSettings 
+-- openapi-generated-code-end
+AS $$
+  SELECT
+    sync_uuid,
+    llm,
+    embedding_dimensionality,
+    document_prefix,
+    query_prefix,
+    tokens_per_chunk,
+    overlap_amount,
+    min_token_threshold,
+    max_embeddings_per_post
+  FROM hivesense_app_status
+  ORDER BY id
+  LIMIT 1;
+$$ LANGUAGE sql STABLE;
 
 RESET ROLE;

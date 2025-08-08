@@ -5,7 +5,7 @@ set -o pipefail
 
 SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
-haf_dir="../submodules/haf"
+haf_dir="$SCRIPTDIR/../submodules/haf"
 endpoints="endpoints"
 rewrite_dir="${endpoints}_openapi"
 input_file="rewrite_rules.conf"
@@ -19,6 +19,7 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/find_similar_posts.sql
 ../$endpoints/find_similar_posts_one_shot.sql
 ../$endpoints/get_similar_posts_by_post.sql
+../$endpoints/get_similar_posts_by_post_one_shot.sql
 ../$endpoints/find_thematic_contributors.sql
 ../$endpoints/embedding_updates.sql"
 

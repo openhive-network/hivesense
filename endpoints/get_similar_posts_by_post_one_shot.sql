@@ -4,19 +4,23 @@ SET ROLE hivesense_owner;
   get:
     tags:
       - AI
-    summary: Get semantically similar posts to a given Hive post
+    summary: Full semantic search results for similar posts in a single call
     description: |
       Performs semantic similarity search to find posts that are contextually
-      similar to a specified Hive post. The endpoint analyzes the content and
-      context of the target post and returns up to 50 related posts, ranked by
-      their similarity score.
+      similar to a specified Hive post. Returns an ordered list of posts most 
+      similar to the given post.
+      
+      The first **N** results (default 10, max 50) are returned as full
+      bridge-post JSON objects; the remaining results (up to **posts_limit**,
+      default 100, max 1000) are stub entries containing only *author* and
+      *permlink*. Paging is done entirely on the client side.
 
       Key features:
       - Semantic analysis considers post content and context
       - Results are ordered by similarity (most similar first)
       - Optional content filtering through observer blacklists
       - Configurable body length truncation for preview purposes
-      - Maximum of 50 posts returned to ensure performance
+      - Split response: full data for top results, stubs for remainder
     
       The similarity analysis takes into account:
       - Post content and context
@@ -24,10 +28,10 @@ SET ROLE hivesense_owner;
       - Topic relevance and contextual meaning
 
       SQL example:
-      SELECT * FROM hivesense_endpoints.get_similar_posts_by_post(''bue-witness'', ''bue-witness-post'', 20, 10);
+      SELECT * FROM hivesense_endpoints.get_similar_posts_by_post_one_shot(''bue-witness'', ''bue-witness-post'', 20, 100, 10);
 
       REST call example:
-      GET ''https://%1$s/hivesense-api/similarpostsbypost?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=10''
+      GET ''https://%1$s/hivesense-api/similarpostsbypost-one-shot?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=100&full_posts=10''
     operationId: hivesense_endpoints.get_similar_posts_by_post_one_shot
     parameters:
       - in: query
@@ -65,29 +69,30 @@ SET ROLE hivesense_owner;
         example: 20
       - in: query
         name: posts_limit
-        required: true
+        required: false
         schema:
           type: integer
+          default: 100
           minimum: 1
-          maximum: 100
+          maximum: 1000
         description: |
-          Specifies the maximum number of similar posts to return. Must be between
-          1 and 50. The posts are returned in order of similarity, with the most
+          Total number of posts (full + stub) to return. Must be between
+          1 and 1000. The posts are returned in order of similarity, with the most
           similar posts first. Setting a lower limit can improve response times
           and reduce data transfer.
-        example: 10
+        example: 100
       - in: query
         name: full_posts
-        required: true
+        required: false
         schema:
           type: integer
+          default: 10
           minimum: 0
           maximum: 50
         description: |
-          Specifies the maximum number of posts to return full data for, any 
-          remaining posts will simply be author & permlink.  Set this to the size
-          of your first page of results, then make another call passing the 
-          author/permlinks for subsequent pages
+          How many of the top results should include full post data. Any 
+          remaining posts (up to posts_limit) will be stub entries with only 
+          author & permlink. Set this to the size of your first page of results.
         example: 10
       - in: query
         name: observer
@@ -113,15 +118,15 @@ SET ROLE hivesense_owner;
  */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_by_post_one_shot;
-CREATE FUNCTION hivesense_endpoints.get_similar_posts_by_post_one_shot(
-    "author"      TEXT,
-    "permlink"    TEXT,
-    "tr_body"     INT,
+CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_by_post_one_shot(
+    "author" TEXT,
+    "permlink" TEXT,
+    "tr_body" INT,
     "posts_limit" INT = 100,
-    "full_posts"  INT = 10,
-    "observer"    TEXT = ''
+    "full_posts" INT = 10,
+    "observer" TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$

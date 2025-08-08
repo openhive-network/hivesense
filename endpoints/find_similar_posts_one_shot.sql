@@ -47,13 +47,13 @@
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_one_shot;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_one_shot(
-    "pattern"      TEXT,
-    "tr_body"      INT,
-    "posts_limit"  INT = 100,
-    "full_posts"   INT = 10,
-    "observer"     TEXT = ''
+    "pattern" TEXT,
+    "tr_body" INT,
+    "posts_limit" INT = 100,
+    "full_posts" INT = 10,
+    "observer" TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
