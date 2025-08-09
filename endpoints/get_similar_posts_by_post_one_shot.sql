@@ -69,7 +69,7 @@ SET ROLE hivesense_owner;
           reducing response size. Maximum value is 65535 characters.
         example: 20
       - in: query
-        name: limit
+        name: result_limit
         required: false
         schema:
           type: integer
@@ -92,7 +92,7 @@ SET ROLE hivesense_owner;
           maximum: 50
         description: |
           How many of the top results should include full post data. Any 
-          remaining posts (up to limit) will be stub entries with only 
+          remaining posts (up to result_limit) will be stub entries with only 
           author & permlink. Set this to the size of your first page of results.
         example: 10
       - in: query
@@ -123,7 +123,7 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_similar(
     "author" TEXT,
     "permlink" TEXT,
     "truncate" INT = 0,
-    "limit" INT = 100,
+    "result_limit" INT = 100,
     "full_posts" INT = 10,
     "observer" TEXT = ''
 )
@@ -136,15 +136,15 @@ DECLARE
     __result      JSON;
 BEGIN
     /* validate args */
-    IF "limit" < 1 OR "limit" > 1000 THEN
-        RAISE EXCEPTION 'limit must be between 1 and 1000';
+    IF result_limit < 1 OR result_limit > 1000 THEN
+        RAISE EXCEPTION 'result_limit must be between 1 and 1000';
     END IF;
     IF full_posts < 0 OR full_posts > 50 THEN
         RAISE EXCEPTION 'full_posts must be between 0 and 50';
     END IF;
-    IF full_posts > "limit" THEN
-        RAISE EXCEPTION 'full_posts (%s) cannot exceed limit (%s)',
-                        full_posts, "limit";
+    /* Clamp full_posts to result_limit if it exceeds */
+    IF full_posts > result_limit THEN
+        full_posts := result_limit;
     END IF;
 
     /* observer → id */
@@ -158,7 +158,7 @@ BEGIN
     WITH ranked AS (
         SELECT *
           FROM hivesense_app.find_nearest_posts_to_post_one_shot(
-                   author, permlink, "limit", __observer_id)
+                   author, permlink, result_limit, __observer_id)
     ),
 
     top_full AS (
@@ -197,7 +197,7 @@ BEGIN
               FROM ranked
              ORDER BY similarity_order
              OFFSET full_posts
-             LIMIT ("limit" - full_posts)
+             LIMIT (result_limit - full_posts)
           ) lim
           JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
           JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id

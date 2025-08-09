@@ -24,7 +24,7 @@ SET ROLE hivesense_owner;
         description: Topic or theme to search for. Authors whose posts are semantically related to this topic will be returned.
         example: "Make witness node secure against hackers attack and emergency situations"
       - in: query
-        name: limit
+        name: result_limit
         required: false
         schema:
           type: integer
@@ -66,7 +66,7 @@ SET ROLE hivesense_owner;
 DROP FUNCTION IF EXISTS hivesense_endpoints.authors_search;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.authors_search(
     "topic" TEXT,
-    "limit" INT = 10,
+    "result_limit" INT = 10,
     "observer" TEXT = ''
 )
 RETURNS JSON 
@@ -91,7 +91,7 @@ BEGIN
             ha.name ORDER BY search.rank ASC
     ) FROM hivesense_app.find_thematic_contributors_with_embedding(
                    hivesense_app.hivesense_embed(__query_prefix || topic)
-                 , "limit"
+                 , result_limit
                  , _observer_id => __observer_id
     ) as search
     JOIN hivemind_app.hive_accounts ha ON ha.id = search.author_id

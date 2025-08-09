@@ -661,7 +661,9 @@ BEGIN
            END
       INTO __post_embedding
       FROM hivesense_app.posts_vectors
-     WHERE post_id = __post_id;
+     WHERE post_id = __post_id
+     ORDER BY chunk_number
+     LIMIT 1;
 
     IF __post_embedding IS NULL THEN
         RAISE EXCEPTION
@@ -685,13 +687,14 @@ $$;
 DROP TYPE IF EXISTS contributors_result CASCADE;
 CREATE TYPE contributors_result AS (
    rank INT,
-   author_id INT
+   author_id INT,
+   similarity REAL
 );
 
 
 
 CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(
-    _embedding   vector,      -- embedding for a thematic
+    _embedding   vector,      -- full-size query embedding
     _limit       integer DEFAULT 1,
     _observer_id integer DEFAULT 0
 )
@@ -703,81 +706,277 @@ PARALLEL SAFE
 ROWS 1000
 AS $BODY$
 DECLARE
-    __max_embedding_limit INT    := 300000;
-    dist_clause           TEXT   := hivesense_app.distance_clause(1);
-    rec                   RECORD;
-    _num_tokens           INT;
-    recs_seen             INT    := 0;
-    author_ids            INT[]  := ARRAY[]::INT[];
-    authors_found         INT    := 0;
-    contributor_rank      INT;
-    batch_size            INT    := GREATEST(_limit * 5, 50);
-    __min_search_tokens   INT;
-BEGIN
-    -- ensure we can see both schemas
-    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
-    -- tune pgvector search
-    PERFORM set_config('hnsw.ef_search', '1000', true);
+    /* ───────── flags & dims ───────── */
+    use_reduced   boolean := hivesense_app.use_reduced_embeddings();
+    store_half    boolean := hivesense_app.store_halfvec_embeddings();
+    half_index    boolean := hivesense_app.use_halfvec_index();
 
+    full_dim int := hivesense_app.embedding_dims();
+    red_dim  int := hivesense_app.reduced_dims();
+
+    query_red public.vector;          -- reduced query when needed
+
+    /* ───────── distance clauses ───────── */
+    dist_full text := hivesense_app.distance_clause(1);    -- uses $1
+    dist_red  text;                                        -- uses $2 when reduced
+
+    /* ───────── runtime tunables ───────── */
+    default_ef   int := (SELECT default_ef_search FROM hivesense_app.hivesense_app_status LIMIT 1);
+    minimum_ann_candidates int := (SELECT minimum_ann_candidates FROM hivesense_app.hivesense_app_status LIMIT 1);
+    allow_dbg    boolean := hivesense_app.allow_debugging();
+    req_headers        jsonb := current_setting('request.headers', true)::jsonb;
+    batch_multiplier   int := 10;  -- higher for authors since we need more candidates
+    exploratory_factor int := default_ef;
+    ann_candidates     int;             -- computed below
+    exhaustive boolean := false;
+    
+    /* ───────── author tracking ───────── */
+    __max_embedding_limit INT    := 300000;
+    author_scores  jsonb := '{}'::jsonb;  -- track best score per author
+    authors_found  INT    := 0;
+    __min_search_tokens   INT;
+
+    /* ------ for exhaustive ------ */
+    post_ids      int[];    -- candidate post_ids
+    chunk_numbers int[];    -- their chunk_numbers
+    sims          real[];   -- their similarity scores
+    author_ids    int[];    -- their author_ids
+BEGIN
+    /* — ensure pgvector ops visible — */
+    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
+    
+    /* — clamp limit — */
+    _limit := LEAST(GREATEST(_limit,1), 100);
+
+    /* ─── detect debug headers ─── */
+    IF NOT allow_dbg AND (
+           req_headers ? 'x-batch-size-multiplier' OR
+           req_headers ? 'x-exploratory-factor' OR
+           req_headers ? 'x-ann-candidates' OR
+           req_headers ? 'x-exhaustive-search'
+       ) THEN
+        RAISE EXCEPTION 'Debugging headers are disabled on this server'
+              USING ERRCODE = '42504';  -- insufficient_privilege
+    END IF;
+
+    /* ─── apply overrides only if allowed ─── */
+    IF allow_dbg THEN
+        batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
+                                       batch_multiplier);
+        exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
+                                       exploratory_factor);
+        exhaustive := lower(coalesce(req_headers->>'x-exhaustive-search','false')) = 'true';
+    END IF;
+
+    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
+    IF allow_dbg THEN
+        ann_candidates := COALESCE((req_headers->>'x-ann-candidates')::int,
+                                   ann_candidates);
+    END IF;
+    ann_candidates := GREATEST(ann_candidates, minimum_ann_candidates);
+
+    /* — apply tunables — */
+    PERFORM set_config('ivfflat.probes', '4', true);
+    PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
+
+    /* — token threshold — */
     SELECT min_token_search_threshold
       INTO __min_search_tokens
       FROM hivesense_app.hivesense_app_status
      WHERE id = 1;
 
-    LOOP
-        FOR rec IN
-            EXECUTE format($qry$
-                SELECT
-                    hpv.post_id,
-                    hp.author_id,
-                    %s AS similarity
-                FROM   hivesense_app.posts_vectors hpv
-                JOIN   hivemind_app.hive_posts hp ON hp.id = hpv.post_id
-                WHERE  ($2 = 0 OR NOT EXISTS (
-                           SELECT 1
-                             FROM hivemind_app.muted_accounts_by_id_view m
-                            WHERE m.observer_id = $2
-                              AND m.muted_id    = hp.author_id
-                       ))
-                ORDER  BY similarity, hpv.post_id
-                LIMIT %s
-            $qry$, dist_clause, batch_size)
-        USING _embedding, _observer_id
-        LOOP
-            recs_seen := recs_seen + 1;
-            -- stop if we've looked at too many embeddings or found enough authors
-            EXIT WHEN recs_seen >= __max_embedding_limit
-                     OR authors_found >= _limit;
+    /* — build reduced query vector & distance clause — */
+    IF use_reduced THEN
+        query_red := hivesense_app.reduce_embedding(_embedding);
 
-            -- skip authors we've already returned
-            IF rec.author_id = ANY(author_ids) THEN
-                CONTINUE;
-            END IF;
+        IF store_half THEN
+            dist_red := format(
+              'reduced_embedding <=> $2::public.halfvec(%s)', red_dim);
+        ELSIF half_index THEN
+            dist_red := format(
+              '(reduced_embedding::public.halfvec(%1$s)) <=> $2::public.halfvec(%1$s)',
+              red_dim);
+        ELSE
+            dist_red := 'reduced_embedding <=> $2';
+        END IF;
+    END IF;
 
-            -- skip posts below the token threshold
-            IF __min_search_tokens > 0 THEN
-              SELECT number_of_tokens
-                INTO _num_tokens
-                FROM hivesense_app.post_data
-               WHERE post_id = rec.post_id;
-              IF _num_tokens < __min_search_tokens THEN
-                CONTINUE;
-              END IF;
-            END IF;
+    /* ────────────────────────────────────────────────────────────
+     *  MAIN query (three variants like posts search)
+     * ────────────────────────────────────────────────────────────*/
+    IF exhaustive THEN
+        -- Exhaustive search for benchmarking
+        PERFORM set_config('enable_indexscan',      'off', TRUE);
+        PERFORM set_config('enable_bitmapscan',     'off', TRUE);
+        PERFORM set_config('enable_indexonlyscan',  'off', TRUE);
+        PERFORM set_config('max_parallel_workers_per_gather', '4', TRUE);
 
-            -- new author!
-            authors_found    := authors_found + 1;
-            contributor_rank := authors_found;
-            author_ids       := array_append(author_ids, rec.author_id);
+        SELECT
+          array_agg(b.post_id     ORDER BY b.sim),
+          array_agg(b.chunk_number ORDER BY b.sim),
+          array_agg(b.sim         ORDER BY b.sim),
+          array_agg(b.author_id   ORDER BY b.sim)
+        INTO post_ids, chunk_numbers, sims, author_ids
+        FROM (
+          SELECT
+            pv.post_id,
+            pv.chunk_number,
+            hp.author_id,
+            (pv.embedding <=> _embedding)::real AS sim
+          FROM hivesense_app.posts_vectors pv
+          JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+          ORDER BY sim
+          LIMIT LEAST(ann_candidates, 100000)
+        ) AS b;
 
-            RETURN NEXT ROW(contributor_rank, rec.author_id);
-        END LOOP;
+        PERFORM set_config('enable_indexscan',     'on', TRUE);
+        PERFORM set_config('enable_bitmapscan',    'on', TRUE);
+        PERFORM set_config('enable_indexonlyscan', 'on', TRUE);
 
-        EXIT WHEN authors_found >= _limit;
+        RETURN QUERY
+        WITH candidates AS (
+            SELECT
+              author_ids[i]    AS author_id,
+              sims[i]          AS sim,
+              post_ids[i]      AS post_id
+            FROM generate_subscripts(author_ids,1) AS s(i)
+        ),
+        filtered AS (
+            SELECT c.author_id, c.sim, c.post_id
+              FROM candidates c
+              JOIN hivesense_app.post_data pd ON pd.post_id = c.post_id
+             WHERE (__min_search_tokens = 0 OR pd.number_of_tokens >= __min_search_tokens)
+               AND (_observer_id = 0 OR NOT EXISTS (
+                     SELECT 1
+                       FROM hivemind_app.muted_accounts_by_id_view m
+                      WHERE m.observer_id = _observer_id
+                        AND m.muted_id    = c.author_id
+                   ))
+        ),
+        ranked AS (
+            SELECT author_id,
+                   sim,
+                   row_number() OVER (ORDER BY sim) AS rn
+              FROM filtered
+        ),
+        author_best AS (
+            SELECT author_id,
+                   MIN(sim) AS best_sim,
+                   SUM(1.0 / sqrt(rn)) AS score
+              FROM ranked
+             GROUP BY author_id
+        )
+        SELECT
+          (row_number() OVER (ORDER BY score DESC, author_id))::int AS rank,
+          author_id,
+          best_sim::real AS similarity
+        FROM author_best
+        ORDER BY score DESC, author_id
+        LIMIT _limit;
+        RETURN;
 
-        -- increase batch size and try again
-        batch_size := LEAST(batch_size * 2, __max_embedding_limit);
-    END LOOP;
+    ELSIF use_reduced THEN
+        -- Use reduced embeddings for initial search
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pr.post_id,
+                       pr.chunk_number,
+                       hp.author_id,
+                       %s AS ann_dist
+                  FROM hivesense_app.posts_vectors_reduced pr
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($3 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $3
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY ann_dist, pr.post_id
+                 LIMIT %s
+            ),
+            reranked AS (
+                SELECT ann.author_id,
+                       ann.post_id,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id = ann.post_id
+                   AND pv.chunk_number = ann.chunk_number
+            ),
+            ranked AS (
+                SELECT author_id,
+                       sim,
+                       row_number() OVER (ORDER BY sim) AS rn
+                  FROM reranked
+            ),
+            author_best AS (
+                SELECT author_id,
+                       MIN(sim) AS best_sim,
+                       SUM(1.0 / sqrt(rn)) AS score
+                  FROM ranked
+                 GROUP BY author_id
+            )
+            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
+                   author_id,
+                   best_sim::real AS similarity
+              FROM author_best
+             ORDER BY score DESC, author_id
+             LIMIT %s
+        $q$,
+          dist_red,                     -- %s  ann distance expr
+          (__min_search_tokens = 0),    -- %L  token filter off?
+          __min_search_tokens,          -- %s
+          ann_candidates,               -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, query_red, _observer_id;
+
+    ELSE   /* ───────── full-vector path ───────── */
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pv.post_id,
+                       pv.chunk_number,
+                       hp.author_id,
+                       %s AS sim
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($2 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $2
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY sim, pv.post_id
+                 LIMIT %s
+            ),
+            ranked AS (
+                SELECT author_id,
+                       sim,
+                       row_number() OVER (ORDER BY sim) AS rn
+                  FROM ann
+            ),
+            author_best AS (
+                SELECT author_id,
+                       MIN(sim) AS best_sim,
+                       SUM(1.0 / sqrt(rn)) AS score
+                  FROM ranked
+                 GROUP BY author_id
+            )
+            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
+                   author_id,
+                   best_sim::real AS similarity
+              FROM author_best
+             ORDER BY score DESC, author_id
+             LIMIT %s
+        $q$,
+          dist_full,                    -- %s  distance expr
+          (__min_search_tokens = 0),    -- %L  token filter off?
+          __min_search_tokens,          -- %s
+          ann_candidates,               -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, _observer_id;
+    END IF;
 END;
 $BODY$;
 
