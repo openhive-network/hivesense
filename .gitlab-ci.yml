@@ -103,9 +103,50 @@ build_images:
       docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
       echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
   script:
-    - $CI_PROJECT_DIR/scripts/build_images.sh --push
+    - |
+      # Build and push with commit SHA tag
+      $CI_PROJECT_DIR/scripts/build_images.sh --push
+      
+      # If on develop branch, also tag and push as 'develop'
+      if [[ "$CI_COMMIT_BRANCH" == "develop" ]]; then
+        echo "Tagging images with 'develop' tag..."
+        docker tag "registry.gitlab.syncad.com/hive/hivesense:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense:develop"
+        docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
+        docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
+        docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
+        
+        echo "Pushing 'develop' tags..."
+        docker push "registry.gitlab.syncad.com/hive/hivesense:develop"
+        docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
+        docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
+        docker push "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
+      fi
   needs:
     - job: prepare_haf_image
+  tags:
+    - public-runner-docker
+
+publish_release_images:
+  extends: .docker_image_builder_job_template
+  stage: publish
+  before_script:
+    - !reference [.docker_image_builder_job_template, before_script]
+    - |
+      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  script:
+    - |
+      echo "Publishing release images for tag: $CI_COMMIT_TAG"
+      
+      # Build images with release tag
+      $CI_PROJECT_DIR/scripts/build_images.sh --tag="$CI_COMMIT_TAG" --push
+      
+      echo "Successfully published release images with tag: $CI_COMMIT_TAG"
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+      when: on_success
+    - when: never
   tags:
     - public-runner-docker
 
