@@ -87,18 +87,18 @@ $$ LANGUAGE sql STABLE;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.embedding_updates;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
-    "after_seq" INT,
-    "page_size" INT,
-    "sync_uuid" UUID
+    "after_seq" int,
+    "page_size" int,
+    "sync_uuid" uuid
 )
 RETURNS TABLE (
-  sync_seq            INT,
-  op                  TEXT,
-  author              TEXT,
-  permlink            TEXT,
-  number_of_tokens    INT,
-  last_vectors_block  INT,
-  embeddings          REAL[]    -- PostgREST will JSON-encode this array
+  sync_seq            int,
+  op                  text,
+  author              text,
+  permlink            text,
+  number_of_tokens    int,
+  last_vectors_block  int,
+  embeddings          real[]    -- PostgREST will JSON-encode this array
 )
 -- openapi-generated-code-end
   LANGUAGE plpgsql
@@ -106,7 +106,7 @@ RETURNS TABLE (
 AS $$
 DECLARE
   __max_visible integer;
-  __our_uuid    UUID;
+  __our_uuid    uuid;
 BEGIN
   -- 0) fetch the current watermark and uuid
   SELECT max_visible_sync_seq, has.sync_uuid
