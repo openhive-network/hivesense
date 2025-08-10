@@ -74,7 +74,17 @@ lint_sql_scripts:
     name: sqlfluff/sqlfluff:2.1.4
     entrypoint: [""]
   script:
-  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres
+  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres || true
+  - |
+    if [ -f sql-lint.yaml ]; then
+      echo "SQL lint results:"
+      cat sql-lint.yaml
+      # Check if there are any violations and exit with error code
+      if grep -q "violations:" sql-lint.yaml && [ "$(grep -c "violations:" sql-lint.yaml)" -gt 0 ]; then
+        echo "SQL linting failed with violations. See details above."
+        exit 1
+      fi
+    fi
   artifacts:
     paths:
     - sql-lint.yaml
