@@ -160,16 +160,9 @@ BEGIN
     END IF;
 
     /* -----------------------------------------------------------
-     * Build index name and existence check
+     * Get index name from shared function
      * ----------------------------------------------------------*/
-    idx_name := format(
-       '%s_%s_%s_hnsw',
-       substring(tgt_table from '[^.]+$'),        -- strip schema
-       tgt_col,
-       CASE
-         WHEN store OR half THEN 'half' ELSE 'full'
-       END
-    );
+    idx_name := hivesense_app.get_hnsw_index_name();
 
     SELECT EXISTS(
        SELECT 1
@@ -251,15 +244,30 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Get table size and row count before index creation
-    SELECT 
-        PG_RELATION_SIZE('hivesense_app.posts_vectors') AS table_size, 
-        COUNT(*) AS row_count
-    FROM hivesense_app.posts_vectors 
-    INTO __table_size, __row_count;
-    
-    -- Get vector dimension
-    SELECT VECTOR_DIMS(embedding) AS vector_dimensions FROM hivesense_app.posts_vectors LIMIT 1 INTO __vector_dimensions;
+    -- Get table size and row count before index creation (use correct table based on configuration)
+    IF hivesense_app.use_reduced_embeddings() THEN
+        SELECT 
+            PG_RELATION_SIZE('hivesense_app.posts_vectors_reduced') AS table_size, 
+            COUNT(*) AS row_count
+        FROM hivesense_app.posts_vectors_reduced 
+        INTO __table_size, __row_count;
+        
+        -- Get vector dimension from reduced embedding
+        SELECT VECTOR_DIMS(reduced_embedding) AS vector_dimensions 
+        FROM hivesense_app.posts_vectors_reduced 
+        LIMIT 1 INTO __vector_dimensions;
+    ELSE
+        SELECT 
+            PG_RELATION_SIZE('hivesense_app.posts_vectors') AS table_size, 
+            COUNT(*) AS row_count
+        FROM hivesense_app.posts_vectors 
+        INTO __table_size, __row_count;
+        
+        -- Get vector dimension from full embedding
+        SELECT VECTOR_DIMS(embedding) AS vector_dimensions 
+        FROM hivesense_app.posts_vectors 
+        LIMIT 1 INTO __vector_dimensions;
+    END IF;
     
     -- Get current parallel workers and maintenance work mem settings
     DECLARE
