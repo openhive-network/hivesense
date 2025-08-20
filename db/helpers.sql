@@ -94,6 +94,42 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION hivesense_app.get_hnsw_index_name()
+RETURNS text LANGUAGE plpgsql STABLE AS
+$$
+DECLARE
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    half        boolean := hivesense_app.use_halfvec_index();
+    store       boolean := hivesense_app.store_halfvec_embeddings();
+    tgt_table   text;
+    tgt_col     text;
+    idx_name    text;
+BEGIN
+    /* -----------------------------------------------------------
+     * Decide which table/column we are indexing
+     * ----------------------------------------------------------*/
+    IF use_reduced THEN
+        tgt_table := 'hivesense_app.posts_vectors_reduced';
+        tgt_col   := 'reduced_embedding';
+    ELSE
+        tgt_table := 'hivesense_app.posts_vectors';
+        tgt_col   := 'embedding';
+    END IF;
+
+    /* -----------------------------------------------------------
+     * Build index name and existence check
+     * ----------------------------------------------------------*/
+    RETURN format(
+       '%s_%s_%s_hnsw',
+       substring(tgt_table from '[^.]+$'),        -- strip schema
+       tgt_col,
+       CASE
+         WHEN store OR half THEN 'half' ELSE 'full'
+       END
+    );
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE CREATE_HNSW_INDEX()
 LANGUAGE plpgsql
 AS $$
@@ -181,6 +217,7 @@ DECLARE
     __start_time TIMESTAMPTZ;
     __end_time TIMESTAMPTZ;
     __duration INTERVAL;
+    __index_name TEXT;
     __index_exists BOOLEAN;
     __table_size BIGINT;
     __row_count BIGINT;
@@ -197,19 +234,20 @@ DECLARE
                                   LIMIT  1);
 BEGIN
     -- Check if index already exists
+    SELECT hivesense_app.get_hnsw_index_name() INTO __index_name;
     SELECT EXISTS (
         SELECT 1 FROM pg_indexes 
-        WHERE indexname = 'hivensense_vectors_embed_hnsw_idxs'
+        WHERE indexname = __index_name
     ) INTO __index_exists;
     
     IF __index_exists THEN
         -- If index exists, get its size and report
         SELECT PG_SIZE_PRETTY(PG_RELATION_SIZE(oid)) 
         FROM pg_class 
-        WHERE relname = 'hivensense_vectors_embed_hnsw_idxs'
+        WHERE relname = __index_name
         INTO __creation_time_info;
         
-        RAISE NOTICE 'Index hivensense_vectors_embed_hnsw_idxs already exists (size: %). Skipping creation.', __creation_time_info;
+        RAISE NOTICE 'HNSW index already exists (size: %). Skipping creation.', __creation_time_info;
         RETURN;
     END IF;
 
@@ -291,9 +329,9 @@ BEGIN
         __actual_workers INT;
     BEGIN
         SELECT current_setting('max_parallel_maintenance_workers')::INT INTO __actual_workers;
-        RAISE NOTICE 'Creating HNSW index hivensense_vectors_embed_hnsw_idxs for searching embeddings with % parallel workers', __actual_workers;
+        RAISE NOTICE 'Creating HNSW index for searching embeddings with % parallel workers', __actual_workers;
     EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Creating HNSW index hivensense_vectors_embed_hnsw_idxs (could not determine worker count)';
+        RAISE NOTICE 'Creating HNSW index (could not determine worker count)';
     END;
 
     -- Record start time
@@ -309,7 +347,7 @@ BEGIN
     -- Get the index size
     SELECT PG_RELATION_SIZE(oid) 
     FROM pg_class 
-    WHERE relname = 'hivensense_vectors_embed_hnsw_idxs'
+    WHERE relname = __index_name
     INTO __index_size;
     
     -- Calculate index creation rate (vectors/second)
