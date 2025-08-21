@@ -29,7 +29,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: hive/haf
-  ref: fbcc8e36bf62d981fea0c163ae48daf86555633e   # develop
+  ref: b077291d37d71d482fd22fa68ab23c905a5c0912   # develop
   file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
@@ -74,7 +74,8 @@ lint_sql_scripts:
     name: sqlfluff/sqlfluff:2.1.4
     entrypoint: [""]
   script:
-  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres || true
+  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres ||
+    true
   - |
     if [ -f sql-lint.yaml ]; then
       echo "SQL lint results:"
@@ -97,76 +98,76 @@ prepare_haf_image:
     REGISTRY_USER: "$HAF_IMG_BUILDER_USER"
     REGISTRY_PASS: "$HAF_IMG_BUILDER_PASSWORD"
   before_script:
-    - git config --global --add safe.directory $CI_PROJECT_DIR/submodules/haf
+  - git config --global --add safe.directory $CI_PROJECT_DIR/submodules/haf
   tags:
-    - public-runner-docker
-    - hived-for-tests
+  - public-runner-docker
+  - hived-for-tests
 
 
 build_images:
   extends: .docker_image_builder_job_template
   stage: build
   before_script:
-    - !reference [.docker_image_builder_job_template, before_script]
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
-      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  - !reference [.docker_image_builder_job_template, before_script]
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+    docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
   script:
-    - |
-      # Build and push with commit SHA tag
-      $CI_PROJECT_DIR/scripts/build_images.sh --push
+  - |
+    # Build and push with commit SHA tag
+    $CI_PROJECT_DIR/scripts/build_images.sh --push
+
+    # If on develop branch, also tag and push as 'develop'
+    if [[ "$CI_COMMIT_BRANCH" == "develop" ]]; then
+      echo "Tagging images with 'develop' tag..."
+      docker tag "registry.gitlab.syncad.com/hive/hivesense:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense:develop"
+      docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
+      docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
+      docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
       
-      # If on develop branch, also tag and push as 'develop'
-      if [[ "$CI_COMMIT_BRANCH" == "develop" ]]; then
-        echo "Tagging images with 'develop' tag..."
-        docker tag "registry.gitlab.syncad.com/hive/hivesense:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense:develop"
-        docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
-        docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
-        docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:$CI_COMMIT_SHORT_SHA" "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
-        
-        echo "Pushing 'develop' tags..."
-        docker push "registry.gitlab.syncad.com/hive/hivesense:develop"
-        docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
-        docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
-        docker push "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
-      fi
+      echo "Pushing 'develop' tags..."
+      docker push "registry.gitlab.syncad.com/hive/hivesense:develop"
+      docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop"
+      docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
+      docker push "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
+    fi
   needs:
-    - job: prepare_haf_image
+  - job: prepare_haf_image
   tags:
-    - public-runner-docker
+  - public-runner-docker
 
 publish_release_images:
   extends: .docker_image_builder_job_template
   stage: publish
   before_script:
-    - !reference [.docker_image_builder_job_template, before_script]
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
-      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+  - !reference [.docker_image_builder_job_template, before_script]
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+    docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
   script:
-    - |
-      echo "Publishing release images for tag: $CI_COMMIT_TAG"
-      
-      # Build images with release tag
-      $CI_PROJECT_DIR/scripts/build_images.sh --tag="$CI_COMMIT_TAG" --push
-      
-      echo "Successfully published release images with tag: $CI_COMMIT_TAG"
+  - |
+    echo "Publishing release images for tag: $CI_COMMIT_TAG"
+
+    # Build images with release tag
+    $CI_PROJECT_DIR/scripts/build_images.sh --tag="$CI_COMMIT_TAG" --push
+
+    echo "Successfully published release images with tag: $CI_COMMIT_TAG"
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
-      when: on_success
-    - when: never
+  - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
+    when: on_success
+  - when: never
   tags:
-    - public-runner-docker
+  - public-runner-docker
 
 sync:
   extends: .docker_image_builder_job_template
   stage: sync
   image: registry.gitlab.syncad.com/hive/haf_api_node/dind:1.27.11rc2
   needs:
-    - prepare_haf_image
-    - build_images
+  - prepare_haf_image
+  - build_images
   variables:
     DOCKER_COMPOSE_VERSION: 2.27.1
     DATA_SOURCE: ${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}
@@ -182,76 +183,76 @@ sync:
     GIT_SUBMODULE_STRATEGY: normal
   timeout: 1 hours
   before_script:
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
-      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-      echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
-      echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
-      git config --global --add safe.directory "$CI_PROJECT_DIR"
-      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
-      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
-      git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
-      git submodule foreach --recursive 'git fetch --tags'
-      echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+    docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
+    echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
+    git config --global --add safe.directory "$CI_PROJECT_DIR"
+    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
+    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
+    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
+    git submodule foreach --recursive 'git fetch --tags'
+    echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
   script:
-    - docker compose version
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting the test environment..."
-      scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_5M}
-      echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
-      
-      echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for Hivesense sync..."
-      scripts/ci-helpers/wait-for-hivesense-startup.sh
-      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
-      
-      echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KTest hivesense sync..."
-      netstat -tuln
-      tests/integration/api_node/hivesense_synced_api_node_test.sh
-      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
-      
-      echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KBenchmark hivesense sync..."
-      tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
-      echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
-  after_script:
-    - |
-      echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
-      
-      ls -la $(pwd)
-      OLDPWD=$(pwd)
-      cd submodules/haf_api_node || exit 1
-      docker logs haf-world-haf-1 > ${OLDPWD}/docker/haf.log
-      docker logs haf-world-haproxy-1 > ${OLDPWD}/docker/haproxy.log
-      docker logs haf-world-hivesense-install-schema-1 > ${OLDPWD}/docker/hivesense-install.log
-      docker logs haf-world-hivesense-block-processing-1 > ${OLDPWD}/docker/hivesense-block-processing.log
-      docker logs haf-world-hivesense-postgrest-1 > ${OLDPWD}/docker/hivesense-postgrest.log
-      docker logs haf-world-hivesense-swagger-1 > ${OLDPWD}/docker/hivesense-swagger.log
-      docker logs haf-world-hivesense-postgrest-rewriter-1 > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log
-      docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log
-      cd "$OLDPWD" || exit 1
-      
-      # Create docker directory if it doesn't exist
-      mkdir -p docker
-      
-      # Check if jmeter results exist and add them to the archive
-      if [ -d "jmeter_results" ]; then
-        echo "Adding JMeter benchmark results to container logs archive..."
-        # Add jmeter results to the tar file
-        tar -cf - $(pwd)/docker/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
-      else
-        # Just include the logs if no jmeter results
-        tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
-      fi
-      
+  - docker compose version
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting the test environment..."
+    scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_5M}
+    echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
 
-      
-      # Manually remove the copy of the replay data to preserve disk space on the replay server
-      sudo rm -rf ${POOL_DIR}
-      
-      echo -e "\e[0Ksection_end:$(date +%s):compose2\r\e[0K"
+    echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for Hivesense sync..."
+    scripts/ci-helpers/wait-for-hivesense-startup.sh
+    echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+
+    echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KTest hivesense sync..."
+    netstat -tuln
+    tests/integration/api_node/hivesense_synced_api_node_test.sh
+    echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+
+    echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KBenchmark hivesense sync..."
+    tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
+    echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  after_script:
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
+
+    ls -la $(pwd)
+    OLDPWD=$(pwd)
+    cd submodules/haf_api_node || exit 1
+    docker logs haf-world-haf-1 > ${OLDPWD}/docker/haf.log
+    docker logs haf-world-haproxy-1 > ${OLDPWD}/docker/haproxy.log
+    docker logs haf-world-hivesense-install-schema-1 > ${OLDPWD}/docker/hivesense-install.log
+    docker logs haf-world-hivesense-block-processing-1 > ${OLDPWD}/docker/hivesense-block-processing.log
+    docker logs haf-world-hivesense-postgrest-1 > ${OLDPWD}/docker/hivesense-postgrest.log
+    docker logs haf-world-hivesense-swagger-1 > ${OLDPWD}/docker/hivesense-swagger.log
+    docker logs haf-world-hivesense-postgrest-rewriter-1 > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log
+    docker logs haf-world-hivesense-ollama-1 > ${OLDPWD}/docker/hivesense-ollama.log
+    cd "$OLDPWD" || exit 1
+
+    # Create docker directory if it doesn't exist
+    mkdir -p docker
+
+    # Check if jmeter results exist and add them to the archive
+    if [ -d "jmeter_results" ]; then
+      echo "Adding JMeter benchmark results to container logs archive..."
+      # Add jmeter results to the tar file
+      tar -cf - $(pwd)/docker/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
+    else
+      # Just include the logs if no jmeter results
+      tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
+    fi
+
+
+
+    # Manually remove the copy of the replay data to preserve disk space on the replay server
+    sudo rm -rf ${POOL_DIR}
+
+    echo -e "\e[0Ksection_end:$(date +%s):compose2\r\e[0K"
   artifacts:
     paths:
-      - docker/container-logs.tar.gz
+    - docker/container-logs.tar.gz
     expire_in: 1 week
     when: always
   tags:
-    - data-cache-storage
+  - data-cache-storage
