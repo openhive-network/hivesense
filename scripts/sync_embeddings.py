@@ -14,7 +14,7 @@ DB_DSN  = os.environ.get("POSTGRES_URI")         # postgres://…  (same schema 
 
 
 # Endpoints
-STATUS_URL = f"{API_URL}/sync_settings"
+STATUS_URL = f"{API_URL}/sync-settings"
 EMBEDS_URL = f"{API_URL}/embedding-updates"
 
 BATCH = 1000
@@ -82,7 +82,16 @@ def validate_local_state(conn, server):
             'llm', 'embedding_dimensionality', 'document_prefix', 'query_prefix',
             'tokens_per_chunk', 'overlap_amount', 'min_token_threshold', 'max_embeddings_per_post'
         ]
-        errors = [k for k in config_keys if local[k] != server[k]]
+        errors = []
+        for k in config_keys:
+            # Special handling for float comparisons
+            if k == 'overlap_amount':
+                # Compare floats with tolerance
+                if abs(float(local[k]) - float(server[k])) > 1e-6:
+                    errors.append(k)
+            else:
+                if local[k] != server[k]:
+                    errors.append(k)
         if errors:
             logging.error("Configuration mismatch for keys: %s", errors)
             sys.exit(1)

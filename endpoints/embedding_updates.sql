@@ -153,9 +153,15 @@ BEGIN
     om.permlink::text,
     om.number_of_tokens,
     om.last_vectors_block,
-    -- build a Postgres array of real[] here; PostgREST will turn it into JSON
+    -- build a Postgres array of float[] here; PostgREST will turn it into JSON
     ARRAY(
-      SELECT pv2.embedding::real[]
+      SELECT 
+        CASE 
+          WHEN pg_typeof(pv2.embedding) = 'public.halfvec'::regtype THEN
+            pv2.embedding::public.vector::real[]::float[]
+          ELSE
+            pv2.embedding::real[]::float[]
+        END
         FROM hivesense_app.posts_vectors pv2
        WHERE pv2.sync_seq = om.sync_seq
          AND pv2.post_id  = om.post_id
