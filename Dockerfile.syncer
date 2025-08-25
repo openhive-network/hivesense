@@ -12,14 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create working directory and copy script
+# Create working directory
 WORKDIR /app
-COPY scripts/sync_embeddings.py .
 
-# Install only necessary Python packages
+# Install only necessary Python packages (before copying scripts for better caching)
 RUN pip install --no-cache-dir \
     psycopg2-binary \
     requests
+
+# Copy script last (changes most frequently)
+COPY scripts/sync_embeddings.py .
 
 # Default command
 CMD ["python", "sync_embeddings.py"]

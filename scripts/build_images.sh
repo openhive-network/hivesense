@@ -50,10 +50,47 @@ set -eu pipefail
 
 SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
-docker build -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "${SCRIPTPATH}/.."
-docker build -t "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.rewriter"  "${SCRIPTPATH}/.."
-docker build -t "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.syncer"  "${SCRIPTPATH}/.."
-docker build -t "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}" -f "${SCRIPTPATH}/../Dockerfile.pca"  "${SCRIPTPATH}/.."
+# Enable BuildKit for better caching and performance
+export DOCKER_BUILDKIT=1
+
+# Try to pull latest images for cache (ignore failures if images don't exist)
+echo "Pulling latest images for cache..."
+docker pull "registry.gitlab.syncad.com/hive/hivesense:develop" 2>/dev/null || true
+docker pull "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop" 2>/dev/null || true
+docker pull "registry.gitlab.syncad.com/hive/hivesense/syncer:develop" 2>/dev/null || true
+docker pull "registry.gitlab.syncad.com/hive/hivesense/pca:develop" 2>/dev/null || true
+
+# Build with cache-from and inline cache export for registry caching
+echo "Building hivesense..."
+docker build \
+  --cache-from "registry.gitlab.syncad.com/hive/hivesense:develop" \
+  --build-arg BUILDKIT_INLINE_CACHE=1 \
+  -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" \
+  "${SCRIPTPATH}/.."
+
+echo "Building postgrest-rewriter..."
+docker build \
+  --cache-from "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:develop" \
+  --build-arg BUILDKIT_INLINE_CACHE=1 \
+  -t "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}" \
+  -f "${SCRIPTPATH}/../Dockerfile.rewriter" \
+  "${SCRIPTPATH}/.."
+
+echo "Building syncer..."
+docker build \
+  --cache-from "registry.gitlab.syncad.com/hive/hivesense/syncer:develop" \
+  --build-arg BUILDKIT_INLINE_CACHE=1 \
+  -t "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" \
+  -f "${SCRIPTPATH}/../Dockerfile.syncer" \
+  "${SCRIPTPATH}/.."
+
+echo "Building pca..."
+docker build \
+  --cache-from "registry.gitlab.syncad.com/hive/hivesense/pca:develop" \
+  --build-arg BUILDKIT_INLINE_CACHE=1 \
+  -t "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}" \
+  -f "${SCRIPTPATH}/../Dockerfile.pca" \
+  "${SCRIPTPATH}/.."
 
 echo "Build images tag ${TAG}"
 

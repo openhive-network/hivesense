@@ -1,0 +1,100 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Submodules - these are huge and not needed for the Docker build
+submodules/
+
+# CI/CD
+.gitlab-ci.yml
+.github/
+
+# Documentation
+*.md
+doc/
+docs/
+
+# Tests
+tests/
+test/
+*_test.go
+*_test.py
+*.test
+coverage/
+.coverage
+
+# Development files
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+.pytest_cache/
+.tox/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Temporary files
+*.tmp
+tmp/
+temp/
+
+# Large files that shouldn't be in the build context
+raw.txt
+*.sql.gz
+*.tar.gz
+*.zip
+
+# Local configuration
+.env
+.env.*
+config.local.*
+
+# Database dumps
+*.dump
+*.sql.backup
+
+# Docker compose files (not needed in build context)
+docker-compose*.yml
+compose*.yml
+
+# Build cache
+.cache/
+
+# Node modules (if any)
+node_modules/
+
+# CMake build directories (if any local builds)
+cmake-build*/
+CMakeCache.txt
+CMakeFiles/
+
+# Editor backup files
+*.bak
+*.orig
+
+# OS specific
+Thumbs.db
+.Trash-*
+
+# Project specific large/unnecessary files
+CLAUDE.md
+switch_mcp.sh

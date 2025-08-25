@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+# Set environment variables to reduce image size
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # Install system dependencies for psycopg2 and numpy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -9,17 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set work directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies (before copying scripts for better caching)
 RUN pip install --no-cache-dir \
     psycopg2-binary \
     numpy \
     scikit-learn \
     matplotlib
 
-# Copy your scripts
-COPY scripts/run_pca.py /app
-COPY scripts/recall.py /app
-COPY scripts/convert_embeddings.py /app
+# Copy scripts last (changes most frequently)
+COPY scripts/run_pca.py scripts/recall.py scripts/convert_embeddings.py /app/
 
 # Default command (can be overridden)
 CMD ["python", "run_pca.py"]
