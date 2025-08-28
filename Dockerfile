@@ -49,6 +49,7 @@ USER haf_admin
 COPY scripts/install_app.sh /app/scripts/install_app.sh
 COPY scripts/uninstall_app.sh /app/scripts/uninstall_app.sh
 COPY scripts/process_blocks.sh /app/scripts/process_blocks.sh
+COPY scripts/matrix_handler.sh /app/scripts/matrix_handler.sh
 COPY db /app/db
 COPY endpoints /app/endpoints
 COPY docker/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh

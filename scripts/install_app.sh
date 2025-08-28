@@ -10,6 +10,23 @@ SRCPATH="${SCRIPTPATH}/../"
 
 echo "All arguments: $*"
 
+# Function to normalize boolean values to lowercase true/false
+normalize_bool() {
+    case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
+        true|yes|on|1)
+            echo "true"
+            ;;
+        false|no|off|0)
+            echo "false"
+            ;;
+        *)
+            echo "ERROR: Invalid boolean value: $1" >&2
+            echo "Expected: true/false, yes/no, on/off, 1/0 (case insensitive)" >&2
+            exit 1
+            ;;
+    esac
+}
+
 print_help () {
     echo "Usage: $0 [OPTION[=VALUE]]..."
     echo
@@ -31,8 +48,8 @@ print_help () {
     echo "  --tokenizer-model=MODEL_NAME          The tokenizer model, must be compatible with 'llm'"
     echo "  --tokens_per_chunk=NUMBER             The maximum number of tokens to break long posts into"
     echo "  --overlap_amount=NUMBER               The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
-    echo "  --use-halfvec-index=TRUE/FALSE        Use HNSW half-precision index (defaults to false)"
-    echo "  --store-halfvec-embeddings=TRUE/FALSE Use HNSW half-precision index (defaults to false)"
+    echo "  --use-halfvec-index=BOOL              Use HNSW half-precision index (true/false, yes/no, on/off, 1/0)"
+    echo "  --store-halfvec-embeddings=BOOL       Store half-precision embeddings (true/false, yes/no, on/off, 1/0)"
     echo "  --document-prefix=TEXT                Prefix for documents (defaults to 'passage: ')"
     echo "  --query-prefix=TEXT                   Prefix for queries (defaults to 'query: ')"
     echo "  --min-token-threshold=INT             Don't generate embeddings for posts with fewer than this number of tokens"
@@ -41,7 +58,12 @@ print_help () {
     echo "  --maintenance-work-mem                Desired setting of maintenance_work_mem to use while creating the HNSW index"
     echo "  --default-ef-search                   Default exploratory factor when searching"
     echo "  --minimum-ann-candidates              Always consider at least this many candidates for reranking"
-    echo "  --allow-debugging                     Set to true to enable debugging flags for API calls"
+    echo "  --use-reduced-embeddings=BOOL         Enable dimension reduction (true/false, yes/no, on/off, 1/0, case insensitive)"
+    echo "  --reduced-dim=NUMBER                  Reduced dimension size"
+    echo "  --reduced-matrix-json=PATH            Path to reduction matrix JSON file"
+    echo "  --reduced-matrix-url=URL              URL to download reduction matrix JSON"
+    echo "  --reduced-matrix-file=PATH            Alternative to --reduced-matrix-json for consistency"
+    echo "  --allow-debugging=BOOL                Enable debugging flags for API calls (true/false, yes/no, on/off, 1/0)"
     echo "  --help                                Display this help screen and exit"
     echo
 }
@@ -74,6 +96,8 @@ MAINTENANCE_WORK_MEM=28    # GB
 USE_REDUCED_EMBEDDINGS=false
 REDUCED_DIM=0          # must be set when flag=true
 REDUCED_MATRIX_JSON=""
+REDUCED_MATRIX_URL=""
+REDUCED_MATRIX_FILE=""
 HNSW_M=32
 HNSW_EF_CONSTRUCTION=400
 DEFAULT_EF_SEARCH=500
@@ -122,10 +146,10 @@ while [ $# -gt 0 ]; do
 	    OVERLAP_AMOUNT="${1#*=}"
         ;;
     --use-halfvec-index=*)
-        USE_HALFVEC_INDEX="${1#*=}"
+        USE_HALFVEC_INDEX=$(normalize_bool "${1#*=}")
         ;;
     --store-halfvec-embeddings=*)
-        STORE_HALFVEC_EMBEDDINGS="${1#*=}"
+        STORE_HALFVEC_EMBEDDINGS=$(normalize_bool "${1#*=}")
         ;;
     --document-prefix=*)
         DOCUMENT_PREFIX="${1#*=}"
@@ -146,13 +170,19 @@ while [ $# -gt 0 ]; do
       MAINTENANCE_WORK_MEM="${1#*=}"
       ;;
     --use-reduced-embeddings=*)
-	USE_REDUCED_EMBEDDINGS="${1#*=}"
+	USE_REDUCED_EMBEDDINGS=$(normalize_bool "${1#*=}")
 	;;
     --reduced-dim=*)
 	REDUCED_DIM="${1#*=}"
 	;;
     --reduced-matrix-json=*)
 	REDUCED_MATRIX_JSON="${1#*=}"
+	;;
+    --reduced-matrix-url=*)
+	REDUCED_MATRIX_URL="${1#*=}"
+	;;
+    --reduced-matrix-file=*)
+	REDUCED_MATRIX_FILE="${1#*=}"
 	;;
     --hnsw-m=*)
 	HNSW_M="${1#*=}"
@@ -167,7 +197,10 @@ while [ $# -gt 0 ]; do
         MINIMUM_ANN_CANDIDATES="${1#*=}"
         ;;
     --allow-debugging=*)
-        ALLOW_DEBUGGING="${1#*=}"
+        ALLOW_DEBUGGING=$(normalize_bool "${1#*=}")
+        ;;
+    --config-dir=*)
+        HIVESENSE_CONFIG_DIR="${1#*=}"
         ;;
     --start_block=*)
             START_BLOCK="${1#*=}"
@@ -242,17 +275,56 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
 
+# Handle matrix JSON configuration only if USE_REDUCED_EMBEDDINGS is true
 if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
+  # Handle URL download if specified
+  if [ -n "$REDUCED_MATRIX_URL" ]; then
+    echo "Handling matrix URL download..."
+    # Build arguments for matrix_handler.sh
+    MATRIX_HANDLER_ARGS="--matrix-url=$REDUCED_MATRIX_URL"
+    if [ -n "${HIVESENSE_CONFIG_DIR:-}" ]; then
+      MATRIX_HANDLER_ARGS="$MATRIX_HANDLER_ARGS --config-dir=$HIVESENSE_CONFIG_DIR"
+    fi
+    
+    # Source the matrix handler to resolve the path
+    # shellcheck disable=SC1090,SC2086
+    . "$SRCPATH/scripts/matrix_handler.sh" $MATRIX_HANDLER_ARGS
+    
+    # Use the resolved path
+    if [ -n "$HIVESENSE_REDUCED_MATRIX_JSON" ]; then
+      REDUCED_MATRIX_JSON="$HIVESENSE_REDUCED_MATRIX_JSON"
+    fi
+  # Handle file path if specified (REDUCED_MATRIX_FILE takes precedence over REDUCED_MATRIX_JSON for consistency)
+  elif [ -n "$REDUCED_MATRIX_FILE" ]; then
+    REDUCED_MATRIX_JSON="$REDUCED_MATRIX_FILE"
+  fi
+  
+  # Now check if we have a matrix file
   if [ -z "$REDUCED_MATRIX_JSON" ]; then
     echo "ERROR: --reduced-matrix-json is required when --use-reduced-embeddings=true"
     exit 1
   fi
+  
   echo "Loading projection matrix ($REDUCED_MATRIX_JSON)…"
-  psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on <<EOF
+  
+  # Check if the file is gzipped and handle accordingly
+  case "$REDUCED_MATRIX_JSON" in
+    *.gz)
+    echo "Decompressing gzipped matrix file on-the-fly..."
+    psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on <<EOF
+    SET ROLE hivesense_owner;
+    SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
+    SELECT hivesense_app.load_reducing_matrix(\$\$$(zcat "$REDUCED_MATRIX_JSON")\$\$::jsonb);
+EOF
+      ;;
+    *)
+    psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on <<EOF
     SET ROLE hivesense_owner;
     SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
     SELECT hivesense_app.load_reducing_matrix(\$\$$(cat "$REDUCED_MATRIX_JSON")\$\$::jsonb);
 EOF
+      ;;
+  esac
 fi
 
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/ollama.sql"

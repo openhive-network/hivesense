@@ -139,8 +139,6 @@ build_images:
       docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:develop"
       docker push "registry.gitlab.syncad.com/hive/hivesense/pca:develop"
     fi
-  needs:
-  - job: prepare_haf_image
   tags:
   - public-runner-docker
 
