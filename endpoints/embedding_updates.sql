@@ -19,7 +19,7 @@ schemas:
 */
 -- openapi-generated-code-begin
 DROP TYPE IF EXISTS EmbeddingUpdate CASCADE;
-CREATE TYPE embeddingupdate AS (
+CREATE TYPE EmbeddingUpdate AS (
     "sync_seq" INT,
     "op" TEXT,
     "author" TEXT,
@@ -190,7 +190,7 @@ schemas:
 */
 -- openapi-generated-code-begin
 DROP TYPE IF EXISTS SyncSettings CASCADE;
-CREATE TYPE syncsettings AS (
+CREATE TYPE SyncSettings AS (
     "sync_uuid" TEXT,
     "llm" TEXT,
     "embedding_dimensionality" INT,

@@ -182,7 +182,7 @@ DO $__$
           },
           {
             "in": "query",
-            "name": "limit",
+            "name": "result_limit",
             "required": false,
             "schema": {
               "type": "integer",
@@ -356,7 +356,7 @@ DO $__$
           },
           {
             "in": "query",
-            "name": "limit",
+            "name": "result_limit",
             "required": false,
             "schema": {
               "type": "integer",
@@ -377,7 +377,7 @@ DO $__$
               "minimum": 0,
               "maximum": 50
             },
-            "description": "How many of the top results should include full post data. Any \nremaining posts (up to limit) will be stub entries with only \nauthor & permlink. Set this to the size of your first page of results.\n",
+            "description": "How many of the top results should include full post data. Any \nremaining posts (up to result_limit) will be stub entries with only \nauthor & permlink. Set this to the size of your first page of results.\n",
             "example": 10
           },
           {
@@ -429,7 +429,7 @@ DO $__$
           },
           {
             "in": "query",
-            "name": "limit",
+            "name": "result_limit",
             "required": false,
             "schema": {
               "type": "integer",
