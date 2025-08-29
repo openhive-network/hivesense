@@ -60,9 +60,10 @@ print_help () {
     echo "  --minimum-ann-candidates              Always consider at least this many candidates for reranking"
     echo "  --use-reduced-embeddings=BOOL         Enable dimension reduction (true/false, yes/no, on/off, 1/0, case insensitive)"
     echo "  --reduced-dim=NUMBER                  Reduced dimension size"
-    echo "  --reduced-matrix-json=PATH            Path to reduction matrix JSON file"
-    echo "  --reduced-matrix-url=URL              URL to download reduction matrix JSON"
-    echo "  --reduced-matrix-file=PATH            Alternative to --reduced-matrix-json for consistency"
+    echo "  --reduced-matrix-source=PATH|URL      Path to matrix file or URL to download (auto-detected)"
+    echo "  --reduced-matrix-json=PATH            (Deprecated) Path to reduction matrix JSON file"
+    echo "  --reduced-matrix-url=URL              (Deprecated) URL to download reduction matrix JSON"
+    echo "  --reduced-matrix-file=PATH            (Deprecated) Alternative to --reduced-matrix-json"
     echo "  --allow-debugging=BOOL                Enable debugging flags for API calls (true/false, yes/no, on/off, 1/0)"
     echo "  --help                                Display this help screen and exit"
     echo
@@ -175,6 +176,9 @@ while [ $# -gt 0 ]; do
     --reduced-dim=*)
 	REDUCED_DIM="${1#*=}"
 	;;
+    --reduced-matrix-source=*)
+	REDUCED_MATRIX_SOURCE="${1#*=}"
+	;;
     --reduced-matrix-json=*)
 	REDUCED_MATRIX_JSON="${1#*=}"
 	;;
@@ -277,9 +281,35 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_S
 
 # Handle matrix JSON configuration only if USE_REDUCED_EMBEDDINGS is true
 if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
-  # Handle URL download if specified
-  if [ -n "$REDUCED_MATRIX_URL" ]; then
-    echo "Handling matrix URL download..."
+  # Handle new unified matrix source parameter
+  if [ -n "$REDUCED_MATRIX_SOURCE" ]; then
+    # Detect if it's a URL or file path
+    case "$REDUCED_MATRIX_SOURCE" in
+      http://*|https://*)
+        echo "Detected URL source: $REDUCED_MATRIX_SOURCE"
+        MATRIX_HANDLER_ARGS="--matrix-url=$REDUCED_MATRIX_SOURCE"
+        ;;
+      *)
+        echo "Detected file source: $REDUCED_MATRIX_SOURCE"
+        MATRIX_HANDLER_ARGS="--matrix-file=$REDUCED_MATRIX_SOURCE"
+        ;;
+    esac
+    
+    if [ -n "${HIVESENSE_CONFIG_DIR:-}" ]; then
+      MATRIX_HANDLER_ARGS="$MATRIX_HANDLER_ARGS --config-dir=$HIVESENSE_CONFIG_DIR"
+    fi
+    
+    # Source the matrix handler to resolve the path
+    # shellcheck disable=SC1090,SC2086
+    . "$SRCPATH/scripts/matrix_handler.sh" $MATRIX_HANDLER_ARGS
+    
+    # Use the resolved path
+    if [ -n "$HIVESENSE_REDUCED_MATRIX_JSON" ]; then
+      REDUCED_MATRIX_JSON="$HIVESENSE_REDUCED_MATRIX_JSON"
+    fi
+  # Keep backward compatibility with old parameters
+  elif [ -n "$REDUCED_MATRIX_URL" ]; then
+    echo "Using deprecated --reduced-matrix-url parameter"
     # Build arguments for matrix_handler.sh
     MATRIX_HANDLER_ARGS="--matrix-url=$REDUCED_MATRIX_URL"
     if [ -n "${HIVESENSE_CONFIG_DIR:-}" ]; then
@@ -296,7 +326,10 @@ if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
     fi
   # Handle file path if specified (REDUCED_MATRIX_FILE takes precedence over REDUCED_MATRIX_JSON for consistency)
   elif [ -n "$REDUCED_MATRIX_FILE" ]; then
+    echo "Using deprecated --reduced-matrix-file parameter"
     REDUCED_MATRIX_JSON="$REDUCED_MATRIX_FILE"
+  elif [ -n "$REDUCED_MATRIX_JSON" ]; then
+    echo "Using deprecated --reduced-matrix-json parameter"
   fi
   
   # Now check if we have a matrix file

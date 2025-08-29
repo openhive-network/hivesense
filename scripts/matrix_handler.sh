@@ -91,14 +91,26 @@ main() {
         export HIVESENSE_REDUCED_MATRIX_JSON="$filepath"
         
     elif [ -n "$MATRIX_FILE" ]; then
-        # File mode: use provided path
-        if [ ! -f "$MATRIX_FILE" ]; then
-            echo "ERROR: Matrix file not found at: $MATRIX_FILE" >&2
+        # File mode: resolve relative paths to config dir
+        case "$MATRIX_FILE" in
+            /*)
+                # Absolute path - use as-is
+                RESOLVED_PATH="$MATRIX_FILE"
+                ;;
+            *)
+                # Relative path - resolve to config dir
+                RESOLVED_PATH="${CONFIG_DIR}/${MATRIX_FILE}"
+                echo "Resolved relative path to: $RESOLVED_PATH" >&2
+                ;;
+        esac
+        
+        if [ ! -f "$RESOLVED_PATH" ]; then
+            echo "ERROR: Matrix file not found at: $RESOLVED_PATH" >&2
             exit 1
         fi
         
-        echo "Using local matrix file: $MATRIX_FILE" >&2
-        export HIVESENSE_REDUCED_MATRIX_JSON="$MATRIX_FILE"
+        echo "Using local matrix file: $RESOLVED_PATH" >&2
+        export HIVESENSE_REDUCED_MATRIX_JSON="$RESOLVED_PATH"
         
     else
         # No matrix configuration
