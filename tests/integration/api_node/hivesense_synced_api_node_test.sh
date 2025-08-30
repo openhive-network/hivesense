@@ -3,9 +3,13 @@
 # Test requires up and running API node
 HOST_NAME=${PUBLIC_HOSTNAME:-"localhost"}
 
+# Get the directory where docker compose is running
+SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
+COMPOSE_DIR="${SCRIPTPATH}/../../../submodules/haf_api_node"
+
 query_database() {
   query=$1
-  docker exec haf-world-haf-1 psql -A -t -d haf_block_log -c "$query" | tr -d '[:space:]'
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -A -t -d haf_block_log -c "$query" | tr -d '[:space:]'
 }
 
 # 1. check if hivesense is synced
@@ -23,13 +27,13 @@ if [ "$number_of_chunks" -ne 244 ]; then
 fi
 
 # 3. check if Swagger works
-if ! docker exec haf-world-caddy-1 wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-swagger/" | grep -q "Swagger UI"; then
+if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-swagger/" | grep -q "Swagger UI"; then
   echo "Swagger UI content not detected" >&2
   exit 1
 fi
 
 # 4. check if OpenAPI hivesense endpoint is working
-if ! docker exec haf-world-caddy-1 wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-api/" | grep -q '"title":[[:space:]]*"Hivesense"'; then
+if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-api/" | grep -q '"title":[[:space:]]*"Hivesense"'; then
   echo "OpenAPI endpoint is NOT available or missing expected title: Hivesense" >&2
   exit 1
 fi
