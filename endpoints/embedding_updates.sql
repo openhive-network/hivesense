@@ -2,7 +2,7 @@ SET ROLE hivesense_owner;
 
 /** openapi:components
 schemas:
-  EmbeddingUpdate:
+  embeddingupdate:
     type: object
     properties:
       sync_seq: { type: integer }
@@ -18,8 +18,8 @@ schemas:
           items: { type: number }
 */
 -- openapi-generated-code-begin
-DROP TYPE IF EXISTS EmbeddingUpdate CASCADE;
-CREATE TYPE EmbeddingUpdate AS (
+DROP TYPE IF EXISTS embeddingupdate CASCADE;
+CREATE TYPE embeddingupdate AS (
     "sync_seq" INT,
     "op" TEXT,
     "author" TEXT,
@@ -62,7 +62,7 @@ CREATE TYPE EmbeddingUpdate AS (
         content:
           application/json:
             schema:
-              x-sql-datatype: SETOF EmbeddingUpdate
+              x-sql-datatype: SETOF embeddingupdate
 */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.embedding_updates;
@@ -71,7 +71,7 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.embedding_updates(
     "page_size" INT,
     "sync_uuid" TEXT
 )
-RETURNS SETOF EmbeddingUpdate 
+RETURNS SETOF embeddingupdate 
 -- openapi-generated-code-end
   LANGUAGE plpgsql
   STABLE PARALLEL SAFE
@@ -175,7 +175,7 @@ $$;
 
 /** openapi:components
 schemas:
-  SyncSettings:
+  syncsettings:
     type: object
     properties:
       sync_uuid: { type: string, format: uuid }
@@ -189,8 +189,8 @@ schemas:
       max_embeddings_per_post: { type: integer }
 */
 -- openapi-generated-code-begin
-DROP TYPE IF EXISTS SyncSettings CASCADE;
-CREATE TYPE SyncSettings AS (
+DROP TYPE IF EXISTS syncsettings CASCADE;
+CREATE TYPE syncsettings AS (
     "sync_uuid" TEXT,
     "llm" TEXT,
     "embedding_dimensionality" INT,
@@ -217,12 +217,12 @@ CREATE TYPE SyncSettings AS (
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SyncSettings'
+              $ref: '#/components/schemas/syncsettings'
 */
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.get_sync_settings;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_settings()
-RETURNS SyncSettings 
+RETURNS syncsettings 
 -- openapi-generated-code-end
 AS $$
   SELECT
