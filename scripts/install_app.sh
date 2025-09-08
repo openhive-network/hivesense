@@ -294,15 +294,15 @@ if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
         MATRIX_HANDLER_ARGS="--matrix-file=$REDUCED_MATRIX_SOURCE"
         ;;
     esac
-    
+
     if [ -n "${HIVESENSE_CONFIG_DIR:-}" ]; then
       MATRIX_HANDLER_ARGS="$MATRIX_HANDLER_ARGS --config-dir=$HIVESENSE_CONFIG_DIR"
     fi
-    
+
     # Source the matrix handler to resolve the path
     # shellcheck disable=SC1090,SC2086
     . "$SRCPATH/scripts/matrix_handler.sh" $MATRIX_HANDLER_ARGS
-    
+
     # Use the resolved path
     if [ -n "$HIVESENSE_REDUCED_MATRIX_JSON" ]; then
       REDUCED_MATRIX_JSON="$HIVESENSE_REDUCED_MATRIX_JSON"
@@ -315,11 +315,11 @@ if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
     if [ -n "${HIVESENSE_CONFIG_DIR:-}" ]; then
       MATRIX_HANDLER_ARGS="$MATRIX_HANDLER_ARGS --config-dir=$HIVESENSE_CONFIG_DIR"
     fi
-    
+
     # Source the matrix handler to resolve the path
     # shellcheck disable=SC1090,SC2086
     . "$SRCPATH/scripts/matrix_handler.sh" $MATRIX_HANDLER_ARGS
-    
+
     # Use the resolved path
     if [ -n "$HIVESENSE_REDUCED_MATRIX_JSON" ]; then
       REDUCED_MATRIX_JSON="$HIVESENSE_REDUCED_MATRIX_JSON"
@@ -331,15 +331,15 @@ if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
   elif [ -n "$REDUCED_MATRIX_JSON" ]; then
     echo "Using deprecated --reduced-matrix-json parameter"
   fi
-  
+
   # Now check if we have a matrix file
   if [ -z "$REDUCED_MATRIX_JSON" ]; then
     echo "ERROR: --reduced-matrix-json is required when --use-reduced-embeddings=true"
     exit 1
   fi
-  
+
   echo "Loading projection matrix ($REDUCED_MATRIX_JSON)…"
-  
+
   # Check if the file is gzipped and handle accordingly
   case "$REDUCED_MATRIX_JSON" in
     *.gz)
@@ -368,9 +368,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_S
 
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET custom.swagger_url = '$SWAGGER_URL'; SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/endpoint_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/find_similar_posts.sql"
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/find_similar_posts_one_shot.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/get_similar_posts_by_post.sql"
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/get_similar_posts_by_post_one_shot.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/find_thematic_contributors.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/embedding_updates.sql"
 

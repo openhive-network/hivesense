@@ -110,7 +110,7 @@ WITH nearest_posts_id AS (
     SELECT
         sq.id,
         sq.query,
-        hivesense_app.find_nearest_posts(sq.query) AS nearest_post_id
+        hivesense_app.find_nearest_posts(sq.query, 1) AS nearest_post_id
     FROM semantic_queries AS sq
 ),
 

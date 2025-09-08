@@ -1,165 +1,146 @@
-SET ROLE hivesense_owner;
-
 /** openapi:paths
-/similarposts:
+/posts/search:
   get:
-    tags:
-      - AI
-    summary: List of posts semantic similar to a given pattern
+    tags: [AI]
+    summary: Full semantic search results in a single call
     description: |
-      Semantic search endpoint designed to find posts based on their semantic
-      similarity to a provided text pattern. It allows users to search for
-      content that is contextually and meaningfully similar to their search
-      query, going beyond simple keyword matching.
-
-      The API returns results in JSON format, containing comprehensive post information
-      including author details, title, body content, category, voting data, and various metadata.
-      Results are automatically ranked by their semantic relevance to the search pattern,
-      ensuring the most relevant content appears first.
-
-    operationId: hivesense_endpoints.get_similar_posts
+      Returns an ordered list of posts most similar to a given query.
+      The first **N** results (default 10, max 50) are returned as full
+      bridge-post JSON objects; the remaining results (up to **posts_limit**,
+      default 100, max 1000) are stub entries containing only *author* and
+      *permlink*.  Paging is now done entirely on the client side.
+    operationId: hivesense_endpoints.posts_search
     parameters:
       - in: query
-        name: pattern
+        name: q
         required: true
-        schema:
-          type: string
-        description: Text pattern used for semantic search. The query text (e.g., "astronauts on moon", "climate change") to find semantically similar posts.
+        schema: {type: string}
+        description: Search query text for semantic similarity, e.g. `"vector databases"`
       - in: query
-        name: tr_body
-        required: true
-        schema:
-          type: integer
-        description: Truncation length for post bodies. Use 0 for full content, or specify character limit.
+        name: truncate
+        required: false
+        schema: {type: integer, default: 0}
+        description: Body truncation length (0 = full content, >0 = truncate to N chars)
       - in: query
-        name: posts_limit
-        required: true
-        schema:
-          type: integer
-        description: Specifies how many posts to return in the results.
+        name: result_limit
+        required: false
+        schema: {type: integer, default: 100, minimum: 1, maximum: 1000}
+        description: Total number of posts (full + stub) to return
+      - in: query
+        name: full_posts
+        required: false
+        schema: {type: integer, default: 10, minimum: 0, maximum: 50}
+        description: How many of the top results should include full post data
       - in: query
         name: observer
         required: false
-        schema:
-          type: string
-          default: ''
-        description: Observer (hive account name) whose settings (such as muted lists) are used to filter out excluded posts from the search results
-      - in: query
-        name: start_author
-        required: false
-        schema:
-          type: string
-          default: ''
-        description: |
-          Together with start_permlink, identifies the last post from the previous page. These two parameters combined
-          define the starting point for pagination when fetching the next set of results.
-      - in: query
-        name: start_permlink
-        required: false
-        schema:
-          type: string
-          default: ''
-        description: |
-          Together with start_author, identifies the last post from the previous page. The permlink is
-          the unique identifier (slug) of the post. These two parameters combined define the starting point
-          for pagination when fetching the next set of results.
+        schema: {type: string, default: ''}
+        description: Hive account whose mute lists etc. will be respected
     responses:
       '200':
-        description: |
-          * Returns  JSON with a sorted list of posts
+        description: JSON array of result objects
         content:
           application/json:
-            schema:
-              type: string
-              x-sql-datatype: JSON
+            schema: {type: string, x-sql-datatype: JSON}
             example: {}
  */
 -- openapi-generated-code-begin
-DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts;
-CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts(
-    "pattern" TEXT,
-    "tr_body" INT,
-    "posts_limit" INT,
-    "observer" TEXT = '',
-    "start_author" TEXT = '',
-    "start_permlink" TEXT = ''
+DROP FUNCTION IF EXISTS hivesense_endpoints.posts_search;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_search(
+    "q" TEXT,
+    "truncate" INT = 0,
+    "result_limit" INT = 100,
+    "full_posts" INT = 10,
+    "observer" TEXT = ''
 )
 RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
-AS
-$$
+AS $$
 DECLARE
-    __result JSON;
     __observer_id INT := 0;
-    __start_post_id INT := 0;
+    __result      JSON;
 BEGIN
-    IF observer != '' THEN
-        __observer_id = hivemind_postgrest_utilities.find_account_id(
-                hivemind_postgrest_utilities.valid_account( observer ),
-                True);
+    /* ─── validate parameters ───────────────────────────── */
+    IF result_limit < 1 OR result_limit > 1000 THEN
+        RAISE EXCEPTION 'result_limit must be between 1 and 1000';
+    END IF;
+    IF full_posts < 0 OR full_posts > 50 THEN
+        RAISE EXCEPTION 'full_posts must be between 0 and 50';
+    END IF;
+    /* Clamp full_posts to result_limit if it exceeds */
+    IF full_posts > result_limit THEN
+        full_posts := result_limit;
     END IF;
 
-    IF start_author != '' OR start_permlink != '' THEN
-        __start_post_id = hivemind_postgrest_utilities.find_comment_id(
-            start_author, start_permlink, True);
+    /* ─── observer ⇒ id ─────────────────────────────────── */
+    IF observer <> '' THEN
+        __observer_id := hivemind_postgrest_utilities.find_account_id(
+                           hivemind_postgrest_utilities.valid_account(observer),
+                           TRUE);
     END IF;
 
-    SELECT jsonb_agg (
-            hivemind_postgrest_utilities.create_bridge_post_object(__observer_id, row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order, row.id
-    ) FROM (
-       SELECT
-           hp.id,
-           hp.author,
-           hp.parent_author,
-           hp.author_rep,
-           hp.root_title,
-           hp.beneficiaries,
-           hp.max_accepted_payout,
-           hp.percent_hbd,
-           hp.url,
-           hp.permlink,
-           hp.parent_permlink_or_category,
-           hp.title,
-           hp.body,
-           hp.category,
-           hp.depth,
-           hp.payout,
-           hp.pending_payout,
-           hp.payout_at,
-           hp.is_paidout,
-           hp.children,
-           hp.votes,
-           hp.created_at,
-           hp.updated_at,
-           hp.rshares,
-           hp.abs_rshares,
-           hp.json,
-           hp.is_hidden,
-           hp.is_grayed,
-           hp.total_votes,
-           hp.sc_trend,
-           hp.role_title,
-           hp.community_title,
-           hp.role_id,
-           hp.is_pinned,
-           hp.curator_payout_value,
-           hp.is_muted,
-           hp.source AS blacklists,
-           hp.muted_reasons,
-           search.similarity_order
-        FROM hivesense_app.find_nearest_posts(
-                   pattern
-                 , posts_limit
-                 , _observer_id => __observer_id
-                 , _start_post_id => __start_post_id
-             ) as search,
-        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp
-    ) row
-    INTO __result;
+    /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
+    WITH ranked AS (
+        SELECT *
+          FROM hivesense_app.find_nearest_posts(
+                   q,
+                   result_limit,
+                   __observer_id
+               )
+    ),
 
-    RETURN COALESCE( __result, '{}'::JSON);
-END
+    /* ---------- 1️⃣  full objects for top N ---------- */
+    top_full AS (
+        SELECT hbpo.obj
+          FROM (
+            SELECT sr.post_id
+              FROM ranked sr
+             ORDER BY sr.similarity_order
+             LIMIT full_posts
+          ) lim
+          JOIN LATERAL (SELECT fv.*, fv.source AS blacklists
+                        FROM hivemind_app.get_full_post_view_by_id(lim.post_id, __observer_id) fv) fpv ON TRUE
+          JOIN LATERAL (
+                SELECT hivemind_postgrest_utilities.create_bridge_post_object(
+                           __observer_id,
+                           fpv.*,
+                           "truncate",
+                           NULL,
+                           fpv.is_pinned,
+                           TRUE
+                       ) AS obj
+          ) hbpo ON TRUE
+    ),
+
+    /* ---------- 2️⃣  lightweight stubs for the rest ---------- */
+    rest_stub AS (
+        SELECT jsonb_build_object(
+                   'author',   ha.name,
+                   'permlink', hpd.permlink
+               ) AS obj
+          FROM (
+            SELECT sr.post_id
+              FROM ranked sr
+             ORDER BY sr.similarity_order
+             OFFSET full_posts
+             LIMIT  (result_limit - full_posts)
+          ) lim
+          JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
+          JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id
+          JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+    )
+
+    /* ---------- aggregate in original order ---------- */
+    SELECT jsonb_agg(obj)  /* order already preserved */
+      INTO __result
+      FROM (
+        SELECT obj FROM top_full
+        UNION ALL
+        SELECT obj FROM rest_stub
+      ) unioned
+      ORDER BY 1;   -- UNION ALL keeps original order, but ORDER BY makes it explicit
+
+    RETURN COALESCE(__result, '[]'::JSON);
+END;
 $$;
-
-RESET ROLE;

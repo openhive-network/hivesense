@@ -531,37 +531,11 @@ END;
 $$;
 
 
-DROP FUNCTION IF EXISTS find_nearest_posts;
-CREATE FUNCTION find_nearest_posts(
-    _query text,
-    _limit integer DEFAULT 1,
-    _observer_id int = 0,
-    _start_post_id int = 0
-)
-RETURNS SETOF hivesense_app.similar_post_result
-LANGUAGE plpgsql
-STABLE PARALLEL SAFE
-AS $BODY$
-DECLARE
-    __query_prefix TEXT;
-BEGIN
-    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
-    SELECT query_prefix INTO __query_prefix FROM hivesense_app.hivesense_app_status WHERE id = 1;
-
-    RETURN QUERY SELECT similarity_order, similarity, post_id, chunk_number FROM hivesense_app.find_nearest_posts_with_embedding(
-           hivesense_app.hivesense_embed(__query_prefix || _query)
-         , _limit
-         , _observer_id => _observer_id
-         , _start_post_id => _start_post_id
-     );
-END;
-$BODY$;
-
 /*───────────────────────────────────────────────────────────────*
  * Wrapper that embeds the query prefix and observer filtering   *
  *───────────────────────────────────────────────────────────────*/
-DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts_one_shot;
-CREATE FUNCTION hivesense_app.find_nearest_posts_one_shot(
+DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts;
+CREATE FUNCTION hivesense_app.find_nearest_posts(
     _query        text,
     _limit        int   DEFAULT 1000,
     _observer_id  int   DEFAULT 0
@@ -591,49 +565,8 @@ END;
 $$;
 
 
-DROP FUNCTION IF EXISTS find_nearest_posts_to_post;
-CREATE FUNCTION find_nearest_posts_to_post(
-    _author text,
-    _permlink text,
-    _limit integer DEFAULT 1,
-    _observer_id int = 0
-)
-RETURNS SETOF hivesense_app.similar_post_result
-LANGUAGE plpgsql
-STABLE PARALLEL SAFE
-AS $BODY$
-DECLARE
-    __post_id INT := hivemind_app.find_comment_id( _author, _permlink, True );
-    __post_embedding public.vector;
-BEGIN
-    PERFORM set_config('search_path', current_setting('search_path') || ', public', TRUE);
-
-    SELECT CASE
-             WHEN hivesense_app.store_halfvec_embeddings()
-                  THEN embedding::public.vector
-             ELSE embedding
-           END
-    FROM hivesense_app.posts_vectors
-    WHERE post_id = __post_id
-    INTO __post_embedding;
-
-    -- TODO(mickiewicz@syncad.com): maybe vectorize posts here ? but then we got two point of posts vectorization
-    IF __post_embedding IS NULL THEN
-        RAISE EXCEPTION 'Post @%/% is not vectorized yet or was discarded because is to short', _author, _permlink;
-    END IF;
-
-    RETURN QUERY SELECT similarity_order, similarity, post_id, chunk_number FROM hivesense_app.find_nearest_posts_with_embedding(
-         __post_embedding
-        , _limit
-        , __post_id
-        , _observer_id => _observer_id
-        , _start_post_id => 0
-    );
-END;
-$BODY$;
-
-DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts_to_post_one_shot;
-CREATE FUNCTION hivesense_app.find_nearest_posts_to_post_one_shot(
+DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts_to_post;
+CREATE FUNCTION hivesense_app.find_nearest_posts_to_post(
     _author      text,
     _permlink    text,
     _limit       int  DEFAULT 1000,

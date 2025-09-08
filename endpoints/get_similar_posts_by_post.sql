@@ -1,23 +1,26 @@
 SET ROLE hivesense_owner;
-
 /** openapi:paths
-/similarpostsbypost:
+/posts/{author}/{permlink}/similar:
   get:
     tags:
       - AI
-    summary: Get semantically similar posts to a given Hive post
+    summary: Full semantic search results for similar posts in a single call
     description: |
       Performs semantic similarity search to find posts that are contextually
-      similar to a specified Hive post. The endpoint analyzes the content and
-      context of the target post and returns up to 50 related posts, ranked by
-      their similarity score.
+      similar to a specified Hive post. Returns an ordered list of posts most 
+      similar to the given post.
+      
+      The first **N** results (default 10, max 50) are returned as full
+      bridge-post JSON objects; the remaining results (up to **posts_limit**,
+      default 100, max 1000) are stub entries containing only *author* and
+      *permlink*. Paging is done entirely on the client side.
 
       Key features:
       - Semantic analysis considers post content and context
       - Results are ordered by similarity (most similar first)
       - Optional content filtering through observer blacklists
       - Configurable body length truncation for preview purposes
-      - Maximum of 50 posts returned to ensure performance
+      - Split response: full data for top results, stubs for remainder
     
       The similarity analysis takes into account:
       - Post content and context
@@ -25,13 +28,13 @@ SET ROLE hivesense_owner;
       - Topic relevance and contextual meaning
 
       SQL example:
-      SELECT * FROM hivesense_endpoints.get_similar_posts_by_post(''bue-witness'', ''bue-witness-post'', 20, 10);
+      SELECT * FROM hivesense_endpoints.posts_similar(''bue-witness'', ''bue-witness-post'', 20, 100, 10);
 
       REST call example:
-      GET ''https://%1$s/hivesense-api/similarpostsbypost?author=bue-witness&permlink=my-blog-post&tr_body=20&posts_limit=10''
-    operationId: hivesense_endpoints.get_similar_posts_by_post
+      GET ''https://%1$s/hivesense-api/posts/bue-witness/my-blog-post/similar?truncate=20&limit=100&full_posts=10''
+    operationId: hivesense_endpoints.posts_similar
     parameters:
-      - in: query
+      - in: path
         name: author
         required: true
         schema:
@@ -41,7 +44,7 @@ SET ROLE hivesense_owner;
           created the original post for which you want to find similar content.
           Must be a valid Hive account name.
         example: "bue-witness"
-      - in: query
+      - in: path
         name: permlink
         required: true
         schema:
@@ -52,12 +55,13 @@ SET ROLE hivesense_owner;
           Together with the author name, it uniquely identifies the post.
         example: "my-blog-post"
       - in: query
-        name: tr_body
-        required: true
+        name: truncate
+        required: false
         schema:
           type: integer
           minimum: 0
           maximum: 65535
+          default: 0
         description: |
           Controls the length of returned post bodies in the results. When set to 0,
           returns complete post content. Any other positive value will truncate the
@@ -65,17 +69,31 @@ SET ROLE hivesense_owner;
           reducing response size. Maximum value is 65535 characters.
         example: 20
       - in: query
-        name: posts_limit
-        required: true
+        name: result_limit
+        required: false
         schema:
           type: integer
+          default: 100
           minimum: 1
-          maximum: 50
+          maximum: 1000
         description: |
-          Specifies the maximum number of similar posts to return. Must be between
-          1 and 50. The posts are returned in order of similarity, with the most
+          Total number of posts (full + stub) to return. Must be between
+          1 and 1000. The posts are returned in order of similarity, with the most
           similar posts first. Setting a lower limit can improve response times
           and reduce data transfer.
+        example: 100
+      - in: query
+        name: full_posts
+        required: false
+        schema:
+          type: integer
+          default: 10
+          minimum: 0
+          maximum: 50
+        description: |
+          How many of the top results should include full post data. Any 
+          remaining posts (up to result_limit) will be stub entries with only 
+          author & permlink. Set this to the size of your first page of results.
         example: 10
       - in: query
         name: observer
@@ -100,86 +118,102 @@ SET ROLE hivesense_owner;
             example: {}
  */
 -- openapi-generated-code-begin
-DROP FUNCTION IF EXISTS hivesense_endpoints.get_similar_posts_by_post;
-CREATE OR REPLACE FUNCTION hivesense_endpoints.get_similar_posts_by_post(
+DROP FUNCTION IF EXISTS hivesense_endpoints.posts_similar;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_similar(
     "author" TEXT,
     "permlink" TEXT,
-    "tr_body" INT,
-    "posts_limit" INT,
+    "truncate" INT = 0,
+    "result_limit" INT = 100,
+    "full_posts" INT = 10,
     "observer" TEXT = ''
 )
 RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
-AS
-$$
+AS $$
 DECLARE
-    __result JSON;
-    __post_id INT;
     __observer_id INT := 0;
+    __result      JSON;
 BEGIN
-    IF posts_limit > 50 THEN
-        RAISE EXCEPTION 'Limit of posts: % is grater than allowed maximum: 50', posts_limit;
+    /* validate args */
+    IF result_limit < 1 OR result_limit > 1000 THEN
+        RAISE EXCEPTION 'result_limit must be between 1 and 1000';
+    END IF;
+    IF full_posts < 0 OR full_posts > 50 THEN
+        RAISE EXCEPTION 'full_posts must be between 0 and 50';
+    END IF;
+    /* Clamp full_posts to result_limit if it exceeds */
+    IF full_posts > result_limit THEN
+        full_posts := result_limit;
     END IF;
 
-    IF observer != '' THEN
-        __observer_id = hivemind_postgrest_utilities.find_account_id(
-                hivemind_postgrest_utilities.valid_account( observer ),
-                True);
+    /* observer → id */
+    IF observer <> '' THEN
+        __observer_id :=
+            hivemind_postgrest_utilities.find_account_id(
+                hivemind_postgrest_utilities.valid_account(observer), TRUE);
     END IF;
 
-    __post_id = hivemind_app.find_comment_id( author, permlink, True );
+    /* main flow */
+    WITH ranked AS (
+        SELECT *
+          FROM hivesense_app.find_nearest_posts_to_post(
+                   author, permlink, result_limit, __observer_id)
+    ),
 
-    SELECT jsonb_agg (
-                   hivemind_postgrest_utilities.create_bridge_post_object(__observer_id, row, tr_body, NULL, row.is_pinned, True) ORDER BY row.similarity_order, row.id
-           ) FROM (
-                      SELECT
-                          hp.id,
-                          hp.author,
-                          hp.parent_author,
-                          hp.author_rep,
-                          hp.root_title,
-                          hp.beneficiaries,
-                          hp.max_accepted_payout,
-                          hp.percent_hbd,
-                          hp.url,
-                          hp.permlink,
-                          hp.parent_permlink_or_category,
-                          hp.title,
-                          hp.body,
-                          hp.category,
-                          hp.depth,
-                          hp.payout,
-                          hp.pending_payout,
-                          hp.payout_at,
-                          hp.is_paidout,
-                          hp.children,
-                          hp.votes,
-                          hp.created_at,
-                          hp.updated_at,
-                          hp.rshares,
-                          hp.abs_rshares,
-                          hp.json,
-                          hp.is_hidden,
-                          hp.is_grayed,
-                          hp.total_votes,
-                          hp.sc_trend,
-                          hp.role_title,
-                          hp.community_title,
-                          hp.role_id,
-                          hp.is_pinned,
-                          hp.curator_payout_value,
-                          hp.is_muted,
-                          hp.source AS blacklists,
-                          hp.muted_reasons,
-                          search.similarity_order
-                      FROM hivesense_app.find_nearest_posts_to_post(author, permlink, posts_limit, _observer_id => __observer_id) as search,
-                        LATERAL hivemind_app.get_full_post_view_by_id(search.post_id, __observer_id) hp --TODO(mickiewicz@syncad.com): observer is NULL is it ok ?
-                  ) row
-    INTO __result;
+    top_full AS (
+        SELECT bp.obj
+          FROM (
+            SELECT post_id
+              FROM ranked
+             ORDER BY similarity_order
+             LIMIT full_posts
+          ) lim
+          /* ① fetch full-post view, add blacklists alias */
+          JOIN LATERAL (
+                SELECT fv.*, fv.source AS blacklists
+                  FROM hivemind_app.get_full_post_view_by_id(
+                           lim.post_id, __observer_id) fv
+          ) fpv ON TRUE
+          /* ② build bridge-post JSON using the augmented record */
+          JOIN LATERAL (
+                SELECT hivemind_postgrest_utilities.create_bridge_post_object(
+                           __observer_id,
+                           fpv.*,
+                           "truncate",
+                           NULL,
+                           fpv.is_pinned,
+                           TRUE) AS obj
+          ) bp ON TRUE
+    ),
 
-    RETURN COALESCE( __result, '{}'::JSON);
-END
+    rest_stub AS (
+        SELECT jsonb_build_object(
+                 'author',   ha.name,
+                 'permlink', hpd.permlink)
+                 AS obj
+          FROM (
+            SELECT post_id
+              FROM ranked
+             ORDER BY similarity_order
+             OFFSET full_posts
+             LIMIT (result_limit - full_posts)
+          ) lim
+          JOIN hivemind_app.hive_posts         hp  ON hp.id  = lim.post_id
+          JOIN hivemind_app.hive_accounts      ha  ON ha.id  = hp.author_id
+          JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+    )
+
+    SELECT jsonb_agg(obj ORDER BY 1)
+      INTO __result
+      FROM (
+         SELECT obj FROM top_full
+         UNION ALL
+         SELECT obj FROM rest_stub
+      ) t;
+
+    RETURN COALESCE(__result, '[]'::JSON);
+END;
 $$;
 
 RESET ROLE;
