@@ -313,6 +313,151 @@ DO $__$
           }
         }
       }
+    },
+    "/posts/by-ids": {
+      "post": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "Fetch full post details for multiple posts by their IDs",
+        "description": "Retrieves complete post information for a batch of posts identified by\ntheir author/permlink pairs. This endpoint is designed to work with the\nnew paging model where search results return mostly stub entries, and\nclients fetch full details as needed for display.\n\nKey features:\n- Accepts up to 50 post identifiers in a single request\n- Returns posts in the same order as requested\n- Supports body truncation for preview mode\n- Respects observer mute lists and blacklists\n- Returns null for non-existent posts while preserving order\n\nThis endpoint is typically used after calling /posts/search or\n/posts/{author}/{permlink}/similar, which return full data for only\nthe first N posts. When the user scrolls or pages through results,\nthe client calls this endpoint with the next batch of author/permlink\npairs to get their full details.\n\nExample workflow:\n1. Call /posts/search with result_limit=1000, full_posts=10\n2. Display first 10 posts immediately (already have full data)\n3. When user scrolls to post 11, call this endpoint with posts 11-20\n4. Continue fetching batches as user scrolls\n",
+        "operationId": "hivesense_endpoints.posts_by_ids",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "posts"
+                ],
+                "properties": {
+                  "posts": {
+                    "type": "array",
+                    "description": "Array of post identifiers. Each item must have both ''author'' \nand ''permlink'' fields. Maximum 50 posts per request.\n",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "author",
+                        "permlink"
+                      ],
+                      "properties": {
+                        "author": {
+                          "type": "string",
+                          "description": "The Hive username of the post author"
+                        },
+                        "permlink": {
+                          "type": "string",
+                          "description": "The unique permlink identifier of the post"
+                        }
+                      }
+                    },
+                    "example": [
+                      {
+                        "author": "bue-witness",
+                        "permlink": "my-first-post"
+                      },
+                      {
+                        "author": "another-user",
+                        "permlink": "interesting-topic"
+                      }
+                    ]
+                  },
+                  "truncate": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535,
+                    "default": 0,
+                    "description": "Body truncation length. 0 returns full content, positive values\ntruncate to N characters. Useful for preview mode.\n"
+                  },
+                  "observer": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional Hive account whose mute lists and blacklists will be\napplied to filter results. Leave empty to disable filtering.\n"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON array of post objects in the same order as requested.\nNon-existent posts are returned as null to preserve array indices.\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "x-sql-datatype": "JSON"
+                },
+                "example": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (e.g., too many posts, invalid format)"
+          }
+        }
+      }
+    },
+    "/posts/by-ids-query": {
+      "get": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "Fetch full post details for multiple posts (GET variant)",
+        "description": "GET variant of /posts/by-ids that accepts post identifiers as query\nparameters. Limited to fetching fewer posts due to URL length constraints.\n\nFor larger batches, use the POST /posts/by-ids endpoint instead.\n\nThe posts parameter should be a URL-encoded JSON array.\n\nExample:\nGET /posts/by-ids-query?posts=[{\"author\":\"user1\",\"permlink\":\"post1\"}]&truncate=500\n",
+        "operationId": "hivesense_endpoints.posts_by_ids_query",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "posts",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "URL-encoded JSON array of post identifiers. Each object must have\n''author'' and ''permlink'' fields. Maximum 10 posts for GET requests.\n",
+            "example": "[{\"author\":\"bue-witness\",\"permlink\":\"my-post\"}]"
+          },
+          {
+            "in": "query",
+            "name": "truncate",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "default": 0
+            },
+            "description": "Body truncation length (0 = full content)"
+          },
+          {
+            "in": "query",
+            "name": "observer",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": ""
+            },
+            "description": "Optional Hive account for filtering"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON array of post objects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "x-sql-datatype": "JSON"
+                },
+                "example": {}
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

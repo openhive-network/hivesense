@@ -44,8 +44,8 @@ SET ROLE hivesense_owner;
               posts:
                 type: array
                 description: |
-                  Array of post identifiers. Each item must have both 'author' 
-                  and 'permlink' fields. Maximum 50 posts per request.
+                  Array of post identifiers. Each item must have both ''author'' 
+                  and ''permlink'' fields. Maximum 50 posts per request.
                 minItems: 1
                 maxItems: 50
                 items:
@@ -96,24 +96,22 @@ SET ROLE hivesense_owner;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.posts_by_ids;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_by_ids(
-    body JSON
+    posts JSON,
+    truncate INT = 0,
+    observer TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
     __observer_id INT := 0;
     __result JSON;
-    __posts JSON;
-    __truncate INT;
-    __observer TEXT;
+    __posts JSON := posts;
+    __truncate INT := truncate;
+    __observer TEXT := observer;
     __post_count INT;
 BEGIN
-    /* Extract parameters from JSON body */
-    __posts := body->'posts';
-    __truncate := COALESCE((body->>'truncate')::INT, 0);
-    __observer := COALESCE(body->>'observer', '');
     
     /* Validate posts array */
     IF __posts IS NULL OR jsonb_typeof(__posts::jsonb) != 'array' THEN
@@ -142,9 +140,9 @@ BEGIN
     WITH post_ids AS (
         SELECT 
             ordinality,
-            post_data->>'author' AS author,
-            post_data->>'permlink' AS permlink
-        FROM jsonb_array_elements(__posts::jsonb) WITH ORDINALITY AS post_data
+            elem->>'author' AS author,
+            elem->>'permlink' AS permlink
+        FROM jsonb_array_elements(__posts::jsonb) WITH ORDINALITY AS t(elem, ordinality)
     ),
     resolved_ids AS (
         SELECT
@@ -158,7 +156,7 @@ BEGIN
         SELECT
             ri.ordinality,
             CASE 
-                WHEN ri.post_id IS NOT NULL THEN
+                WHEN ri.post_id IS NOT NULL AND ri.post_id != 0 AND fpv.id IS NOT NULL THEN
                     hivemind_postgrest_utilities.create_bridge_post_object(
                         __observer_id,
                         fpv,
@@ -166,7 +164,7 @@ BEGIN
                         NULL,
                         fpv.is_pinned,
                         TRUE
-                    )
+                    )::JSON
                 ELSE
                     NULL::JSON
             END AS post_obj
@@ -174,9 +172,9 @@ BEGIN
         LEFT JOIN LATERAL (
             SELECT fv.*, fv.source AS blacklists
             FROM hivemind_app.get_full_post_view_by_id(ri.post_id, __observer_id) fv
-        ) fpv ON ri.post_id IS NOT NULL
+        ) fpv ON ri.post_id IS NOT NULL AND ri.post_id != 0
     )
-    SELECT jsonb_agg(post_obj ORDER BY ordinality)
+    SELECT json_agg(post_obj ORDER BY ordinality)
     INTO __result
     FROM full_posts;
     
@@ -212,7 +210,7 @@ $$;
           type: string
         description: |
           URL-encoded JSON array of post identifiers. Each object must have
-          'author' and 'permlink' fields. Maximum 10 posts for GET requests.
+          ''author'' and ''permlink'' fields. Maximum 10 posts for GET requests.
         example: '[{"author":"bue-witness","permlink":"my-post"}]'
       - in: query
         name: truncate
@@ -243,11 +241,11 @@ $$;
 -- openapi-generated-code-begin
 DROP FUNCTION IF EXISTS hivesense_endpoints.posts_by_ids_query;
 CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_by_ids_query(
-    posts TEXT,
-    truncate INT = 0,
-    observer TEXT = ''
+    "posts" TEXT,
+    "truncate" INT = 0,
+    "observer" TEXT = ''
 )
-RETURNS JSON
+RETURNS JSON 
 -- openapi-generated-code-end
 LANGUAGE plpgsql STABLE
 AS $$
@@ -267,14 +265,12 @@ BEGIN
         RAISE EXCEPTION 'GET endpoint limited to 10 posts. Use POST /posts/by-ids for larger batches';
     END IF;
     
-    /* Construct body and delegate to main function */
-    __body := jsonb_build_object(
-        'posts', __body,
-        'truncate', truncate,
-        'observer', observer
+    /* Call main function with named parameters */
+    __result := hivesense_endpoints.posts_by_ids(
+        posts := __body,
+        truncate := truncate,
+        observer := observer
     );
-    
-    __result := hivesense_endpoints.posts_by_ids(__body);
     
     RETURN __result;
 END;
