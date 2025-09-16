@@ -59,7 +59,7 @@ HAF_SHM_DIRECTORY="${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory"
 
 export ZPOOL_MOUNT_POINT TOP_LEVEL_DATASET_MOUNTPOINT HAF_DATA_DIRECTORY HAF_SHM_DIRECTORY
 
-"${ROOT_SRC_PATH}/submodules/haf_api_node/ci/scripts/prepare-stack-data-directory.sh" "${HAF_DATA_DIRECTORY}"
+"${ROOT_SRC_PATH}/submodules/haf_api_node/create_directories.sh" --data-dir="${HAF_DATA_DIRECTORY}"
 
 if [ -n "${BLOCK_LOG_DIRECTORY}" ]; then
   cp "${BLOCK_LOG_DIRECTORY}/block_log" "${HAF_DATA_DIRECTORY}/blockchain/block_log"
