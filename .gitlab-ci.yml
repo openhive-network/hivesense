@@ -192,7 +192,7 @@ sync:
     HAF_COMMIT: "$HAF_COMMIT"
     POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
     PUBLIC_HOSTNAME: "localhost"
-    GIT_SUBMODULE_STRATEGY: normal
+    GIT_SUBMODULE_STRATEGY: recursive
   timeout: 1 hours
   before_script:
   - |
