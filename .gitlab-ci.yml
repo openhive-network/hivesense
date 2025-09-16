@@ -29,7 +29,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: hive/haf
-  ref: b077291d37d71d482fd22fa68ab23c905a5c0912   # develop
+  ref: a2031fd663ef74d12e20d6aac5537ce20eca992f   # develop
   file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
@@ -121,7 +121,7 @@ build_images:
   - |
     # Export BuildKit for the script
     export DOCKER_BUILDKIT=1
-    
+
     # Build and push with commit SHA tag
     $CI_PROJECT_DIR/scripts/build_images.sh --push
 
