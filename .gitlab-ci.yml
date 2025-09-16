@@ -193,6 +193,7 @@ sync:
     POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
     PUBLIC_HOSTNAME: "localhost"
     GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: 0 # prevent fatal: remote error: upload-pack: not our ref when recursively updating tags
   timeout: 1 hours
   before_script:
   - |
