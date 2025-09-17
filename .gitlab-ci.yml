@@ -29,7 +29,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: hive/haf
-  ref: a2031fd663ef74d12e20d6aac5537ce20eca992f   # develop
+  ref: 80e558bdeec9556ec46927853cf390c72ef03311   # develop
   file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
@@ -151,7 +151,7 @@ publish_release_images:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registries..."
     docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-    docker login -u "$BLOG_REGISTRY_USER" -p "$BLOG_REGISTRY_PASSWORD" registry-upload.hive.blog
+    echo "$BLOG_REGISTRY_PASSWORD" | docker login --username "$BLOG_REGISTRY_USER" --password-stdin registry-upload.hive.blog
     echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
   - |
     # Enable BuildKit for better caching
