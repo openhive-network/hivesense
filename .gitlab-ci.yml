@@ -145,11 +145,13 @@ build_images:
 publish_release_images:
   extends: .docker_image_builder_job_template
   stage: publish
+  needs: [build_images]  # Make this job independent of sync stage
   before_script:
   - !reference [.docker_image_builder_job_template, before_script]
   - |
-    echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
+    echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registries..."
     docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    docker login -u "$BLOG_REGISTRY_USER" -p "$BLOG_REGISTRY_PASSWORD" registry-upload.hive.blog
     echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
   - |
     # Enable BuildKit for better caching
@@ -165,7 +167,20 @@ publish_release_images:
     # Build images with release tag (will still use cache from develop)
     $CI_PROJECT_DIR/scripts/build_images.sh --tag="$CI_COMMIT_TAG" --push
 
-    echo "Successfully published release images with tag: $CI_COMMIT_TAG"
+    # Tag and push to registry-upload.hive.blog
+    echo "Tagging images for registry-upload.hive.blog..."
+    docker tag "registry.gitlab.syncad.com/hive/hivesense:$CI_COMMIT_TAG" "registry-upload.hive.blog/hivesense:$CI_COMMIT_TAG"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:$CI_COMMIT_TAG" "registry-upload.hive.blog/hivesense/postgrest-rewriter:$CI_COMMIT_TAG"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:$CI_COMMIT_TAG" "registry-upload.hive.blog/hivesense/syncer:$CI_COMMIT_TAG"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:$CI_COMMIT_TAG" "registry-upload.hive.blog/hivesense/pca:$CI_COMMIT_TAG"
+
+    echo "Pushing to registry-upload.hive.blog..."
+    docker push "registry-upload.hive.blog/hivesense:$CI_COMMIT_TAG"
+    docker push "registry-upload.hive.blog/hivesense/postgrest-rewriter:$CI_COMMIT_TAG"
+    docker push "registry-upload.hive.blog/hivesense/syncer:$CI_COMMIT_TAG"
+    docker push "registry-upload.hive.blog/hivesense/pca:$CI_COMMIT_TAG"
+
+    echo "Successfully published release images with tag: $CI_COMMIT_TAG to both registries"
   rules:
   - if: '$CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED == "true"'
     when: on_success
