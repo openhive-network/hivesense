@@ -7,6 +7,7 @@ import psycopg2
 from psycopg2.extras import DictCursor, execute_values
 import numpy as np
 import json
+import gzip
 import time
 import datetime
 import multiprocessing
@@ -19,7 +20,7 @@ def parse_embedding(raw):
         return np.array(ast.literal_eval(raw), dtype=np.float32)
     raise TypeError(f"Unrecognized embedding type: {type(raw)}")
 
-def worker_main(worker_id, seq_start, seq_end, args, proj, M, total_rows, start_time):
+def worker_main(worker_id, seq_start, seq_end, args, proj, M, total_rows, start_time, store_halfvec):
     """Process a sync_seq range [seq_start, seq_end]."""
     DB = os.getenv("POSTGRES_URI")
     reader = psycopg2.connect(DB)
@@ -29,9 +30,12 @@ def worker_main(worker_id, seq_start, seq_end, args, proj, M, total_rows, start_
     writer = psycopg2.connect(DB)
     writer.autocommit = True
 
-    # Stream only rows in this worker's range
+    # Determine the correct type cast based on store_halfvec setting
+    type_cast = f"halfvec({M})" if store_halfvec else f"vector({M})"
+
+    # Stream only rows in this worker's range (using sync_seq for ordering but not storing it)
     src.execute(f"""
-        SELECT post_id, chunk_number, sync_seq, embedding
+        SELECT post_id, chunk_number, embedding
         FROM {args.input_table}
         WHERE sync_seq BETWEEN %s AND %s
         ORDER BY sync_seq
@@ -43,22 +47,22 @@ def worker_main(worker_id, seq_start, seq_end, args, proj, M, total_rows, start_
         if not batch:
             break
 
-        ids = [(r["post_id"], r["chunk_number"], r["sync_seq"]) for r in batch]
+        # Extract embeddings and compute projections
         X = np.stack([parse_embedding(r["embedding"]) for r in batch])
         Y = X.dot(proj.T)
         norms = np.linalg.norm(Y, axis=1, keepdims=True)
         Y = np.divide(Y, norms, where=(norms > 0))
 
         rows = []
-        for (pid, chunk, sync), vec in zip(ids, Y):
-            rows.append((pid, chunk, json.dumps(vec.tolist()), sync))
+        for r, vec in zip(batch, Y):
+            rows.append((r["post_id"], r["chunk_number"], json.dumps(vec.tolist())))
 
         with writer.cursor() as ins_cur:
             execute_values(
                 ins_cur,
-                f"INSERT INTO {args.output_table} (post_id,chunk_number,embedding,sync_seq) VALUES %s",
+                f"INSERT INTO {args.output_table} (post_id,chunk_number,reduced_embedding) VALUES %s",
                 rows,
-                template=f"(%s,%s,%s::halfvec({M}),%s)"
+                template=f"(%s,%s,%s::{type_cast})"
             )
 
         processed += len(batch)
@@ -84,11 +88,32 @@ class SharedCounter:
             self.val.value += delta
             return self.val.value
 
+def load_matrix(matrix_path):
+    """Load projection matrix from JSON or numpy format."""
+    print(f"Loading projection matrix from {matrix_path}...")
+
+    if matrix_path.endswith('.json') or matrix_path.endswith('.json.gz'):
+        # Load JSON format (same as install script uses)
+        if matrix_path.endswith('.gz'):
+            print("Decompressing gzipped JSON matrix...")
+            with gzip.open(matrix_path, 'rt') as f:
+                proj = np.array(json.load(f), dtype=np.float32)
+        else:
+            with open(matrix_path, 'r') as f:
+                proj = np.array(json.load(f), dtype=np.float32)
+        print(f"Loaded JSON matrix: shape {proj.shape}")
+    else:
+        # Original numpy format
+        proj = np.load(matrix_path).astype(np.float32)
+        print(f"Loaded numpy matrix: shape {proj.shape}")
+
+    return proj
+
 def main():
-    p = argparse.ArgumentParser(description="Convert embeddings via PCA to a new table (parallel)")
+    p = argparse.ArgumentParser(description="Convert embeddings via PCA to reduced dimensions (parallel)")
     p.add_argument("-m","--matrix-path",
-                   default=os.getenv("PCA_MATRIX_PATH","pca_projection_matrix.npy"),
-                   help="Path to PCA projection matrix (.npy)")
+                   required=True,
+                   help="Path to projection matrix (.json, .json.gz, or .npy)")
     p.add_argument("-b","--batch-size", type=int,
                    default=int(os.getenv("BATCH_SIZE","100000")),
                    help="Number of vectors to process per batch")
@@ -101,6 +126,12 @@ def main():
     p.add_argument("-w","--workers", type=int,
                    default=int(os.getenv("WORKERS", multiprocessing.cpu_count())),
                    help="Number of parallel worker processes")
+    p.add_argument("--update-config", action="store_true",
+                   help="Update database configuration to use reduced embeddings")
+    p.add_argument("--load-matrix-to-db", action="store_true",
+                   help="Load the projection matrix into the database reducing_matrix table")
+    p.add_argument("--create-index", action="store_true",
+                   help="Create HNSW index after conversion")
     args = p.parse_args()
 
     DB = os.getenv("POSTGRES_URI")
@@ -108,31 +139,56 @@ def main():
         print("ERROR: POSTGRES_URI must be set", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loading PCA matrix from {args.matrix_path}...")
-    proj = np.load(args.matrix_path).astype(np.float32)
+    # Load projection matrix
+    proj = load_matrix(args.matrix_path)
     M, D = proj.shape
     print(f"Projecting {D}-dim -> {M}-dim")
 
     # Ensure output table exists
     writer = psycopg2.connect(DB)
     writer.autocommit = True
+
+    # Check current configuration
     with writer.cursor() as c:
+        c.execute("SELECT store_halfvec_embeddings FROM hivesense_app.hivesense_app_status LIMIT 1")
+        store_halfvec = c.fetchone()[0]
+
+    # Create table with appropriate type (matching database_schema.sql structure)
+    with writer.cursor() as c:
+        type_spec = f"public.halfvec({M})" if store_halfvec else f"public.vector({M})"
+
         c.execute(f"""
            CREATE TABLE IF NOT EXISTS {args.output_table} (
              post_id int not null,
              chunk_number int not null,
-             embedding public.halfvec({M}) not null,
-             sync_seq int not null,
-             primary key(post_id,chunk_number)
+             reduced_embedding {type_spec} not null,
+             primary key(post_id,chunk_number),
+             FOREIGN KEY (post_id, chunk_number)
+               REFERENCES hivesense_app.posts_vectors(post_id, chunk_number)
+               ON DELETE CASCADE
            )
         """)
-    print("Ensured table:", args.output_table)
+
+    print(f"Ensured table: {args.output_table} with {'halfvec' if store_halfvec else 'vector'} type")
 
     # Fetch global sync_seq min/max and total rows
     with writer.cursor() as c:
         c.execute(f"SELECT MIN(sync_seq), MAX(sync_seq), COUNT(*) FROM {args.input_table}")
         min_seq, max_seq, total_rows = c.fetchone()
     print(f"Total embeddings: {total_rows:,}, sync_seq range [{min_seq}..{max_seq}]")
+
+    # Load matrix into database if requested
+    if args.load_matrix_to_db:
+        print("Loading projection matrix into database...")
+        with writer.cursor() as c:
+            c.execute("TRUNCATE hivesense_app.reducing_matrix")
+            for i, row in enumerate(proj):
+                c.execute(
+                    "INSERT INTO hivesense_app.reducing_matrix(row_idx, row_vec) VALUES (%s, %s::public.vector)",
+                    (i, json.dumps(row.tolist()))
+                )
+            writer.commit()
+        print(f"Loaded {M} projection vectors into reducing_matrix table")
 
     # Prepare shared counter and start time
     worker_main.shared_processed = SharedCounter(0)
@@ -147,7 +203,7 @@ def main():
         if i == args.workers - 1:
             end = max_seq
         p = multiprocessing.Process(target=worker_main,
-                                    args=(i, start, end, args, proj, M, total_rows, start_time))
+                                    args=(i, start, end, args, proj, M, total_rows, start_time, store_halfvec))
         p.start()
         jobs.append(p)
 
@@ -156,6 +212,35 @@ def main():
         p.join()
 
     print("All workers complete.")
+
+    # Update configuration if requested
+    if args.update_config:
+        print("Updating database configuration...")
+        with writer.cursor() as c:
+            c.execute("""
+                UPDATE hivesense_app.hivesense_app_status
+                SET use_reduced_embeddings = true,
+                    reduced_dim = %s
+                WHERE id = 1
+            """, (M,))
+            writer.commit()
+        print(f"Configuration updated: use_reduced_embeddings=true, reduced_dim={M}")
+
+    # Create index if requested
+    if args.create_index:
+        print("Creating HNSW index...")
+        with writer.cursor() as c:
+            c.execute("CALL hivesense_app.ENSURE_INDEXES_ARE_CREATED()")
+            writer.commit()
+        print("HNSW index creation complete")
+
+    writer.close()
+    print("\nConversion complete!")
+    print(f"Reduced embeddings are now in {args.output_table}")
+    if args.update_config:
+        print("Database is configured to use reduced embeddings")
+    if args.create_index:
+        print("HNSW index has been created")
 
 if __name__=="__main__":
     main()
