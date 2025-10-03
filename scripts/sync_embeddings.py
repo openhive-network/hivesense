@@ -21,8 +21,10 @@ BATCH = 1000
 RETRY_SLEEP = 3
 MAX_BACKOFF = 60
 
+# Configure logging level from environment variable (defaults to INFO)
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s  %(levelname)s  %(message)s"
 )
 
@@ -364,12 +366,13 @@ def main():
 
         max_last_vectors_block = 0
         # apply each operation in one batch transaction
+        batch_start_time = time.time()
         with conn.cursor() as cur:
             for op, post_id in resolved:
                 last_vectors_block = op.get("last_vectors_block")
                 if last_vectors_block > max_last_vectors_block:
                     max_last_vectors_block = last_vectors_block
-                logging.info(
+                logging.debug(
                     "Applying %s %s/%s (seq %s, block %s)",
                     op["op"], op["author"], op["permlink"],
                     op["sync_seq"], last_vectors_block
@@ -391,6 +394,19 @@ def main():
                 last_seen_current_block_num = max_last_vectors_block
 
         conn.commit()
+
+        # Log batch processing summary
+        batch_elapsed = time.time() - batch_start_time
+        num_posts = len(resolved)
+        if batch_elapsed >= 1.0:
+            time_str = f"{batch_elapsed:.2f}s"
+        else:
+            time_str = f"{batch_elapsed * 1000:.2f}ms"
+        avg_time_ms = (batch_elapsed * 1000) / num_posts if num_posts > 0 else 0
+        logging.info(
+            "Processed batch of %d posts in %s (avg %.2f ms/post)",
+            num_posts, time_str, avg_time_ms
+        )
 
         # Optionally create indexes if caught up
         if max_block is not None:

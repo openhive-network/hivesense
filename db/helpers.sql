@@ -234,13 +234,15 @@ BEGIN
     ) INTO __index_exists;
     
     IF __index_exists THEN
-        -- If index exists, get its size and report
-        SELECT PG_SIZE_PRETTY(PG_RELATION_SIZE(oid)) 
-        FROM pg_class 
-        WHERE relname = __index_name
-        INTO __creation_time_info;
-        
-        RAISE NOTICE 'HNSW index already exists (size: %). Skipping creation.', __creation_time_info;
+        -- this function is called by the sync script on every block during livesync.  We don't want to 
+        -- spam the logs with this message, so it's commented out for now
+        -- -- If index exists, get its size and report
+        -- SELECT PG_SIZE_PRETTY(PG_RELATION_SIZE(oid)) 
+        -- FROM pg_class 
+        -- WHERE relname = __index_name
+        -- INTO __creation_time_info;
+        -- 
+        -- RAISE NOTICE 'HNSW index already exists (size: %). Skipping creation.', __creation_time_info;
         RETURN;
     END IF;
 
