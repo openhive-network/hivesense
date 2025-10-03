@@ -1,3 +1,21 @@
+-- Create a SECURITY DEFINER wrapper for reading /proc/meminfo
+-- This must be created as superuser (haf_admin) before SET ROLE
+CREATE OR REPLACE FUNCTION hivesense_app.read_proc_meminfo()
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN pg_read_file('/proc/meminfo', 0, 200);
+EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;
+END;
+$$;
+
+-- Grant execute permission to hivesense_owner while still running as haf_admin
+GRANT EXECUTE ON FUNCTION hivesense_app.read_proc_meminfo() TO hivesense_owner;
+
 SET ROLE hivesense_owner;
 
 CREATE OR REPLACE FUNCTION CONTINUEPROCESSING()
@@ -281,8 +299,8 @@ BEGIN
     BEGIN
         -- Check system memory availability
         BEGIN
-            -- Read /proc/meminfo to get total memory
-            SELECT SPLIT_PART(pg_read_file('/proc/meminfo', 0, 200), ' kB', 1) INTO __memory_check_result;
+            -- Read /proc/meminfo to get total memory using SECURITY DEFINER wrapper
+            SELECT SPLIT_PART(hivesense_app.read_proc_meminfo(), ' kB', 1) INTO __memory_check_result;
             SELECT SPLIT_PART(__memory_check_result, 'MemTotal:', 2) INTO __memory_check_result;
             SELECT TRIM(__memory_check_result)::BIGINT / 1024 / 1024 INTO __system_memory_gb;
             
