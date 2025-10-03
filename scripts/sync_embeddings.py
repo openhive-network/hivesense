@@ -26,6 +26,22 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)s  %(message)s"
 )
 
+def notice_processor(notice):
+    """Process PostgreSQL NOTICE messages and log them."""
+    msg = notice.rstrip()
+    if msg.startswith('NOTICE:'):
+        msg = msg[7:].lstrip()
+    logging.info("PG NOTICE: %s", msg)
+
+def setup_notice_handler(conn):
+    """Attach notice processor to connection."""
+    conn.notices = []  # Clear any accumulated notices
+    conn.set_session(autocommit=False)
+    # Use connection's add_notice_handler if available (psycopg2 >= 2.7)
+    if hasattr(conn, 'add_notice_handler'):
+        conn.add_notice_handler(notice_processor)
+    return conn
+
 def ensure_connection_alive(conn):
     try:
         with conn.cursor() as cur:
@@ -37,7 +53,8 @@ def ensure_connection_alive(conn):
             conn.close()
         except Exception:
             pass
-        return psycopg2.connect(DB_DSN)
+        new_conn = psycopg2.connect(DB_DSN)
+        return setup_notice_handler(new_conn)
 
 def fetch_server_status():
     backoff = RETRY_SLEEP
@@ -229,6 +246,7 @@ def apply_op(cur, op, post_id):
 
 def main():
     conn = psycopg2.connect(DB_DSN)
+    conn = setup_notice_handler(conn)
 
     # fetch server status and validate
     server_status = fetch_server_status()
