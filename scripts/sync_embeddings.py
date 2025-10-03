@@ -4,9 +4,10 @@ import time
 import logging
 import requests
 import json
+import asyncio
 from requests.exceptions import RequestException
-import psycopg2
-from psycopg2.extras import execute_values, RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime, timezone
 
 API_URL = os.environ.get("HIVESENSE_API")   # e.g. https://upstream/
@@ -21,27 +22,24 @@ BATCH = 1000
 RETRY_SLEEP = 3
 MAX_BACKOFF = 60
 
-# Configure logging level from environment variable (defaults to INFO)
-log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s"
 )
 
-def notice_processor(notice):
+def notice_processor(diag):
     """Process PostgreSQL NOTICE messages and log them."""
-    msg = notice.rstrip()
-    if msg.startswith('NOTICE:'):
-        msg = msg[7:].lstrip()
-    logging.info("PG NOTICE: %s", msg)
+    msg = diag.message_primary
+    if msg:
+        logging.info("PG NOTICE: %s", msg)
+        if diag.message_detail:
+            logging.info("  DETAIL: %s", diag.message_detail)
+        if diag.message_hint:
+            logging.info("  HINT: %s", diag.message_hint)
 
 def setup_notice_handler(conn):
     """Attach notice processor to connection."""
-    conn.notices = []  # Clear any accumulated notices
-    conn.set_session(autocommit=False)
-    # Use connection's add_notice_handler if available (psycopg2 >= 2.7)
-    if hasattr(conn, 'add_notice_handler'):
-        conn.add_notice_handler(notice_processor)
+    conn.add_notice_handler(notice_processor)
     return conn
 
 def ensure_connection_alive(conn):
@@ -49,13 +47,13 @@ def ensure_connection_alive(conn):
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
         return conn
-    except psycopg2.OperationalError:
-        logging.warning("PostgreSQL connection was lost. Reconnecting.")
+    except (psycopg.OperationalError, psycopg.DatabaseError) as e:
+        logging.warning("PostgreSQL connection was lost (%s). Reconnecting.", type(e).__name__)
         try:
             conn.close()
         except Exception:
             pass
-        new_conn = psycopg2.connect(DB_DSN)
+        new_conn = psycopg.connect(DB_DSN)
         return setup_notice_handler(new_conn)
 
 def fetch_server_status():
@@ -86,7 +84,7 @@ def fetch_server_status():
 
 
 def validate_local_state(conn, server):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         # select all relevant config fields plus sync_uuid and syncing_embeddings
         cur.execute(
             "SELECT llm, embedding_dimensionality, document_prefix, query_prefix, "
@@ -126,12 +124,12 @@ def validate_local_state(conn, server):
             conn.commit()
             logging.info("Set initial sync_uuid to %s", server_uuid)
             return server_uuid
-        elif local_uuid != server_uuid:
+        elif str(local_uuid) != str(server_uuid):
             logging.error("sync_uuid mismatch (local=%s server=%s)", local_uuid, server_uuid)
             sys.exit(1)
         else:
             logging.info("sync_uuid matches server: %s", local_uuid)
-            return local_uuid
+            return str(local_uuid)
 
 
 def get_last_seq(cur) -> int:
@@ -166,12 +164,12 @@ def upsert_vectors(cur, post_id, sync_seq, embeddings):
         (sync_seq, post_id, idx, emb)
         for idx, emb in enumerate(embeddings)
     ]
-    psycopg2.extras.execute_values(
-        cur,
+    # Use executemany for batch insert
+    cur.executemany(
         """
         INSERT INTO hivesense_app.posts_vectors
           (sync_seq, post_id, chunk_number, embedding)
-        VALUES %s
+        VALUES (%s, %s, %s, %s)
         """,
         rows
     )
@@ -246,8 +244,20 @@ def apply_op(cur, op, post_id):
             """, (post_id,))
 
 
+async def create_indexes_with_live_notices(dsn):
+    """Run index creation in async mode with live notice output."""
+    async with await psycopg.AsyncConnection.connect(dsn) as aconn:
+        # Register notice handler for async connection
+        aconn.add_notice_handler(notice_processor)
+
+        async with aconn.cursor() as acur:
+            await acur.execute("CALL hivesense_app.ensure_indexes_are_created()")
+
+        await aconn.commit()
+
+
 def main():
-    conn = psycopg2.connect(DB_DSN)
+    conn = psycopg.connect(DB_DSN)
     conn = setup_notice_handler(conn)
 
     # fetch server status and validate
@@ -366,13 +376,12 @@ def main():
 
         max_last_vectors_block = 0
         # apply each operation in one batch transaction
-        batch_start_time = time.time()
         with conn.cursor() as cur:
             for op, post_id in resolved:
                 last_vectors_block = op.get("last_vectors_block")
                 if last_vectors_block > max_last_vectors_block:
                     max_last_vectors_block = last_vectors_block
-                logging.debug(
+                logging.info(
                     "Applying %s %s/%s (seq %s, block %s)",
                     op["op"], op["author"], op["permlink"],
                     op["sync_seq"], last_vectors_block
@@ -395,19 +404,6 @@ def main():
 
         conn.commit()
 
-        # Log batch processing summary
-        batch_elapsed = time.time() - batch_start_time
-        num_posts = len(resolved)
-        if batch_elapsed >= 1.0:
-            time_str = f"{batch_elapsed:.2f}s"
-        else:
-            time_str = f"{batch_elapsed * 1000:.2f}ms"
-        avg_time_ms = (batch_elapsed * 1000) / num_posts if num_posts > 0 else 0
-        logging.info(
-            "Processed batch of %d posts in %s (avg %.2f ms/post)",
-            num_posts, time_str, avg_time_ms
-        )
-
         # Optionally create indexes if caught up
         if max_block is not None:
             with conn.cursor() as cur:
@@ -424,8 +420,11 @@ def main():
                             "Latest block %s is recent (%.1fs old); creating indexes",
                             max_block, age.total_seconds()
                         )
-                        cur.execute("CALL hivesense_app.ensure_indexes_are_created()")
-                        conn.commit()
+                        # Use async function for index creation with live notices
+                        asyncio.run(create_indexes_with_live_notices(DB_DSN))
+
+                        # Ensure main connection is still alive after long async operation
+                        conn = ensure_connection_alive(conn)
 
 
 if __name__ == "__main__":
