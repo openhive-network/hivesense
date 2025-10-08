@@ -160,8 +160,9 @@ def resolve_post_id(cur, author, permlink):
     return row[0] if row else None
 
 def upsert_vectors(cur, post_id, sync_seq, embeddings):
+    # Ensure all embedding values are floats (psycopg3 requires type consistency)
     rows = [
-        (sync_seq, post_id, idx, emb)
+        (sync_seq, post_id, idx, [float(x) for x in emb])
         for idx, emb in enumerate(embeddings)
     ]
     # Use executemany for batch insert
