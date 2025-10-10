@@ -16,6 +16,30 @@ $$;
 -- Grant execute permission to hivesense_owner while still running as haf_admin
 GRANT EXECUTE ON FUNCTION hivesense_app.read_proc_meminfo() TO hivesense_owner;
 
+-- Create a SECURITY DEFINER wrapper for getting /dev/shm size
+-- This must be created as superuser (haf_admin) before SET ROLE
+CREATE OR REPLACE FUNCTION hivesense_app.get_shm_size_gb()
+RETURNS NUMERIC
+LANGUAGE plpython3u
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+import os
+try:
+    # Get the size of /dev/shm in bytes
+    stat = os.statvfs('/dev/shm')
+    total_bytes = stat.f_blocks * stat.f_frsize
+    # Convert to GB
+    total_gb = total_bytes / (1024 * 1024 * 1024)
+    return round(total_gb, 2)
+except Exception as e:
+    plpy.notice(f"Could not determine /dev/shm size: {e}")
+    return None
+$$;
+
+-- Grant execute permission to hivesense_owner while still running as haf_admin
+GRANT EXECUTE ON FUNCTION hivesense_app.get_shm_size_gb() TO hivesense_owner;
+
 SET ROLE hivesense_owner;
 
 CREATE OR REPLACE FUNCTION CONTINUEPROCESSING()
@@ -296,6 +320,10 @@ BEGIN
         __system_memory_gb NUMERIC;
         __memory_check_result TEXT;
         __new_maintenance_work_mem TEXT;
+    DECLARE
+        __shm_size_gb NUMERIC;
+        __can_use_system_mem BOOLEAN := FALSE;
+        __can_use_shm BOOLEAN := FALSE;
     BEGIN
         -- Check system memory availability
         BEGIN
@@ -303,35 +331,63 @@ BEGIN
             SELECT SPLIT_PART(hivesense_app.read_proc_meminfo(), ' kB', 1) INTO __memory_check_result;
             SELECT SPLIT_PART(__memory_check_result, 'MemTotal:', 2) INTO __memory_check_result;
             SELECT TRIM(__memory_check_result)::BIGINT / 1024 / 1024 INTO __system_memory_gb;
-            
+
             RAISE NOTICE 'System total memory: % GB', ROUND(__system_memory_gb, 1);
         EXCEPTION WHEN OTHERS THEN
             RAISE NOTICE 'Could not determine system memory: %. Using conservative settings.', SQLERRM;
             __system_memory_gb := 0;
         END;
-        
+
+        -- Check shared memory (/dev/shm) availability
+        BEGIN
+            __shm_size_gb := hivesense_app.get_shm_size_gb();
+            IF __shm_size_gb IS NOT NULL THEN
+                RAISE NOTICE 'Shared memory (/dev/shm) size: % GB', __shm_size_gb;
+            ELSE
+                RAISE NOTICE 'Could not determine shared memory size. Using conservative settings.';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Error checking shared memory: %. Using conservative settings.', SQLERRM;
+            __shm_size_gb := NULL;
+        END;
+
         -- Get available worker settings
         SELECT CURRENT_SETTING('max_parallel_workers')::INT INTO __max_parallel_workers;
         SELECT CURRENT_SETTING('maintenance_work_mem') INTO __current_maintenance_work_mem;
-        
+
         -- Get current maintenance workers setting (this is what actually controls index creation)
         SELECT COALESCE(CURRENT_SETTING('max_parallel_maintenance_workers', true)::INT, 2) INTO __original_maintenance_workers;
-        
+
         -- Store the original maintenance_work_mem value to restore later
         __original_maintenance_work_mem := __current_maintenance_work_mem;
-        
+
         -- Use minimum of 32 and max_parallel_workers for our target
         __max_parallel_maintenance_workers := LEAST(32, __max_parallel_workers);
-        
-        -- Determine appropriate maintenance_work_mem based on system memory
+
+        -- Check if system memory is sufficient
         IF __system_memory_gb >= (__desired_work_mem_gb + 30) THEN
+            __can_use_system_mem := TRUE;
+        END IF;
+
+        -- Check if shared memory is sufficient (shm_size >= maintenance_work_mem + 4GB)
+        IF __shm_size_gb IS NOT NULL AND __shm_size_gb >= (__desired_work_mem_gb + 4) THEN
+            __can_use_shm := TRUE;
+        END IF;
+
+        -- Determine appropriate maintenance_work_mem based on BOTH system memory and shared memory
+        IF __can_use_system_mem AND __can_use_shm THEN
             __new_maintenance_work_mem := __desired_work_mem_gb || 'GB';
-            RAISE NOTICE 'System has ≥ desired + 30 GB (%.1f GB).  Setting maintenance_work_mem to %',
-                        __system_memory_gb, __new_maintenance_work_mem;
+            RAISE NOTICE 'Both system memory (% GB) and shared memory (% GB) are sufficient. Setting maintenance_work_mem to %GB',
+                        ROUND(__system_memory_gb, 1), __shm_size_gb, __desired_work_mem_gb;
         ELSE
             __new_maintenance_work_mem := __current_maintenance_work_mem;
-            RAISE NOTICE 'System memory (%.1f GB) < desired + 30 GB (target %.0f GB + 30).  Leaving maintenance_work_mem at %',
-                        __system_memory_gb, __desired_work_mem_gb, __new_maintenance_work_mem;
+            IF NOT __can_use_system_mem THEN
+                RAISE NOTICE 'System memory insufficient (% GB < % GB + 30). Using default maintenance_work_mem: %',
+                            ROUND(__system_memory_gb, 1), __desired_work_mem_gb, __new_maintenance_work_mem;
+            ELSIF NOT __can_use_shm THEN
+                RAISE NOTICE 'Shared memory insufficient (% GB < % GB + 4). Using default maintenance_work_mem: %',
+                            __shm_size_gb, __desired_work_mem_gb, __new_maintenance_work_mem;
+            END IF;
         END IF;
         
         -- Set maintenance_work_mem based on memory check
@@ -365,12 +421,41 @@ BEGIN
     -- Record start time
     __start_time := CLOCK_TIMESTAMP();
     RAISE NOTICE 'Starting HNSW index creation at %', __start_time;
-    
-    CALL hivesense_app.CREATE_HNSW_INDEX();
-    
-    -- Record end time and calculate duration
-    __end_time := CLOCK_TIMESTAMP();
-    __duration := __end_time - __start_time;
+
+    -- Try to create index with current settings, with fallback on failure
+    BEGIN
+        CALL hivesense_app.CREATE_HNSW_INDEX();
+
+        -- Success - record end time and calculate duration
+        __end_time := CLOCK_TIMESTAMP();
+        __duration := __end_time - __start_time;
+
+    EXCEPTION
+        WHEN SQLSTATE '53100' THEN  -- disk_full (includes shared memory exhaustion)
+            RAISE NOTICE 'Index creation failed with error: %', SQLERRM;
+            RAISE NOTICE 'This is likely due to insufficient shared memory. Retrying with original settings...';
+            RAISE NOTICE 'Resetting maintenance_work_mem to % (was: %)',
+                        __original_maintenance_work_mem, __new_maintenance_work_mem;
+            RAISE NOTICE 'Resetting max_parallel_maintenance_workers to % (was: %)',
+                        __original_maintenance_workers, __max_parallel_maintenance_workers;
+
+            -- Reset to original settings
+            EXECUTE FORMAT('SET maintenance_work_mem TO %L', __original_maintenance_work_mem);
+            BEGIN
+                EXECUTE FORMAT('SET max_parallel_maintenance_workers TO %s', __original_maintenance_workers);
+            EXCEPTION WHEN OTHERS THEN
+                NULL; -- Ignore errors resetting workers
+            END;
+
+            -- Retry with original settings
+            CALL hivesense_app.CREATE_HNSW_INDEX();
+
+            -- Record end time for the successful retry
+            __end_time := CLOCK_TIMESTAMP();
+            __duration := __end_time - __start_time;
+
+            RAISE NOTICE 'Index creation succeeded with fallback settings';
+    END;
     
     -- Get the index size
     SELECT PG_RELATION_SIZE(oid) 
