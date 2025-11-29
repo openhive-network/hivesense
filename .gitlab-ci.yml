@@ -284,3 +284,4 @@ sync:
     when: always
   tags:
   - data-cache-storage
+  - hive-builder-9
