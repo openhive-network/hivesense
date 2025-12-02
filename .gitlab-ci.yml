@@ -102,6 +102,7 @@ prepare_haf_image:
   tags:
   - public-runner-docker
   - hived-for-tests
+  - hived
 
 
 build_images:
