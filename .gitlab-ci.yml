@@ -18,8 +18,13 @@ variables:
   GIT_DEPTH: 1
   GIT_SUBMODULE_DEPTH: 1
   GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
+  # HAF submodule commit - must match the 'ref:' in the include section above
+  # This is needed for service containers which can't access dotenv artifacts
+  HAF_COMMIT: "465036e77ceb78cd71d1daeb377b6d0c0a21b857"
   # HAF configuration
   DATA_CACHE_HAF_PREFIX: "/cache/replay_data_haf"
+  # NFS cache configuration for sync data sharing across builders
+  DATA_CACHE_NFS_PREFIX: "/nfs/ci-cache"
   BLOCK_LOG_SOURCE_DIR_5M: /blockchain/block_log_5m
   FF_NETWORK_PER_BUILD: 1
   PYTEST_NUMBER_OF_PROCESSES: 8
@@ -29,7 +34,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: hive/haf
-  ref: bf820442979eff6c7cb7e387f26cd4ccf9345f3c   # develop
+  ref: 465036e77ceb78cd71d1daeb377b6d0c0a21b857  # feature/nfs-cache-manager
   file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
@@ -89,6 +94,33 @@ lint_sql_scripts:
   artifacts:
     paths:
     - sql-lint.yaml
+
+# Validate that HAF_COMMIT variable matches both the submodule and include ref
+validate_haf_commit:
+  stage: lint
+  image: alpine:latest
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  before_script:
+  - apk add --no-cache git
+  script:
+  - |
+    SUBMODULE_COMMIT=$(git ls-tree HEAD submodules/haf | awk '{print $3}')
+    INCLUDE_REF=$(grep -A2 "project:.*hive/haf" .gitlab-ci.yml | grep "ref:" | head -1 | sed 's/.*ref: *\([a-f0-9]*\).*/\1/')
+    echo "HAF_COMMIT variable: $HAF_COMMIT"
+    echo "HAF submodule:       $SUBMODULE_COMMIT"
+    echo "Include ref:         $INCLUDE_REF"
+    if [[ "$HAF_COMMIT" != "$SUBMODULE_COMMIT" ]]; then
+      echo "ERROR: HAF_COMMIT does not match submodule commit!"
+      exit 1
+    fi
+    if [[ "$HAF_COMMIT" != "$INCLUDE_REF" ]]; then
+      echo "ERROR: HAF_COMMIT does not match include ref!"
+      exit 1
+    fi
+    echo "All HAF references are consistent."
+  tags:
+  - public-runner-docker
 
 prepare_haf_image:
   stage: build
@@ -229,6 +261,25 @@ sync:
     git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
     git submodule foreach --recursive 'git fetch --tags'
     echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
+  - |
+    # NFS fallback: Copy HAF data from NFS if local cache is missing
+    echo -e "\e[0Ksection_start:$(date +%s):nfs_cache[collapsed=true]\r\e[0KChecking HAF data cache..."
+    LOCAL_CACHE="${DATA_SOURCE}"
+    NFS_CACHE="${DATA_CACHE_NFS_PREFIX}/haf/${HAF_COMMIT}"
+    if [[ ! -d "${LOCAL_CACHE}/datadir" ]]; then
+      echo "Local cache not found at ${LOCAL_CACHE}"
+      if [[ -d "${NFS_CACHE}/datadir" ]]; then
+        echo "Found NFS cache at ${NFS_CACHE}, copying..."
+        mkdir -p "${LOCAL_CACHE}"
+        cp -r "${NFS_CACHE}/datadir" "${LOCAL_CACHE}/"
+        echo "NFS cache copy complete"
+      else
+        echo "WARNING: Neither local nor NFS cache found for HAF data"
+      fi
+    else
+      echo "Local cache found at ${LOCAL_CACHE}"
+    fi
+    echo -e "\e[0Ksection_end:$(date +%s):nfs_cache\r\e[0K"
   script:
   - docker compose version
   - |
@@ -291,4 +342,4 @@ sync:
     when: always
   tags:
   - data-cache-storage
-  - hive-builder-9
+  - fast
