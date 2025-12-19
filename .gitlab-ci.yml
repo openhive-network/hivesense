@@ -139,7 +139,6 @@ prepare_haf_image:
   - git config --global --add safe.directory $CI_PROJECT_DIR/submodules/haf
   tags:
   - public-runner-docker
-  - hived-for-tests
   - hived
 
 
