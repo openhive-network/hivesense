@@ -26,7 +26,7 @@ variables:
   GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
   # HAF submodule commit - must match the 'ref:' in the include section above
   # This is needed for service containers which can't access dotenv artifacts
-  HAF_COMMIT: "465036e77ceb78cd71d1daeb377b6d0c0a21b857"
+  HAF_COMMIT: "9add4c306ddc0067bf00857c2c70053f21525ae6"
   # HAF configuration
   DATA_CACHE_HAF_PREFIX: "/cache/replay_data_haf"
   # NFS cache configuration for sync data sharing across builders
@@ -40,7 +40,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: hive/haf
-  ref: 465036e77ceb78cd71d1daeb377b6d0c0a21b857  # feature/nfs-cache-manager
+  ref: 9add4c306ddc0067bf00857c2c70053f21525ae6   # develop
   file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
