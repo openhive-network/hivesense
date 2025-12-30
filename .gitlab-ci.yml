@@ -69,6 +69,17 @@ default:
           # Remove stale lock files that block git operations
           find .git -name "*.lock" -delete 2>/dev/null || true
 
+          # Clean stale HAF submodule if commit doesn't match expected
+          # This prevents "origin does not exist" errors in nested submodules
+          if [ -d "submodules/haf" ] && [ -n "${HAF_COMMIT:-}" ]; then
+            CURRENT_HAF=$(git ls-tree HEAD submodules/haf 2>/dev/null | awk '{print $3}')
+            if [ -n "$CURRENT_HAF" ] && [ "$CURRENT_HAF" != "$HAF_COMMIT" ]; then
+              echo "pre_get_sources: HAF submodule mismatch (have $CURRENT_HAF, need $HAF_COMMIT)"
+              echo "pre_get_sources: cleaning submodules/haf to force fresh checkout"
+              rm -rf submodules/haf .git/modules/submodules/haf
+            fi
+          fi
+
           # Check if main repo is corrupt - if so, remove .git to force fresh clone
           if ! git rev-parse HEAD >/dev/null 2>&1; then
             echo "pre_get_sources: main repository corrupt, forcing fresh clone"
@@ -83,6 +94,11 @@ default:
                 # Check if submodule working directory exists but is corrupt
                 if [ -d "$submod" ] && [ -f "$submod/.git" ]; then
                   if ! git -C "$submod" rev-parse HEAD >/dev/null 2>&1; then
+                    needs_clean=true
+                  fi
+                  # Also check if origin remote is valid (broken remotes cause fetch failures)
+                  if ! git -C "$submod" remote get-url origin >/dev/null 2>&1; then
+                    echo "pre_get_sources: $submod has broken origin remote"
                     needs_clean=true
                   fi
                 fi
