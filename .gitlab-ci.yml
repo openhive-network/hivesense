@@ -184,7 +184,8 @@ validate_haf_commit:
   script:
   - |
     SUBMODULE_COMMIT=$(git ls-tree HEAD submodules/haf | awk '{print $3}')
-    INCLUDE_REF=$(grep -A2 "project:.*hive/haf" .gitlab-ci.yml | grep "ref:" | head -1 | sed 's/.*ref: *\([a-f0-9]*\).*/\1/')
+    # Use awk instead of grep|head|sed to avoid SIGPIPE (exit code 141)
+    INCLUDE_REF=$(awk '/project:.*hive\/haf/{found=1} found && /ref:/{gsub(/.*ref: */, ""); gsub(/ .*/, ""); print; exit}' .gitlab-ci.yml)
     echo "HAF_COMMIT variable: $HAF_COMMIT"
     echo "HAF submodule:       $SUBMODULE_COMMIT"
     echo "Include ref:         $INCLUDE_REF"
