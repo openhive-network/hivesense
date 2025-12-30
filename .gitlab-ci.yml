@@ -104,6 +104,8 @@ default:
 .lint_job:
   extends: .job-defaults
   stage: lint
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
   artifacts:
     name: lint-results
     when: always
