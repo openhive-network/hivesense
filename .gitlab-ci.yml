@@ -24,6 +24,11 @@ variables:
   # fetch workspaces during transition. Remove once all projects use fetch.
   GIT_CLONE_PATH: $CI_BUILDS_DIR/fetch/$CI_RUNNER_SHORT_TOKEN/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
   GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
+  # Allow file:// protocol for nested submodules with relative paths
+  # HAF's hive submodule uses relative paths that resolve to file:// URLs
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: protocol.file.allow
+  GIT_CONFIG_VALUE_0: always
   # HAF submodule commit - must match the 'ref:' in the include section above
   # This is needed for service containers which can't access dotenv artifacts
   HAF_COMMIT: "b4225f9d2591195b0e6aadf36bbef921d95f92b9"
