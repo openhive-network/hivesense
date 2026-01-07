@@ -1,4 +1,5 @@
 stages:
+- detect
 - lint
 - build
 - sync
@@ -29,9 +30,16 @@ variables:
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: protocol.file.allow
   GIT_CONFIG_VALUE_0: always
-  # HAF submodule commit - must match the 'ref:' in the include section above
-  # This is needed for service containers which can't access dotenv artifacts
-  HAF_COMMIT: "b4225f9d2591195b0e6aadf36bbef921d95f92b9"
+  # =============================================================================
+  # Upstream Image Detection (No Submodules Required)
+  # =============================================================================
+  # HAF image is dynamically detected by find_haf_image job using
+  # common-ci-configuration scripts. No manual updates needed - always uses
+  # the latest built image from the HAF repo.
+  #
+  # Output variables (set by detect stage job):
+  #   HAF_UPSTREAM_IMAGE, HAF_UPSTREAM_COMMIT, HAF_UPSTREAM_TAG
+  # =============================================================================
   # HAF configuration
   DATA_CACHE_HAF_PREFIX: "/cache/replay_data_haf"
   # NFS cache configuration for sync data sharing across builders
@@ -44,9 +52,6 @@ variables:
 
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
-- project: hive/haf
-  ref: b4225f9d2591195b0e6aadf36bbef921d95f92b9   # develop
-  file: /scripts/ci-helpers/prepare_data_image_job.yml   # implicitly pulls templates/base.gitlab-ci.yml from common-ci-configuration
 - project: 'hive/common-ci-configuration'
   ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
   file:
@@ -55,6 +60,8 @@ include:
   - '/templates/docker_image_jobs.gitlab-ci.yml'
   - '/templates/cache_cleanup.gitlab-ci.yml'
   - '/templates/npm_projects.gitlab-ci.yml'
+  - '/templates/haf_data_preparation.gitlab-ci.yml'
+  - '/templates/source_change_detection.gitlab-ci.yml'
 
 default:
   hooks:
@@ -71,10 +78,12 @@ default:
 
           # Clean stale HAF submodule if commit doesn't match expected
           # This prevents "origin does not exist" errors in nested submodules
-          if [ -d "submodules/haf" ] && [ -n "${HAF_COMMIT:-}" ]; then
+          # Note: HAF_COMMIT may not be set if using dynamic detection (HAF_UPSTREAM_COMMIT)
+          EXPECTED_HAF="${HAF_COMMIT:-${HAF_UPSTREAM_COMMIT:-}}"
+          if [ -d "submodules/haf" ] && [ -n "$EXPECTED_HAF" ]; then
             CURRENT_HAF=$(git ls-tree HEAD submodules/haf 2>/dev/null | awk '{print $3}')
-            if [ -n "$CURRENT_HAF" ] && [ "$CURRENT_HAF" != "$HAF_COMMIT" ]; then
-              echo "pre_get_sources: HAF submodule mismatch (have $CURRENT_HAF, need $HAF_COMMIT)"
+            if [ -n "$CURRENT_HAF" ] && [ "$CURRENT_HAF" != "$EXPECTED_HAF" ]; then
+              echo "pre_get_sources: HAF submodule mismatch (have $CURRENT_HAF, need $EXPECTED_HAF)"
               echo "pre_get_sources: cleaning submodules/haf to force fresh checkout"
               rm -rf submodules/haf .git/modules/submodules/haf
             fi
@@ -173,46 +182,56 @@ lint_sql_scripts:
     paths:
     - sql-lint.yaml
 
-# Validate that HAF_COMMIT variable matches both the submodule and include ref
-validate_haf_commit:
-  stage: lint
-  image: alpine:latest
+# =============================================================================
+# Upstream Image Detection Jobs
+# =============================================================================
+# Automatically find the latest built images from upstream HAF repo by
+# analyzing which commits changed source files. Uses .find_upstream_image template
+# from common-ci-configuration.
+#
+# The job outputs variables with the HAF_UPSTREAM_ prefix:
+#   HAF_UPSTREAM_IMAGE, HAF_UPSTREAM_COMMIT, HAF_UPSTREAM_TAG
+# =============================================================================
+find_haf_image:
+  extends: .find_upstream_image
+  stage: detect
   variables:
-    GIT_SUBMODULE_STRATEGY: none
+    UPSTREAM_REPO_URL: "https://gitlab.syncad.com/hive/haf.git"
+    UPSTREAM_REGISTRY: "registry.gitlab.syncad.com/hive/haf"
+    UPSTREAM_BRANCH: "develop"
+    UPSTREAM_OUTPUT: "haf_image.env"
   before_script:
-  - apk add --no-cache git
+    - apk add --no-cache git bash curl
+    # Fetch source patterns from HAF's script (single source of truth)
+    - |
+      PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh"
+      echo "Fetching source patterns from: $PATTERNS_URL"
+      if UPSTREAM_PATTERNS=$(curl -sf "$PATTERNS_URL" | sh); then
+        echo "Loaded patterns: $UPSTREAM_PATTERNS"
+        export UPSTREAM_PATTERNS
+      else
+        echo "ERROR: Could not fetch source-patterns.sh from HAF"
+        exit 1
+      fi
   script:
-  - |
-    SUBMODULE_COMMIT=$(git ls-tree HEAD submodules/haf | awk '{print $3}')
-    # Use awk instead of grep|head|sed to avoid SIGPIPE (exit code 141)
-    INCLUDE_REF=$(awk '/project:.*hive\/haf/{found=1} found && /ref:/{gsub(/.*ref: */, ""); gsub(/ .*/, ""); print; exit}' .gitlab-ci.yml)
-    echo "HAF_COMMIT variable: $HAF_COMMIT"
-    echo "HAF submodule:       $SUBMODULE_COMMIT"
-    echo "Include ref:         $INCLUDE_REF"
-    if [[ "$HAF_COMMIT" != "$SUBMODULE_COMMIT" ]]; then
-      echo "ERROR: HAF_COMMIT does not match submodule commit!"
-      exit 1
-    fi
-    if [[ "$HAF_COMMIT" != "$INCLUDE_REF" ]]; then
-      echo "ERROR: HAF_COMMIT does not match include ref!"
-      exit 1
-    fi
-    echo "All HAF references are consistent."
+    - !reference [.find_upstream_image, script]
+    # Rename UPSTREAM_* to HAF_UPSTREAM_* to avoid collisions with other upstream jobs
+    - |
+      if [ -f "$UPSTREAM_OUTPUT" ]; then
+        sed -i 's/^UPSTREAM_/HAF_UPSTREAM_/' "$UPSTREAM_OUTPUT"
+        echo "Renamed variables in $UPSTREAM_OUTPUT:"
+        cat "$UPSTREAM_OUTPUT"
+      fi
+  artifacts:
+    reports:
+      dotenv: haf_image.env
+    expire_in: 1 day
   tags:
-  - public-runner-docker
+    - public-runner-docker
 
-prepare_haf_image:
-  stage: build
-  extends: .prepare_haf_image
-  variables:
-    SUBMODULE_DIR: "$CI_PROJECT_DIR/submodules/haf"
-    REGISTRY_USER: "$HAF_IMG_BUILDER_USER"
-    REGISTRY_PASS: "$HAF_IMG_BUILDER_PASSWORD"
-  before_script:
-  - git config --global --add safe.directory $CI_PROJECT_DIR/submodules/haf
-  tags:
-  - public-runner-docker
-  - hived
+# Note: prepare_haf_image is no longer needed - we use pre-built images from
+# the HAF registry via find_haf_image job. The .prepare_haf_image template is
+# still available from haf_data_preparation.gitlab-ci.yml but we don't use it.
 
 
 build_images:
@@ -310,18 +329,20 @@ sync:
   # 3. Expand test block_log to 1.3M+ blocks
   allow_failure: true
   needs:
-  - prepare_haf_image
+  - job: find_haf_image
+    artifacts: true
   - build_images
   variables:
     DOCKER_COMPOSE_VERSION: 2.27.1
-    DATA_SOURCE: ${DATA_CACHE_HAF_PREFIX}_${HAF_COMMIT}
+    DATA_SOURCE: ${DATA_CACHE_HAF_PREFIX}_${HAF_UPSTREAM_COMMIT}
     POOL_DIR: ${CI_PROJECT_DIR}/${CI_JOB_ID}/
     DATADIR: ${POOL_DIR}/haf-datadir
     SHM_DIR: ${POOL_DIR}/haf-datadir/shared_memory
     HAF_DATA_DIRECTORY: ${DATADIR}
     HAF_SHM_DIRECTORY: ${SHM_DIR}
     BACKEND_VERSION: "$CI_COMMIT_SHORT_SHA"
-    HAF_COMMIT: "$HAF_COMMIT"
+    # Map HAF_UPSTREAM_* from find_haf_image to HAF_* for scripts
+    HAF_COMMIT: "${HAF_UPSTREAM_COMMIT}"
     POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
     PUBLIC_HOSTNAME: "localhost"
     GIT_SUBMODULE_STRATEGY: recursive
@@ -343,7 +364,7 @@ sync:
     # NFS fallback: Copy HAF data from NFS if local cache is missing
     echo -e "\e[0Ksection_start:$(date +%s):nfs_cache[collapsed=true]\r\e[0KChecking HAF data cache..."
     LOCAL_CACHE="${DATA_SOURCE}"
-    NFS_CACHE="${DATA_CACHE_NFS_PREFIX}/haf/${HAF_COMMIT}"
+    NFS_CACHE="${DATA_CACHE_NFS_PREFIX}/haf/${HAF_UPSTREAM_COMMIT}"
     if [[ ! -d "${LOCAL_CACHE}/datadir" ]]; then
       echo "Local cache not found at ${LOCAL_CACHE}"
       if [[ -d "${NFS_CACHE}/datadir" ]]; then
