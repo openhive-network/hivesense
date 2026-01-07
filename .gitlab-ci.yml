@@ -60,6 +60,10 @@ include:
   - '/templates/docker_image_jobs.gitlab-ci.yml'
   - '/templates/cache_cleanup.gitlab-ci.yml'
   - '/templates/npm_projects.gitlab-ci.yml'
+# HAF app templates from develop (not yet in pinned version)
+- project: 'hive/common-ci-configuration'
+  ref: develop
+  file:
   - '/templates/haf_data_preparation.gitlab-ci.yml'
   - '/templates/source_change_detection.gitlab-ci.yml'
 
