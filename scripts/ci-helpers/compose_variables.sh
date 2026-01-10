@@ -9,10 +9,18 @@ ROOT_SRC_PATH="$(git rev-parse --show-superproject-working-tree || git rev-parse
 ROOT_SRC_PATH="${CI_PROJECT_DIR:-$ROOT_SRC_PATH}"
 
 # Get Git SHAs
-HAF_SUBMODULE_SHA=$(
-    git -C "${ROOT_SRC_PATH}/submodules/haf" describe --tags --exact-match HEAD 2>/dev/null ||
-    git -C "${ROOT_SRC_PATH}/submodules/haf" rev-parse --short=8 HEAD
-)
+# HAF version comes from HAF_COMMIT env var (set by CI from find_haf_image job)
+# or HAF_UPSTREAM_COMMIT directly. Falls back to HAF_VERSION if already set.
+if [ -z "${HAF_VERSION:-}" ]; then
+    HAF_VERSION="${HAF_COMMIT:-${HAF_UPSTREAM_COMMIT:-}}"
+    if [ -z "$HAF_VERSION" ]; then
+        echo "ERROR: HAF_COMMIT or HAF_UPSTREAM_COMMIT must be set (no HAF submodule)"
+        exit 1
+    fi
+    # Use short SHA (8 chars) for image tag
+    HAF_VERSION=$(echo "$HAF_VERSION" | cut -c1-8)
+fi
+
 HIVEMIND_NODE_SUBMODULE_SHA=$(
     git -C "${ROOT_SRC_PATH}/submodules/hivemind" describe --tags --exact-match HEAD 2>/dev/null ||
     git -C "${ROOT_SRC_PATH}/submodules/hivemind" rev-parse --short=8 HEAD
@@ -30,7 +38,7 @@ HIVE_API_NODE_REGISTRY="registry.gitlab.syncad.com/hive"
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
-HAF_VERSION="${HAF_SUBMODULE_SHA}"
+# HAF_VERSION is set above from HAF_COMMIT env var
 ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
 export REPUTATION_TRACKER_VERSION="${REPUTATION_TRACKER_HIVEMIND_VERSION}"

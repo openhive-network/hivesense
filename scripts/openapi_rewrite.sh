@@ -5,7 +5,18 @@ set -o pipefail
 
 SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
-haf_dir="$SCRIPTDIR/../submodules/haf"
+# Fetch process_openapi.py from HAF repository at runtime
+HAF_BRANCH="${HAF_BRANCH:-develop}"
+PROCESS_OPENAPI_URL="https://gitlab.syncad.com/hive/haf/-/raw/${HAF_BRANCH}/scripts/process_openapi.py"
+PROCESS_OPENAPI_SCRIPT=$(mktemp)
+trap 'rm -f "$PROCESS_OPENAPI_SCRIPT"' EXIT
+
+echo "Fetching process_openapi.py from HAF (branch: $HAF_BRANCH)..."
+if ! curl -sf "$PROCESS_OPENAPI_URL" -o "$PROCESS_OPENAPI_SCRIPT"; then
+    echo "ERROR: Could not fetch process_openapi.py from HAF"
+    exit 1
+fi
+
 endpoints="endpoints"
 rewrite_dir="${endpoints}_openapi"
 input_file="rewrite_rules.conf"
@@ -91,7 +102,7 @@ echo "$ENDPOINTS_IN_ORDER"
 
 # run openapi rewrite script
 # shellcheck disable=SC2086
-python3 $haf_dir/scripts/process_openapi.py $OUTPUT  $ENDPOINTS_IN_ORDER
+python3 "$PROCESS_OPENAPI_SCRIPT" $OUTPUT  $ENDPOINTS_IN_ORDER
 
 # Create rewrite_rules.conf
 reverse_lines > "$temp_output_file"

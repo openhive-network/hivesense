@@ -1,6 +1,3 @@
-[submodule "submodules/haf"]
-	path = submodules/haf
-	url = ../haf.git
 [submodule "submodules/haf_api_node"]
 	path = submodules/haf_api_node
 	url = ../haf_api_node.git
