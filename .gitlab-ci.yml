@@ -80,19 +80,6 @@ default:
           # Remove stale lock files that block git operations
           find .git -name "*.lock" -delete 2>/dev/null || true
 
-          # Clean stale HAF submodule if commit doesn't match expected
-          # This prevents "origin does not exist" errors in nested submodules
-          # Note: HAF_COMMIT may not be set if using dynamic detection (HAF_UPSTREAM_COMMIT)
-          EXPECTED_HAF="${HAF_COMMIT:-${HAF_UPSTREAM_COMMIT:-}}"
-          if [ -d "submodules/haf" ] && [ -n "$EXPECTED_HAF" ]; then
-            CURRENT_HAF=$(git ls-tree HEAD submodules/haf 2>/dev/null | awk '{print $3}')
-            if [ -n "$CURRENT_HAF" ] && [ "$CURRENT_HAF" != "$EXPECTED_HAF" ]; then
-              echo "pre_get_sources: HAF submodule mismatch (have $CURRENT_HAF, need $EXPECTED_HAF)"
-              echo "pre_get_sources: cleaning submodules/haf to force fresh checkout"
-              rm -rf submodules/haf .git/modules/submodules/haf
-            fi
-          fi
-
           # Check if main repo is corrupt - if so, remove .git to force fresh clone
           if ! git rev-parse HEAD >/dev/null 2>&1; then
             echo "pre_get_sources: main repository corrupt, forcing fresh clone"
@@ -359,7 +346,6 @@ sync:
     echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
     echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
     git config --global --add safe.directory "$CI_PROJECT_DIR"
-    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf"
     git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
     git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
     git submodule foreach --recursive 'git fetch --tags'
