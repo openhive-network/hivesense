@@ -53,7 +53,7 @@ variables:
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 - project: 'hive/common-ci-configuration'
-  ref: 6b9e9e75ec5263939450936a4f8348dfbca3666d
+  ref: 4e60cec43a1c72b5faebf5d34e8b5b6caa9fa159
   file:
   - '/templates/test_jobs.gitlab-ci.yml'
   - '/templates/python_projects.gitlab-ci.yml'
@@ -72,55 +72,55 @@ default:
     pre_get_sources_script:
       # Clean corrupt git state left by cancelled pipelines (see GitLab #296638, #4600)
       # Wrapped in subshell to avoid changing working directory for subsequent git operations
-      - |
-        (
-        cd "${CI_PROJECT_DIR:-/builds}" 2>/dev/null || exit 0
-        echo "pre_get_sources: checking $(pwd) for corrupt git state"
-        if [ -d ".git" ]; then
-          # Remove stale lock files that block git operations
-          find .git -name "*.lock" -delete 2>/dev/null || true
+    - |
+      (
+      cd "${CI_PROJECT_DIR:-/builds}" 2>/dev/null || exit 0
+      echo "pre_get_sources: checking $(pwd) for corrupt git state"
+      if [ -d ".git" ]; then
+        # Remove stale lock files that block git operations
+        find .git -name "*.lock" -delete 2>/dev/null || true
 
-          # Check if main repo is corrupt - if so, remove .git to force fresh clone
-          if ! git rev-parse HEAD >/dev/null 2>&1; then
-            echo "pre_get_sources: main repository corrupt, forcing fresh clone"
-            rm -rf .git
-          else
-            # Main repo OK - check and clean corrupt submodules
-            # Check both the working dir and .git/modules/ since either can be corrupt
-            if [ -f ".gitmodules" ]; then
-              git config --file .gitmodules --get-regexp path 2>/dev/null | awk '{print $2}' | while read submod; do
-                needs_clean=false
-                [ -z "$submod" ] && continue
-                # Check if submodule working directory exists but is corrupt
-                if [ -d "$submod" ] && [ -f "$submod/.git" ]; then
-                  if ! git -C "$submod" rev-parse HEAD >/dev/null 2>&1; then
-                    needs_clean=true
-                  fi
-                  # Also check if origin remote is valid (broken remotes cause fetch failures)
-                  if ! git -C "$submod" remote get-url origin >/dev/null 2>&1; then
-                    echo "pre_get_sources: $submod has broken origin remote"
-                    needs_clean=true
-                  fi
-                fi
-                # Check if .git/modules exists but is corrupt (even if working dir is gone)
-                if [ -d ".git/modules/$submod" ]; then
-                  if ! git --git-dir=".git/modules/$submod" rev-parse HEAD >/dev/null 2>&1; then
-                    echo "pre_get_sources: $submod corrupt (rev-parse failed)"
-                    needs_clean=true
-                  fi
-                fi
-                if [ "$needs_clean" = true ]; then
-                  echo "pre_get_sources: cleaning corrupt submodule: $submod"
-                  rm -rf "$submod" ".git/modules/$submod"
-                fi
-              done
-            fi
-            echo "pre_get_sources: existing repo OK"
-          fi
+        # Check if main repo is corrupt - if so, remove .git to force fresh clone
+        if ! git rev-parse HEAD >/dev/null 2>&1; then
+          echo "pre_get_sources: main repository corrupt, forcing fresh clone"
+          rm -rf .git
         else
-          echo "pre_get_sources: no .git directory (fresh workspace)"
+          # Main repo OK - check and clean corrupt submodules
+          # Check both the working dir and .git/modules/ since either can be corrupt
+          if [ -f ".gitmodules" ]; then
+            git config --file .gitmodules --get-regexp path 2>/dev/null | awk '{print $2}' | while read submod; do
+              needs_clean=false
+              [ -z "$submod" ] && continue
+              # Check if submodule working directory exists but is corrupt
+              if [ -d "$submod" ] && [ -f "$submod/.git" ]; then
+                if ! git -C "$submod" rev-parse HEAD >/dev/null 2>&1; then
+                  needs_clean=true
+                fi
+                # Also check if origin remote is valid (broken remotes cause fetch failures)
+                if ! git -C "$submod" remote get-url origin >/dev/null 2>&1; then
+                  echo "pre_get_sources: $submod has broken origin remote"
+                  needs_clean=true
+                fi
+              fi
+              # Check if .git/modules exists but is corrupt (even if working dir is gone)
+              if [ -d ".git/modules/$submod" ]; then
+                if ! git --git-dir=".git/modules/$submod" rev-parse HEAD >/dev/null 2>&1; then
+                  echo "pre_get_sources: $submod corrupt (rev-parse failed)"
+                  needs_clean=true
+                fi
+              fi
+              if [ "$needs_clean" = true ]; then
+                echo "pre_get_sources: cleaning corrupt submodule: $submod"
+                rm -rf "$submod" ".git/modules/$submod"
+              fi
+            done
+          fi
+          echo "pre_get_sources: existing repo OK"
         fi
-        )
+      else
+        echo "pre_get_sources: no .git directory (fresh workspace)"
+      fi
+      )
 
 .lint_job:
   extends: .job-defaults
@@ -140,8 +140,8 @@ lint_bash_scripts:
   - apk add xmlstarlet
   script:
   # Exclude .git and submodules (submodules may be stale from other jobs using fetch strategy)
-  - find . -name .git -type d -prune -o -path ./submodules -prune -o -type f -name \*.sh -exec shellcheck -f checkstyle
-    {} + | tee shellcheck-checkstyle-result.xml
+  - find . -name .git -type d -prune -o -path ./submodules -prune -o -type f -name
+    \*.sh -exec shellcheck -f checkstyle {} + | tee shellcheck-checkstyle-result.xml
   after_script:
   - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > shellcheck-junit-result.xml
   artifacts:
@@ -194,31 +194,31 @@ find_haf_image:
   before_script:
     # docker-builder image already has git, bash, and curl
     # Fetch source patterns from HAF's script (single source of truth)
-    - |
-      PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh"
-      echo "Fetching source patterns from: $PATTERNS_URL"
-      if UPSTREAM_PATTERNS=$(curl -sf "$PATTERNS_URL" | sh); then
-        echo "Loaded patterns: $UPSTREAM_PATTERNS"
-        export UPSTREAM_PATTERNS
-      else
-        echo "ERROR: Could not fetch source-patterns.sh from HAF"
-        exit 1
-      fi
+  - |
+    PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh"
+    echo "Fetching source patterns from: $PATTERNS_URL"
+    if UPSTREAM_PATTERNS=$(curl -sf "$PATTERNS_URL" | sh); then
+      echo "Loaded patterns: $UPSTREAM_PATTERNS"
+      export UPSTREAM_PATTERNS
+    else
+      echo "ERROR: Could not fetch source-patterns.sh from HAF"
+      exit 1
+    fi
   script:
-    - !reference [.find_upstream_image, script]
+  - !reference [.find_upstream_image, script]
     # Rename UPSTREAM_* to HAF_UPSTREAM_* to avoid collisions with other upstream jobs
-    - |
-      if [ -f "$UPSTREAM_OUTPUT" ]; then
-        sed -i 's/^UPSTREAM_/HAF_UPSTREAM_/' "$UPSTREAM_OUTPUT"
-        echo "Renamed variables in $UPSTREAM_OUTPUT:"
-        cat "$UPSTREAM_OUTPUT"
-      fi
+  - |
+    if [ -f "$UPSTREAM_OUTPUT" ]; then
+      sed -i 's/^UPSTREAM_/HAF_UPSTREAM_/' "$UPSTREAM_OUTPUT"
+      echo "Renamed variables in $UPSTREAM_OUTPUT:"
+      cat "$UPSTREAM_OUTPUT"
+    fi
   artifacts:
     reports:
       dotenv: haf_image.env
     expire_in: 1 day
   tags:
-    - public-runner-docker
+  - public-runner-docker
 
 # Note: prepare_haf_image is no longer needed - we use pre-built images from
 # the HAF registry via find_haf_image job. The .prepare_haf_image template is
