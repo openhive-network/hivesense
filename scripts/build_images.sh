@@ -100,4 +100,32 @@ if [ -n "${PUSH:-}" ]; then
   docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}"
   docker push "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}"
   echo "Pushed images tag ${TAG}"
+
+  # Add 'latest' tags on develop branch
+  if [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH:-develop}" ]; then
+    echo "Tagging images with 'latest' tag for develop branch..."
+    docker tag "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "registry.gitlab.syncad.com/hive/hivesense:latest"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:latest"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/syncer:latest"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/pca:latest"
+    docker push "registry.gitlab.syncad.com/hive/hivesense:latest"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:latest"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:latest"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/pca:latest"
+    echo "Pushed 'latest' tags"
+  fi
+
+  # Add version tags on protected tags
+  if [ -n "${CI_COMMIT_TAG:-}" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" = "true" ]; then
+    echo "Tagging images with version tag '${CI_COMMIT_TAG}'..."
+    docker tag "registry.gitlab.syncad.com/hive/hivesense:${TAG}" "registry.gitlab.syncad.com/hive/hivesense:${CI_COMMIT_TAG}"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${CI_COMMIT_TAG}"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/syncer:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/syncer:${CI_COMMIT_TAG}"
+    docker tag "registry.gitlab.syncad.com/hive/hivesense/pca:${TAG}" "registry.gitlab.syncad.com/hive/hivesense/pca:${CI_COMMIT_TAG}"
+    docker push "registry.gitlab.syncad.com/hive/hivesense:${CI_COMMIT_TAG}"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/postgrest-rewriter:${CI_COMMIT_TAG}"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/syncer:${CI_COMMIT_TAG}"
+    docker push "registry.gitlab.syncad.com/hive/hivesense/pca:${CI_COMMIT_TAG}"
+    echo "Pushed version tags '${CI_COMMIT_TAG}'"
+  fi
 fi
