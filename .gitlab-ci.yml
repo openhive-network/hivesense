@@ -23,7 +23,8 @@ variables:
   GIT_SUBMODULE_STRATEGY: recursive
   # Temporary: separate clone path prevents clone-strategy jobs from erasing
   # fetch workspaces during transition. Remove once all projects use fetch.
-  GIT_CLONE_PATH: $CI_BUILDS_DIR/fetch/$CI_RUNNER_SHORT_TOKEN/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
+  GIT_CLONE_PATH: 
+    $CI_BUILDS_DIR/fetch/$CI_RUNNER_SHORT_TOKEN/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
   GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
   # Allow file:// protocol for nested submodules with relative paths
   # HAF's hive submodule uses relative paths that resolve to file:// URLs
@@ -50,6 +51,7 @@ variables:
   BUILDER_IMAGE_TAG: "$TEST_HAF_IMAGE_TAG"
   BUILDER_IMAGE_PATH: "registry.gitlab.syncad.com/hive/haf/ci-base-image${BUILDER_IMAGE_TAG}"
 
+  UPSTREAM_OVERRIDE_TAG: ef94c4dc7d20cfdc8b127ea384d6bbefc1f65b9d
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 # Common CI templates from common-ci-configuration
@@ -137,10 +139,12 @@ lint_bash_scripts:
   - apk add xmlstarlet
   script:
   # Exclude .git and submodules (submodules may be stale from other jobs using fetch strategy)
-  - find . -name .git -type d -prune -o -path ./submodules -prune -o -type f -name
-    \*.sh -exec shellcheck -f checkstyle {} + | tee shellcheck-checkstyle-result.xml
+  - find . -name .git -type d -prune -o -path ./submodules -prune -o -type f 
+    -name \*.sh -exec shellcheck -f checkstyle {} + | tee 
+    shellcheck-checkstyle-result.xml
   after_script:
-  - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > shellcheck-junit-result.xml
+  - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > 
+    shellcheck-junit-result.xml
   artifacts:
     paths:
     - shellcheck-checkstyle-result.xml
@@ -154,8 +158,8 @@ lint_sql_scripts:
     name: sqlfluff/sqlfluff:2.1.4
     entrypoint: [""]
   script:
-  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres ||
-    true
+  - sqlfluff lint --format yaml --write-output sql-lint.yaml --dialect postgres 
+    || true
   - |
     if [ -f sql-lint.yaml ]; then
       echo "SQL lint results:"
