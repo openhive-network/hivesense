@@ -1,6 +1,2 @@
-[submodule "submodules/haf_api_node"]
-	path = submodules/haf_api_node
-	url = ../haf_api_node.git
-[submodule "submodules/hivemind"]
-	path = submodules/hivemind
-	url = ../hivemind.git
+# No submodules - using published Docker images instead
+# See docker/ci/compose.yml for the CI test stack

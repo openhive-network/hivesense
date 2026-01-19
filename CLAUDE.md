@@ -61,7 +61,7 @@ HiveSense is a HAF-based application for semantic search on Hive blockchain post
 ### Linting
 ```bash
 # Shell scripts (CI uses shellcheck-alpine)
-find . -name .git -prune -o -path ./submodules -prune -o -type f -name \*.sh -exec shellcheck {} +
+find . -name .git -type d -prune -o -type f -name \*.sh -exec shellcheck {} +
 
 # SQL scripts (CI uses sqlfluff)
 sqlfluff lint --dialect postgres
@@ -102,11 +102,16 @@ sqlfluff lint --dialect postgres
 - `process_blocks.sh`: Main entry point for block processing (spawns scheduler + workers)
 - `install_app.sh`: Database setup with all configuration options
 
-## Submodules
+## CI Docker Compose
 
-- `submodules/haf`: HAF (Hive Application Framework) - the blockchain indexing layer
-- `submodules/haf_api_node`: API node deployment configuration with Docker Compose
-- `submodules/hivemind`: Hivemind - structured SQL layer for Hive social data
+For CI testing, hivesense uses a self-contained Docker Compose stack in `docker/ci/`:
+
+- `docker/ci/compose.yml`: All-in-one compose file with HAF, hivemind, and hivesense services
+- `docker/ci/create_directories.sh`: Creates directory structure for CI testing
+
+The CI stack uses published Docker images from the registry rather than submodules.
+
+**For production deployments**: Use haf_api_node repo which includes hivesense yamls for operators.
 
 ## Configuration Options
 
@@ -122,11 +127,11 @@ Key parameters (see `./scripts/install_app.sh --help` for full list):
 
 ## CI Pipeline
 
-Stages: lint → build → sync → test → publish → cleanup
+Stages: detect → lint → build → sync → test → publish → cleanup
 
+- **find_haf_image**: Automatically detects latest HAF image from upstream registry
 - **lint_bash_scripts**: Shellcheck validation
 - **lint_sql_scripts**: SQLFluff validation
-- **validate_haf_commit**: Ensures HAF_COMMIT variable matches submodule and include ref
 - **build_images**: Builds and pushes Docker images
-- **sync**: Integration test with HAF API node (syncs 1M blocks)
-- **publish_release_images**: Tags releases for protected branches
+- **sync**: Integration test with HAF API node (syncs 1M blocks) using docker/ci/compose.yml
+- **publish_images**: Tags releases for protected branches

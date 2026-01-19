@@ -21,27 +21,31 @@ if [ -z "${HAF_VERSION:-}" ]; then
     HAF_VERSION=$(echo "$HAF_VERSION" | cut -c1-8)
 fi
 
-HIVEMIND_NODE_SUBMODULE_SHA=$(
-    git -C "${ROOT_SRC_PATH}/submodules/hivemind" describe --tags --exact-match HEAD 2>/dev/null ||
-    git -C "${ROOT_SRC_PATH}/submodules/hivemind" rev-parse --short=8 HEAD
-)
-REPUTATION_TRACKER_HIVEMIND_VERSION=$(
-    git -C "${ROOT_SRC_PATH}/submodules/hivemind/reputation_tracker" describe --tags --exact-match HEAD 2>/dev/null ||
-    git -C "${ROOT_SRC_PATH}/submodules/hivemind/reputation_tracker" rev-parse --short=8 HEAD
-)
+# Hivemind version must be provided via environment variable
+# No submodule dependency - CI should set HIVEMIND_VERSION
+if [ -z "${HIVEMIND_VERSION:-}" ]; then
+    # Default to a stable version if not provided
+    # This should match the version of hivemind compatible with the HAF version being used
+    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-1.27.11rc2}"
+    echo "WARN: HIVEMIND_VERSION not set, using default: $HIVEMIND_VERSION"
+fi
+
+# Reputation tracker version - use REPUTATION_TRACKER_VERSION if set, otherwise default
+if [ -z "${REPUTATION_TRACKER_VERSION:-}" ]; then
+    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.27.11rc2}"
+fi
 
 GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
 HIVESENSE_TAG=${TAG:-$(echo "$GIT_COMMIT_SHA" | cut -c1-8)}
 
-COMPOSE_PROFILES="core,admin,servers,hivemind,monitoring,ollama,hivesense"
 HIVE_API_NODE_REGISTRY="registry.gitlab.syncad.com/hive"
 PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
 # HAF_VERSION is set above from HAF_COMMIT env var
 ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
-HIVEMIND_VERSION="$HIVEMIND_NODE_SUBMODULE_SHA"
-export REPUTATION_TRACKER_VERSION="${REPUTATION_TRACKER_HIVEMIND_VERSION}"
+# HIVEMIND_VERSION is set above from env var
+export REPUTATION_TRACKER_VERSION
 HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 
 # Hivesense
@@ -58,7 +62,7 @@ HIVESENSE_VECTOR_SIZE=768
 HIVESENSE_START_BLOCK=1
 HIVESENSE_WORKERS=16
 
-export ZPOOL_MOUNT_POINT COMPOSE_PROFILES HIVE_API_NODE_REGISTRY TOP_LEVEL_DATASET_MOUNTPOINT
+export ZPOOL_MOUNT_POINT HIVE_API_NODE_REGISTRY TOP_LEVEL_DATASET_MOUNTPOINT
 export HAF_IMAGE HAF_VERSION ARGUMENTS HAF_DATA_DIRECTORY
 export HIVEMIND_VERSION HIVEMIND_SYNC_ARGS
 export HIVESENSE_IMAGE HIVESENSE_VERSION HIVESENSE_REWRITER_IMAGE HIVESENSE_INSTALLATION_ARGS HIVESENSE_OLLAMA_MODEL
@@ -66,4 +70,3 @@ export HIVESENSE_SYNC_ARGS PUBLIC_HOSTNAME
 export HIVESENSE_OLLAMA HIVESENSE_MODEL HIVESENSE_VECTOR_SIZE HIVESENSE_START_BLOCK HIVESENSE_WORKERS
 
 # End of Docker Compose environment variables ##########################################################################
-
