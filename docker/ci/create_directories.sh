@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 # Creates directory structure for HAF CI testing
 # Simplified version that doesn't require root or handle ZFS
