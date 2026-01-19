@@ -332,5 +332,6 @@ sync:
     expire_in: 1 week
     when: always
   tags:
+  - public-runner-docker
   - data-cache-storage
   - fast
