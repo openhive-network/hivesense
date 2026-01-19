@@ -1,0 +1,547 @@
+# CI-only Docker Compose for HiveSense testing
+# This file is self-contained and does not require haf_api_node submodule
+#
+# Usage:
+#   cd docker/ci
+#   docker compose up --detach
+#
+# This compose file includes only the services needed for CI testing:
+# - HAF core (haf database + hived)
+# - Connection pooling (pgbouncer)
+# - Routing/health checks (haproxy, haproxy-healthchecks)
+# - Web server (caddy) for API tests
+# - HAfAH (needed by hivemind)
+# - Reputation tracker (needed by hivemind)
+# - Hivemind (needed by hivesense)
+# - Hivesense services
+
+name: ${PROJECT_NAME:-haf}
+
+networks:
+  haf-network:
+    name: ${NETWORK_NAME:-haf}
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+services:
+  # ===========================================================================
+  # HAF Core Service
+  # ===========================================================================
+  haf:
+    image: ${HAF_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf}:${HAF_VERSION}
+    networks:
+      - haf-network
+    tty: true
+    stdin_open: true
+    init: true
+    command: "${ARGUMENTS:-}"
+    stop_grace_period: 2m
+    environment:
+      PG_ACCESS: "
+        # PgBouncer connection pooler\n
+        host    haf_block_log    hafah_user       ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        host    haf_block_log    hivemind_user    ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        host    haf_block_log    reptracker_user  ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        host    haf_block_log    hivesense_user   ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        host    postgres         haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
+        # Direct connections for install/uninstall/processing\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hafah-install-1.${NETWORK_NAME:-haf}                       trust\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-reputation-tracker-install-1.${NETWORK_NAME:-haf}          trust\n
+        host    haf_block_log    reptracker_owner ${COMPOSE_PROJECT_NAME:-haf}-reputation-tracker-block-processing-1.${NETWORK_NAME:-haf} trust\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hivemind-install-1.${NETWORK_NAME:-haf}                    trust\n
+        host    haf_block_log    hivemind         ${COMPOSE_PROJECT_NAME:-haf}-hivemind-install-1.${NETWORK_NAME:-haf}                    trust\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hivemind-block-processing-1.${NETWORK_NAME:-haf}           trust\n
+        host    haf_block_log    hivemind         ${COMPOSE_PROJECT_NAME:-haf}-hivemind-block-processing-1.${NETWORK_NAME:-haf}           trust\n
+        host    haf_block_log    hivemind         ${COMPOSE_PROJECT_NAME:-haf}-hivemind-postgrest-server-1.${NETWORK_NAME:-haf}           trust\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
+        host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
+        host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-sync-1.${NETWORK_NAME:-haf}                      trust\n
+        "
+      SHM_DIR: /home/hived/shm_dir
+      ROCKSDB_DIR: /home/hived/rocksdb_dir
+      WAL_DIR: /home/hived/wal_dir
+      PGCTLTIMEOUT: 600
+      OVERRIDE_LD_PRELOAD: ""
+    volumes:
+      - type: bind
+        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/
+        target: /home/hived/datadir
+      - type: bind
+        source: ${HAF_LOG_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/logs}/postgresql
+        target: /home/hived/postgresql_logs/
+      - type: bind
+        source: ${HAF_SHM_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory}/
+        target: /home/hived/shm_dir
+      - type: bind
+        source: ${HAF_ROCKSDB_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory}/
+        target: /home/hived/rocksdb_dir
+      - type: bind
+        source: ${HAF_WAL_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory/haf_wal}
+        target: /home/hived/wal_dir
+    shm_size: ${HAF_SHM_SIZE:-8gb}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -T2 -nv -t1 --spider http://127.0.0.1:8091/ || exit 1"]
+      interval: 10s
+      timeout: 2s
+      retries: 10
+      start_period: 72h
+
+  # ===========================================================================
+  # Connection Pooling
+  # ===========================================================================
+  pgbouncer:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/pgbouncer:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      PGBOUNCER_USERS: "hafah_user hivemind_user reptracker_user hivesense_user haf_admin pgbouncer"
+      PGBOUNCER_DB_HOST: haf
+      PGBOUNCER_DB_PORT: 5432
+      PGBOUNCER_DB_NAME: haf_block_log
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_DEFAULT_POOL_SIZE: 25
+      PGBOUNCER_RESERVE_POOL_SIZE: 5
+      PGBOUNCER_RESERVE_POOL_TIMEOUT: 3
+      PGBOUNCER_MAX_CLIENT_CONN: 200
+      PGBOUNCER_MAX_DB_CONNECTIONS: 30
+      PGBOUNCER_SERVER_IDLE_TIMEOUT: 600
+      PGBOUNCER_SERVER_LIFETIME: 3600
+      PGBOUNCER_SERVER_CHECK_DELAY: 30
+      PGBOUNCER_QUERY_WAIT_TIMEOUT: 120
+      PGBOUNCER_CLIENT_IDLE_TIMEOUT: 0
+      PGBOUNCER_CLIENT_LOGIN_TIMEOUT: 60
+      PGBOUNCER_PKT_BUF: 4096
+      PGBOUNCER_TCP_KEEPALIVE: 1
+      PGBOUNCER_TCP_KEEPCNT: 3
+      PGBOUNCER_TCP_KEEPIDLE: 60
+      PGBOUNCER_TCP_KEEPINTVL: 10
+      PGBOUNCER_LOG_CONNECTIONS: 0
+      PGBOUNCER_LOG_DISCONNECTIONS: 0
+      PGBOUNCER_STATS_PERIOD: 60
+    networks:
+      haf-network:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U haf_admin -d haf_block_log || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      haf:
+        condition: service_healthy
+
+  # ===========================================================================
+  # HAProxy Load Balancer & Health Checks
+  # ===========================================================================
+  haproxy:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      SYNC_BROADCAST_BACKEND_SERVER: "api.hive.blog"
+      SYNC_BROADCAST_BACKEND_PORT: "443"
+      SYNC_BROADCAST_BACKEND_SSL: "ssl"
+      PUBLIC_HOSTNAME: "${PUBLIC_HOSTNAME:-localhost}"
+    depends_on:
+      haproxy-healthchecks:
+        condition: service_started
+    networks:
+      - haf-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 --spider http://127.0.0.1:8001/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  haproxy-healthchecks:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy-healthchecks:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      POSTGRES_URL: postgresql://haf_admin@pgbouncer:6432/haf_block_log
+      POSTGRES_URL_REPTRACKER: postgresql://reptracker_user@pgbouncer:6432/haf_block_log
+      POSTGRES_URL_HIVESENSE: postgresql://hivesense_user@pgbouncer:6432/haf_block_log
+      EXPECTED_BLOCK_TIME: "${EXPECTED_BLOCK_TIME:-}"
+    healthcheck:
+      test: ["CMD-SHELL", "/healthcheck_healthcheck.sh || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    networks:
+      - haf-network
+
+  # ===========================================================================
+  # Caddy Web Server (for HTTPS and Swagger tests)
+  # ===========================================================================
+  caddy:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/caddy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-localhost}
+      CADDY_SITES: ${CADDY_SITES:-${PUBLIC_HOSTNAME:-localhost}}
+      JSONRPC_API_SERVER_NAME: ${JSONRPC_API_SERVER_NAME:-drone}
+      ADMIN_ENDPOINT_PROTOCOL: ${ADMIN_ENDPOINT_PROTOCOL:-https}
+    volumes:
+      - type: bind
+        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/logs/caddy
+        target: /var/log/caddy
+        read_only: false
+      - type: volume
+        source: caddy_data
+        target: /data
+      - type: volume
+        source: caddy_config
+        target: /config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -T2 -nv -t1 --spider http://127.0.0.1:2019/reverse_proxy/upstreams || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    networks:
+      - haf-network
+
+  # ===========================================================================
+  # Swagger UI
+  # ===========================================================================
+  swagger:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/swagger-ui:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      PROJECT: ${COMPOSE_PROJECT_NAME:-haf}
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - haf-network
+
+  # ===========================================================================
+  # HAfAH (HAF Account History) - Dependency for Hivemind
+  # ===========================================================================
+  hafah-install:
+    image: ${HAFAH_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hafah}:${HAFAH_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      POSTGRES_URL: postgresql://haf_admin@haf/haf_block_log
+    command:
+      - install_app
+      - --swagger-url=${PUBLIC_HOSTNAME:-localhost}
+    networks:
+      haf-network:
+    depends_on:
+      haf:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Reputation Tracker - Dependency for Hivemind
+  # ===========================================================================
+  reputation-tracker-install:
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      POSTGRES_HOST: haf
+    networks:
+      haf-network:
+    command:
+      - install_app
+      - --swagger-url=${PUBLIC_HOSTNAME:-localhost}
+      - --is_forking=${REPUTATION_TRACKER_IS_FORKING:-TRUE}
+    depends_on:
+      haf:
+        condition: service_healthy
+
+  reputation-tracker-block-processing:
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      POSTGRES_HOST: haf
+      POSTGRES_USER: reptracker_owner
+    networks:
+      haf-network:
+    command:
+      - process_blocks
+    healthcheck:
+      test: ["CMD-SHELL","/app/block-processing-healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 48h
+    depends_on:
+      reputation-tracker-install:
+        condition: service_completed_successfully
+      haf:
+        condition: service_healthy
+
+  reputation-tracker-postgrest:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_DB_URI: postgresql://reptracker_user@pgbouncer:6432/haf_block_log?application_name=reputation_tracker_postgrest
+      PGRST_DB_SCHEMA: reptracker_endpoints
+      PGRST_DB_ANON_ROLE: reptracker_user
+      PGRST_DB_POOL: 6
+      PGRST_DB_ROOT_SPEC: root
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+      PGRST_DB_EXTRA_SEARCH_PATH: reptracker_app
+      PGRST_LOG_LEVEL: error
+    labels:
+      - "io.hive.swagger.url=/reputation-api/"
+      - "io.hive.swagger.name=Reputation Tracker"
+      - "io.hive.swagger.order=5"
+      - "io.hive.healthcheck.port=7009"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:3001/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    networks:
+      haf-network:
+    depends_on:
+      reputation-tracker-install:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+
+  reputation-tracker-postgrest-rewriter:
+    image: ${REPUTATION_TRACKER_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker/postgrest-rewriter}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    depends_on:
+      reputation-tracker-postgrest:
+        condition: service_healthy
+    networks:
+      - haf-network
+
+  # ===========================================================================
+  # Hivemind - Social Data Layer (Dependency for Hivesense)
+  # ===========================================================================
+  hivemind-install:
+    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION}
+    networks:
+      haf-network:
+    command:
+      - "setup"
+      - "--database-admin-url=postgresql://haf_admin@haf/haf_block_log"
+      - "--statement-timeout=${HIVEMIND_STATEMENT_TIMEOUT:-5000}"
+      - "--swagger-url=${PUBLIC_HOSTNAME:-localhost}"
+    depends_on:
+      haf:
+        condition: service_healthy
+      hafah-install:
+        condition: service_completed_successfully
+      reputation-tracker-install:
+        condition: service_completed_successfully
+
+  hivemind-block-processing:
+    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION}
+    networks:
+      haf-network:
+    command:
+      - "sync"
+      - "--database-url=postgresql://hivemind@haf/haf_block_log"
+      - "--database-admin-url=postgresql://haf_admin@haf/haf_block_log"
+      - "${HIVEMIND_SYNC_ARGS:-}"
+    healthcheck:
+      test: ["CMD-SHELL","/home/hivemind/block-processing-healthcheck.sh || exit 1"]
+      interval: 10s
+      timeout: 2s
+      retries: 10
+      start_period: 72h
+    stop_grace_period: 30s
+    stop_signal: SIGINT
+    depends_on:
+      haf:
+        condition: service_healthy
+      hivemind-install:
+        condition: service_completed_successfully
+
+  hivemind-postgrest-server:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    networks:
+      haf-network:
+    environment:
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_SERVER_PORT: 8080
+      PGRST_DB_URI: "postgresql://hivemind_user@pgbouncer:6432/haf_block_log?application_name=hive-mind-postgrest"
+      PGRST_DB_SCHEMA: hivemind_endpoints
+      PGRST_DB_ANON_ROLE: hivemind_user
+      PGRST_DB_POOL: 10
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+      PGRST_LOG_LEVEL: error
+    labels:
+      - "io.hive.swagger.url=/hivemind-api/"
+      - "io.hive.swagger.name=Hivemind"
+      - "io.hive.swagger.order=3"
+      - "io.hive.healthcheck.port=7002"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:3001/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    depends_on:
+      hivemind-install:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+
+  hivemind-postgrest-rewriter:
+    image: ${HIVEMIND_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind/postgrest-rewriter}:${HIVEMIND_VERSION}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    depends_on:
+      hivemind-postgrest-server:
+        condition: service_healthy
+    networks:
+      - haf-network
+
+  # ===========================================================================
+  # Hivesense Services
+  # ===========================================================================
+  hivesense-ollama:
+    image: ${OLLAMA_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/ollama}:${OLLAMA_VERSION:-0.6.5}
+    environment:
+      - TZ=America/New_York
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=16
+      - OLLAMA_NUM_THREADS=16
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_MODELS=/tmp/ollama
+    tty: true
+    networks:
+      haf-network:
+    volumes:
+      - type: bind
+        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/hivesense/ollama
+        target: /tmp/ollama
+    entrypoint: /bin/sh
+    command: >
+      -c "
+        ollama serve &
+
+        until ollama list > /dev/null 2>&1; do
+          echo 'Waiting for ollama to start...'
+          sleep 1
+        done
+
+        echo 'Pulling model...'
+        ollama pull ${HIVESENSE_MODEL:-yxchia/multilingual-e5-base:F16}
+        echo 'Ready.'
+
+        wait
+      "
+
+  hivesense-install-schema:
+    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION}
+    environment:
+      POSTGRES_HOST: haf
+    command:
+      - install_app
+      - "--llm=${HIVESENSE_MODEL:-yxchia/multilingual-e5-base:F16}"
+      - "--vector_size=${HIVESENSE_VECTOR_SIZE:-768}"
+      - "--ollama=${HIVESENSE_OLLAMA:-http://haproxy:7012}"
+      - "--start_block=${HIVESENSE_START_BLOCK:-1}"
+      - "--parallel_workers=${HIVESENSE_WORKERS:-16}"
+      - "--embedding_batch_size=${HIVESENSE_EMBEDDING_BATCH_SIZE:-100}"
+      - "--tokenizer-model=${HIVESENSE_TOKENIZER_MODEL_NAME:-e5-base}"
+      - "--tokens_per_chunk=${HIVESENSE_TOKENS_PER_CHUNK:-512}"
+      - "--overlap_amount=${HIVESENSE_OVERLAP_AMOUNT:-0.15}"
+      - "--use-halfvec-index=${HIVESENSE_USE_HALFVEC_INDEX:-TRUE}"
+      - "--store-halfvec-embeddings=${HIVESENSE_STORE_HALFVEC_EMBEDDINGS:-TRUE}"
+      - "--document-prefix=${HIVESENSE_DOCUMENT_PREFIX-passage: }"
+      - "--query-prefix=${HIVESENSE_QUERY_PREFIX-query: }"
+      - "--min-token-threshold=${HIVESENSE_MIN_TOKEN_THRESHOLD:-75}"
+      - "--min-token-search-threshold=${HIVESENSE_MIN_TOKEN_SEARCH_THRESHOLD:-0}"
+      - "--swagger-url=${PUBLIC_HOSTNAME:-localhost}/"
+      - "--use-reduced-embeddings=${HIVESENSE_USE_REDUCED_EMBEDDINGS:-true}"
+      - "--reduced-matrix-source=${HIVESENSE_MATRIX_SOURCE:-https://gitlab.syncad.com/hive/hivesense/-/wikis/uploads/0eebabf30d7cceb5776cb62c41abb2c9/projection_matrix_768_128_20250722.json.gz}"
+      - "--config-dir=/hivesense/config"
+      - "--reduced-dim=${HIVESENSE_REDUCED_DIMENSION:-128}"
+      - "--hnsw-m=${HIVESENSE_HNSW_M:-16}"
+      - "--hnsw-ef-construction=${HIVESENSE_HNSW_EF_CONSTRUCTION:-200}"
+      - "--maintenance-work-mem=${HIVESENSE_MAINTENANCE_WORK_MEM:-28}"
+    volumes:
+      - type: bind
+        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/hivesense/config
+        target: /hivesense/config
+    networks:
+      haf-network:
+    depends_on:
+      haf:
+        condition: service_healthy
+      hivemind-install:
+        condition: service_completed_successfully
+
+  hivesense-sync:
+    image: ${HIVESENSE_SYNCER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/syncer}:${HIVESENSE_VERSION}
+    environment:
+      POSTGRES_URI: postgresql://hivesense_owner@haf/haf_block_log?application_name=hivesense_sync
+      HIVESENSE_API: ${HIVESENSE_SYNC_API:-https://api.hive.blog/hivesense-api}
+      LOG_LEVEL: INFO
+    init: true
+    networks:
+      haf-network:
+    depends_on:
+      hivesense-install-schema:
+        condition: service_completed_successfully
+      haf:
+        condition: service_healthy
+
+  hivesense-postgrest:
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    environment:
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_DB_URI: postgresql://hivesense_user@pgbouncer:6432/haf_block_log?application_name=hivesense_postgrest
+      PGRST_DB_SCHEMA: hivesense_endpoints
+      PGRST_DB_ANON_ROLE: hivesense_user
+      PGRST_DB_POOL: 6
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+      PGRST_DB_ROOT_SPEC: root
+      PGRST_DB_EXTRA_SEARCH_PATH: hivesense_app
+    networks:
+      haf-network:
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:3001/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    labels:
+      - "io.hive.swagger.url=/hivesense-api/"
+      - "io.hive.swagger.name=HiveSense"
+      - "io.hive.swagger.order=4"
+      - "io.hive.healthcheck.port=7011"
+    depends_on:
+      hivesense-install-schema:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+
+  hivesense-postgrest-rewriter:
+    image: ${HIVESENSE_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/postgrest-rewriter}:${HIVESENSE_VERSION}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 1m
+    init: true
+    depends_on:
+      hivesense-postgrest:
+        condition: service_healthy
+    networks:
+      - haf-network

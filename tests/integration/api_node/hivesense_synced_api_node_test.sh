@@ -5,7 +5,7 @@ HOST_NAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # Get the directory where docker compose is running
 SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
-COMPOSE_DIR="${SCRIPTPATH}/../../../submodules/haf_api_node"
+COMPOSE_DIR="${SCRIPTPATH}/../../../docker/ci"
 
 query_database() {
   query=$1

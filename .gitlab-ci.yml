@@ -19,17 +19,9 @@ variables:
   # don't reduce server CPU and make fetch less effective.
   GIT_STRATEGY: fetch
   GIT_DEPTH: 0
-  GIT_SUBMODULE_DEPTH: 0
-  GIT_SUBMODULE_STRATEGY: recursive
   # Temporary: separate clone path prevents clone-strategy jobs from erasing
   # fetch workspaces during transition. Remove once all projects use fetch.
   GIT_CLONE_PATH: $CI_BUILDS_DIR/fetch/$CI_RUNNER_SHORT_TOKEN/$CI_CONCURRENT_ID/$CI_PROJECT_PATH
-  GIT_SUBMODULE_UPDATE_FLAGS: --jobs 4
-  # Allow file:// protocol for nested submodules with relative paths
-  # HAF's hive submodule uses relative paths that resolve to file:// URLs
-  GIT_CONFIG_COUNT: 1
-  GIT_CONFIG_KEY_0: protocol.file.allow
-  GIT_CONFIG_VALUE_0: always
   # =============================================================================
   # Upstream Image Detection (No Submodules Required)
   # =============================================================================
@@ -83,36 +75,6 @@ default:
           echo "pre_get_sources: main repository corrupt, forcing fresh clone"
           rm -rf .git
         else
-          # Main repo OK - check and clean corrupt submodules
-          # Check both the working dir and .git/modules/ since either can be corrupt
-          if [ -f ".gitmodules" ]; then
-            git config --file .gitmodules --get-regexp path 2>/dev/null | awk '{print $2}' | while read submod; do
-              needs_clean=false
-              [ -z "$submod" ] && continue
-              # Check if submodule working directory exists but is corrupt
-              if [ -d "$submod" ] && [ -f "$submod/.git" ]; then
-                if ! git -C "$submod" rev-parse HEAD >/dev/null 2>&1; then
-                  needs_clean=true
-                fi
-                # Also check if origin remote is valid (broken remotes cause fetch failures)
-                if ! git -C "$submod" remote get-url origin >/dev/null 2>&1; then
-                  echo "pre_get_sources: $submod has broken origin remote"
-                  needs_clean=true
-                fi
-              fi
-              # Check if .git/modules exists but is corrupt (even if working dir is gone)
-              if [ -d ".git/modules/$submod" ]; then
-                if ! git --git-dir=".git/modules/$submod" rev-parse HEAD >/dev/null 2>&1; then
-                  echo "pre_get_sources: $submod corrupt (rev-parse failed)"
-                  needs_clean=true
-                fi
-              fi
-              if [ "$needs_clean" = true ]; then
-                echo "pre_get_sources: cleaning corrupt submodule: $submod"
-                rm -rf "$submod" ".git/modules/$submod"
-              fi
-            done
-          fi
           echo "pre_get_sources: existing repo OK"
         fi
       else
@@ -137,8 +99,8 @@ lint_bash_scripts:
   before_script:
   - apk add xmlstarlet
   script:
-  # Exclude .git and submodules (submodules may be stale from other jobs using fetch strategy)
-  - find . -name .git -type d -prune -o -path ./submodules -prune -o -type f -name
+  # Exclude .git directory
+  - find . -name .git -type d -prune -o -type f -name
     \*.sh -exec shellcheck -f checkstyle {} + | tee shellcheck-checkstyle-result.xml
   after_script:
   - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > shellcheck-junit-result.xml
@@ -282,8 +244,8 @@ sync:
     HAF_COMMIT: "${HAF_UPSTREAM_COMMIT}"
     POSTGRES_ACCESS: postgresql://haf_admin@docker:5432/haf_block_log
     PUBLIC_HOSTNAME: "localhost"
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: 0 # prevent fatal: remote error: upload-pack: not our ref when recursively updating tags
+    # Compose file location for CI tests
+    COMPOSE_DIR: "${CI_PROJECT_DIR}/docker/ci"
   timeout: 1 hours
   before_script:
   - |
@@ -292,9 +254,6 @@ sync:
     echo -e "\e[0Ksection_end:$(date +%s):login\r\e[0K"
     echo -e "\e[0Ksection_start:$(date +%s):git[collapsed=true]\r\e[0KConfiguring Git..."
     git config --global --add safe.directory "$CI_PROJECT_DIR"
-    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/haf_api_node"
-    git config --global --add safe.directory "$CI_PROJECT_DIR/submodules/hivemind"
-    git submodule foreach --recursive 'git fetch --tags'
     echo -e "\e[0Ksection_end:$(date +%s):git\r\e[0K"
   - |
     # NFS fallback: Copy HAF data from NFS if local cache is missing
@@ -339,32 +298,29 @@ sync:
     echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
 
     ls -la $(pwd)
-    OLDPWD=$(pwd)
-    cd submodules/haf_api_node || exit 1
-    docker compose logs --no-log-prefix haf > ${OLDPWD}/docker/haf.log
-    docker compose logs --no-log-prefix haproxy > ${OLDPWD}/docker/haproxy.log
-    docker compose logs --no-log-prefix hivesense-install-schema > ${OLDPWD}/docker/hivesense-install.log
-    docker compose logs --no-log-prefix hivesense-sync > ${OLDPWD}/docker/hivesense-sync.log
-    docker compose logs --no-log-prefix hivesense-postgrest > ${OLDPWD}/docker/hivesense-postgrest.log
-    docker compose logs --no-log-prefix swagger > ${OLDPWD}/docker/hivesense-swagger.log
-    docker compose logs --no-log-prefix hivesense-postgrest-rewriter > ${OLDPWD}/docker/hivesense-postgrest-rewriter.log
-    docker compose logs --no-log-prefix hivesense-ollama > ${OLDPWD}/docker/hivesense-ollama.log
-    cd "$OLDPWD" || exit 1
+    COMPOSE_DIR="${CI_PROJECT_DIR}/docker/ci"
+    LOGS_DIR="${CI_PROJECT_DIR}/docker"
+    mkdir -p "$LOGS_DIR"
 
-    # Create docker directory if it doesn't exist
-    mkdir -p docker
+    # Collect container logs using local compose path
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix haf > ${LOGS_DIR}/haf.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix haproxy > ${LOGS_DIR}/haproxy.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-install-schema > ${LOGS_DIR}/hivesense-install.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-sync > ${LOGS_DIR}/hivesense-sync.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-postgrest > ${LOGS_DIR}/hivesense-postgrest.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix swagger > ${LOGS_DIR}/hivesense-swagger.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-postgrest-rewriter > ${LOGS_DIR}/hivesense-postgrest-rewriter.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-ollama > ${LOGS_DIR}/hivesense-ollama.log || true
 
     # Check if jmeter results exist and add them to the archive
     if [ -d "jmeter_results" ]; then
       echo "Adding JMeter benchmark results to container logs archive..."
       # Add jmeter results to the tar file
-      tar -cf - $(pwd)/docker/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
+      tar -cf - ${LOGS_DIR}/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
     else
       # Just include the logs if no jmeter results
-      tar -cf - $(pwd)/docker/*.log | gzip > docker/container-logs.tar.gz
+      tar -cf - ${LOGS_DIR}/*.log | gzip > docker/container-logs.tar.gz
     fi
-
-
 
     # Manually remove the copy of the replay data to preserve disk space on the replay server
     sudo rm -rf ${POOL_DIR}

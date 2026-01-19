@@ -59,7 +59,8 @@ HAF_SHM_DIRECTORY="${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory"
 
 export ZPOOL_MOUNT_POINT TOP_LEVEL_DATASET_MOUNTPOINT HAF_DATA_DIRECTORY HAF_SHM_DIRECTORY
 
-"${ROOT_SRC_PATH}/submodules/haf_api_node/create_directories.sh" --data-dir="${HAF_DATA_DIRECTORY}"
+# Create directories using local script (no submodule dependency)
+"${ROOT_SRC_PATH}/docker/ci/create_directories.sh" --data-dir="${HAF_DATA_DIRECTORY}"
 
 if [ -n "${BLOCK_LOG_DIRECTORY}" ]; then
   cp "${BLOCK_LOG_DIRECTORY}/block_log" "${HAF_DATA_DIRECTORY}/blockchain/block_log"
@@ -68,10 +69,11 @@ if [ -n "${BLOCK_LOG_DIRECTORY}" ]; then
   chmod a+w "${HAF_DATA_DIRECTORY}/blockchain/block_log.artifacts"
 fi
 
-cp "$ROOT_SRC_PATH/submodules/haf_api_node/.env.example" "$ROOT_SRC_PATH/submodules/haf_api_node/.env"
+# Start Docker Compose using local CI compose file
+COMPOSE_DIR="${ROOT_SRC_PATH}/docker/ci"
 
-# Save current dir and move into API node directory
+# Save current dir and move into CI compose directory
 ORIGINAL_DIR=$(pwd)
-cd "$ROOT_SRC_PATH/submodules/haf_api_node"
+cd "$COMPOSE_DIR"
   timeout -s INT -k 1m 20m docker compose up --detach --quiet-pull
 cd "$ORIGINAL_DIR"

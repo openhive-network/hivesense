@@ -4,7 +4,7 @@ set -e
 
 # Get the directory where docker compose is running
 SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
-COMPOSE_DIR="${SCRIPTPATH}/../../submodules/haf_api_node"
+COMPOSE_DIR="${SCRIPTPATH}/../../docker/ci"
 
 wait_for_hivesense_startup() {
     COMMAND="SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'i' AND n.nspname = 'hivesense_app' AND c.relname = hivesense_app.get_hnsw_index_name());"
