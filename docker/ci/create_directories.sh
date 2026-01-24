@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Creates directory structure for HAF CI testing
 # Simplified version that doesn't require root or handle ZFS
@@ -77,13 +77,13 @@ echo "Setting permissions..."
 
 # Set ownership - use sudo if available, otherwise try without
 set_ownership() {
-  local path="$1"
-  local owner="$2"
+  _path="$1"
+  _owner="$2"
 
   if command -v sudo >/dev/null 2>&1; then
-    sudo chown -R "$owner" "$path" 2>/dev/null || true
+    sudo chown -R "$_owner" "$_path" 2>/dev/null || true
   else
-    chown -R "$owner" "$path" 2>/dev/null || true
+    chown -R "$_owner" "$_path" 2>/dev/null || true
   fi
 }
 
