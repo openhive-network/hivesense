@@ -26,13 +26,13 @@ fi
 if [ -z "${HIVEMIND_VERSION:-}" ]; then
     # Default to a stable version if not provided
     # This should match the version of hivemind compatible with the HAF version being used
-    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-1.27.11rc2}"
+    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-1.27.11}"
     echo "WARN: HIVEMIND_VERSION not set, using default: $HIVEMIND_VERSION"
 fi
 
 # Reputation tracker version - use REPUTATION_TRACKER_VERSION if set, otherwise default
 if [ -z "${REPUTATION_TRACKER_VERSION:-}" ]; then
-    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.27.11rc2}"
+    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.27.12rc2}"
 fi
 
 GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
@@ -43,7 +43,7 @@ PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
 # HAF_VERSION is set above from HAF_COMMIT env var
-ARGUMENTS="--replay-blockchain --block-stats-report-output=NOTIFY --block-stats-report-type=FULL --notifications-endpoint=hived-pme:9185 --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
+ARGUMENTS="--replay-blockchain --stop-at-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
 # HIVEMIND_VERSION is set above from env var
 export REPUTATION_TRACKER_VERSION
 HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"

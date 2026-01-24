@@ -93,7 +93,7 @@ services:
   # Connection Pooling
   # ===========================================================================
   pgbouncer:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/pgbouncer:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/pgbouncer:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       PGBOUNCER_USERS: "hafah_user hivemind_user reptracker_user hivesense_user haf_admin pgbouncer"
       PGBOUNCER_DB_HOST: haf
@@ -135,7 +135,7 @@ services:
   # HAProxy Load Balancer & Health Checks
   # ===========================================================================
   haproxy:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       SYNC_BROADCAST_BACKEND_SERVER: "api.hive.blog"
       SYNC_BROADCAST_BACKEND_PORT: "443"
@@ -154,7 +154,7 @@ services:
       start_period: 30s
 
   haproxy-healthchecks:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy-healthchecks:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/haproxy-healthchecks:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       POSTGRES_URL: postgresql://haf_admin@pgbouncer:6432/haf_block_log
       POSTGRES_URL_REPTRACKER: postgresql://reptracker_user@pgbouncer:6432/haf_block_log
@@ -173,7 +173,7 @@ services:
   # Caddy Web Server (for HTTPS and Swagger tests)
   # ===========================================================================
   caddy:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/caddy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/caddy:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     ports:
       - 80:80
       - 443:443
@@ -207,7 +207,7 @@ services:
   # Swagger UI
   # ===========================================================================
   swagger:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/swagger-ui:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/swagger:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       PROJECT: ${COMPOSE_PROJECT_NAME:-haf}
     volumes:
@@ -227,7 +227,7 @@ services:
   # HAfAH (HAF Account History) - Dependency for Hivemind
   # ===========================================================================
   hafah-install:
-    image: ${HAFAH_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hafah}:${HAFAH_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HAFAH_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hafah}:${HAFAH_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       POSTGRES_URL: postgresql://haf_admin@haf/haf_block_log
     command:
@@ -243,7 +243,7 @@ services:
   # Reputation Tracker - Dependency for Hivemind
   # ===========================================================================
   reputation-tracker-install:
-    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       POSTGRES_HOST: haf
     networks:
@@ -257,7 +257,7 @@ services:
         condition: service_healthy
 
   reputation-tracker-block-processing:
-    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: reptracker_owner
@@ -278,7 +278,7 @@ services:
         condition: service_healthy
 
   reputation-tracker-postgrest:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       PGRST_ADMIN_SERVER_PORT: 3001
       PGRST_DB_URI: postgresql://reptracker_user@pgbouncer:6432/haf_block_log?application_name=reputation_tracker_postgrest
@@ -309,7 +309,7 @@ services:
         condition: service_healthy
 
   reputation-tracker-postgrest-rewriter:
-    image: ${REPUTATION_TRACKER_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker/postgrest-rewriter}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${REPUTATION_TRACKER_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker/postgrest-rewriter}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     healthcheck:
       test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
       interval: 10s
@@ -366,7 +366,7 @@ services:
         condition: service_completed_successfully
 
   hivemind-postgrest-server:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     networks:
       haf-network:
     environment:
@@ -502,7 +502,7 @@ services:
         condition: service_healthy
 
   hivesense-postgrest:
-    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11rc2}}
+    image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.27.11}}
     environment:
       PGRST_ADMIN_SERVER_PORT: 3001
       PGRST_DB_URI: postgresql://hivesense_user@pgbouncer:6432/haf_block_log?application_name=hivesense_postgrest
