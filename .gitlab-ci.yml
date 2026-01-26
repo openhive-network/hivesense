@@ -9,10 +9,10 @@ stages:
 
 variables:
   # Variables required by Common CI jobs
-  CI_COMMON_JOB_VERSION: "c5a368f7cdb5b4acacb710094971d48a3432af5b"
-  DOCKER_BUILDER_TAG: "$CI_COMMON_JOB_VERSION"
-  DOCKER_DIND_TAG: "$CI_COMMON_JOB_VERSION"
-  IMAGE_REMOVER_TAG: "$CI_COMMON_JOB_VERSION"
+  # Docker images use 'latest' tag - docker-builder images not built on every commit
+  DOCKER_BUILDER_TAG: "latest"
+  DOCKER_DIND_TAG: "latest"
+  IMAGE_REMOVER_TAG: "latest"
   # Git configuration
   # Fetch strategy reuses workspace between jobs, reducing GitLab server load.
   # Full clone (depth 0) enables efficient incremental fetches - shallow clones
