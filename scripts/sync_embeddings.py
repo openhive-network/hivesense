@@ -333,6 +333,21 @@ def main():
                 with conn.cursor() as cur:
                     cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (current_block,))
                 conn.commit()
+                # Advance hivesense_app events_id so HAF can clean up events_queue
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE hafd.contexts
+                        SET events_id = sub.max_event_id
+                        FROM (
+                            SELECT COALESCE(MAX(id), 0) AS max_event_id
+                            FROM hafd.events_queue
+                            WHERE block_num <= %s
+                              AND event != 'BACK_FROM_FORK'
+                        ) sub
+                        WHERE name = 'hivesense_app'
+                          AND events_id < sub.max_event_id
+                    """, (current_block,))
+                conn.commit()
                 last_seen_current_block_num = current_block
             time.sleep(3)
             continue
@@ -403,6 +418,21 @@ def main():
                 cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
                 last_seen_current_block_num = max_last_vectors_block
 
+        conn.commit()
+        # Advance hivesense_app events_id so HAF can clean up events_queue
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hafd.contexts
+                SET events_id = sub.max_event_id
+                FROM (
+                    SELECT COALESCE(MAX(id), 0) AS max_event_id
+                    FROM hafd.events_queue
+                    WHERE block_num <= %s
+                      AND event != 'BACK_FROM_FORK'
+                ) sub
+                WHERE name = 'hivesense_app'
+                  AND events_id < sub.max_event_id
+            """, (max_last_vectors_block,))
         conn.commit()
 
         # Optionally create indexes if caught up
