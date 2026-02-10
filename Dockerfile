@@ -14,6 +14,14 @@ WORKDIR /home/haf_admin
 
 ENTRYPOINT [ "/bin/bash", "-c" ]
 
+FROM alpine AS version-injection
+RUN apk add --no-cache git
+COPY . /tmp/src
+WORKDIR /tmp/src
+RUN API_VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo dev)" \
+    && sed -i 's|"version": "[^"]*"|"version": "'"$API_VERSION"'"|' endpoints/endpoint_schema.sql \
+    && sed -i 's|^  version: .*|  version: '"$API_VERSION"'|' endpoints/endpoint_schema.sql
+
 FROM psql_client AS full
 
 ARG BUILD_TIME
@@ -51,7 +59,7 @@ COPY scripts/uninstall_app.sh /app/scripts/uninstall_app.sh
 COPY scripts/process_blocks.sh /app/scripts/process_blocks.sh
 COPY scripts/matrix_handler.sh /app/scripts/matrix_handler.sh
 COPY db /app/db
-COPY endpoints /app/endpoints
+COPY --from=version-injection /tmp/src/endpoints /app/endpoints
 COPY docker/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
