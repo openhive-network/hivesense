@@ -41,6 +41,10 @@ done
 
 TAG=${TAG:-$(echo "$GIT_COMMIT_SHA" | cut -c1-8)}
 
+# Resolve API version from git tags for OpenAPI spec injection
+git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" fetch --tags --quiet 2>/dev/null || true
+API_VERSION="$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" describe --tags --abbrev=0 2>/dev/null || echo dev)"
+
 if [ -z "$TAG" ]; then
   echo "No tag, please pass it at first argument" >&2
   exit 1
@@ -65,6 +69,7 @@ echo "Building hivesense..."
 docker build \
   --cache-from "registry.gitlab.syncad.com/hive/hivesense:develop" \
   --build-arg BUILDKIT_INLINE_CACHE=1 \
+  --build-arg API_VERSION="$API_VERSION" \
   -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" \
   "${SCRIPTPATH}/.."
 
