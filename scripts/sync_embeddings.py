@@ -391,18 +391,26 @@ def main():
                 resolved.append((op, post_id))
 
         max_last_vectors_block = 0
+        batch_start = time.monotonic()
+        inserts = 0
+        deletes = 0
+        skipped = 0
         # apply each operation in one batch transaction
         with conn.cursor() as cur:
             for op, post_id in resolved:
                 last_vectors_block = op.get("last_vectors_block")
                 if last_vectors_block > max_last_vectors_block:
                     max_last_vectors_block = last_vectors_block
-                logging.info(
+                logging.debug(
                     "Applying %s %s/%s (seq %s, block %s)",
                     op["op"], op["author"], op["permlink"],
                     op["sync_seq"], last_vectors_block
                 )
                 apply_op(cur, op, post_id)
+                if op["op"] == "delete":
+                    deletes += 1
+                else:
+                    inserts += 1
 
             # advance local sequence & visibility
             max_seq = max(op["sync_seq"] for op, _ in resolved)
@@ -434,6 +442,16 @@ def main():
                   AND events_id < sub.max_event_id
             """, (max_last_vectors_block,))
         conn.commit()
+
+        elapsed = time.monotonic() - batch_start
+        total_ops = inserts + deletes + skipped
+        ops_per_sec = total_ops / elapsed if elapsed > 0 else 0
+        skip_part = f", {skipped} skipped" if skipped else ""
+        logging.info(
+            "Applied %d ops (%d inserts, %d deletes%s) in %.1fs (%.1f ops/s) | seq=%s block=%s",
+            total_ops, inserts, deletes, skip_part,
+            elapsed, ops_per_sec, max_seq, max_last_vectors_block
+        )
 
         # Optionally create indexes if caught up
         if max_block is not None:
