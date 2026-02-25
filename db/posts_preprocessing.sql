@@ -28,6 +28,9 @@ def clean(text: str) -> str:
     # 1) Unescape HTML entities like &nbsp;
     text = html.unescape(text)
 
+    # 1b) Strip null bytes that html.unescape may produce from &#0; entities
+    text = text.replace('\x00', '')
+
     # 2) Parse and strip unwanted tags
     soup = BeautifulSoup(text, 'lxml')
     for tag in soup(['script', 'style', 'img', 'table']):
