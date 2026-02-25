@@ -362,7 +362,7 @@ STABLE
 AS
 $$
 DECLARE
-  __head_of_irreversible_block INT;
+  __head_of_irreversible_block BIGINT;
 BEGIN
 
 
