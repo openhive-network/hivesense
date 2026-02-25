@@ -457,7 +457,7 @@ def main():
         if max_block is not None:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT created_at FROM hafd.blocks WHERE num = %s",
+                    "SELECT created_at FROM hafd.blocks WHERE block_id = %s",
                     (max_block,)
                 )
                 row = cur.fetchone()
