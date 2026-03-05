@@ -42,7 +42,7 @@ variables:
   BUILDER_IMAGE_TAG: "$TEST_HAF_IMAGE_TAG"
   BUILDER_IMAGE_PATH: "registry.gitlab.syncad.com/hive/haf/ci-base-image${BUILDER_IMAGE_TAG}"
 
-  UPSTREAM_OVERRIDE_TAG: ef94c4dc7d20cfdc8b127ea384d6bbefc1f65b9d
+
 include:
 - template: Workflows/Branch-Pipelines.gitlab-ci.yml
 # Common CI templates from common-ci-configuration
@@ -149,13 +149,13 @@ find_haf_image:
   variables:
     UPSTREAM_REPO_URL: "https://gitlab.syncad.com/hive/haf.git"
     UPSTREAM_REGISTRY: "registry.gitlab.syncad.com/hive/haf"
-    UPSTREAM_BRANCH: "develop"
+    UPSTREAM_BRANCH: "feature/pg18-port"
     UPSTREAM_OUTPUT: "haf_image.env"
   before_script:
     # docker-builder image already has git, bash, and curl
     # Fetch source patterns from HAF's script (single source of truth)
   - |
-    PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/develop/scripts/ci-helpers/source-patterns.sh"
+    PATTERNS_URL="https://gitlab.syncad.com/hive/haf/-/raw/feature/pg18-port/scripts/ci-helpers/source-patterns.sh"
     echo "Fetching source patterns from: $PATTERNS_URL"
     if UPSTREAM_PATTERNS=$(curl -sf "$PATTERNS_URL" | sh); then
       echo "Loaded patterns: $UPSTREAM_PATTERNS"
