@@ -26,7 +26,7 @@ fi
 if [ -z "${HIVEMIND_VERSION:-}" ]; then
     # Default to a stable version if not provided
     # This should match the version of hivemind compatible with the HAF version being used
-    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-44423fcf}"
+    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-0080a2e5}"
     echo "WARN: HIVEMIND_VERSION not set, using default: $HIVEMIND_VERSION"
 fi
 
