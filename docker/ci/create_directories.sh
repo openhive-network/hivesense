@@ -65,6 +65,16 @@ mkdir -p "$TOP_LEVEL_DATASET_MOUNTPOINT/logs/caddy"
 echo "Creating configuration directory..."
 mkdir -p "$TOP_LEVEL_DATASET_MOUNTPOINT/haf_postgresql_conf.d"
 
+# Create hived config for CI (small shared memory for 5M block_log)
+echo "Creating hived config..."
+cat > "$TOP_LEVEL_DATASET_MOUNTPOINT/config.ini" << 'CONFIGEOF'
+shared-file-size = 1G
+shared-file-full-threshold = 9500
+shared-file-scale-rate = 1000
+flush-state-interval = 0
+webserver-thread-pool-size = 8
+CONFIGEOF
+
 # Create hivesense directories
 echo "Creating hivesense directories..."
 mkdir -p "$TOP_LEVEL_DATASET_MOUNTPOINT/hivesense"
