@@ -40,6 +40,8 @@ services:
     stop_grace_period: 2m
     environment:
       PG_ACCESS: "
+        # HAF internal maintenance\n
+        local   haf_block_log    haf_maintainer                                                                                   trust\n
         # PgBouncer connection pooler\n
         host    haf_block_log    hafah_user       ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
         host    haf_block_log    hivemind_user    ${COMPOSE_PROJECT_NAME:-haf}-pgbouncer-1.${NETWORK_NAME:-haf}                           trust\n
@@ -58,7 +60,7 @@ services:
         host    haf_block_log    hivemind         ${COMPOSE_PROJECT_NAME:-haf}-hivemind-postgrest-server-1.${NETWORK_NAME:-haf}           trust\n
         host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
         host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
-        host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-sync-1.${NETWORK_NAME:-haf}                      trust\n
+        host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-process-blocks-1.${NETWORK_NAME:-haf}              trust\n
         "
       SHM_DIR: /home/hived/shm_dir
       ROCKSDB_DIR: /home/hived/rocksdb_dir
@@ -81,6 +83,10 @@ services:
       - type: bind
         source: ${HAF_WAL_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory/haf_wal}
         target: /home/hived/wal_dir
+      - type: bind
+        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/all-MiniLM-L6-v2
+        target: /home/hived/tokenizer-files/all-MiniLM-L6-v2
+        read_only: true
     shm_size: ${HAF_SHM_SIZE:-8gb}
     healthcheck:
       test: ["CMD-SHELL", "wget -T2 -nv -t1 --spider http://127.0.0.1:8091/ || exit 1"]
@@ -413,20 +419,21 @@ services:
   # Hivesense Services
   # ===========================================================================
   hivesense-ollama:
-    image: ${OLLAMA_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/ollama}:${OLLAMA_VERSION:-0.6.5}
+    image: ${OLLAMA_IMAGE:-ollama/ollama}:${OLLAMA_VERSION:-0.6.5}
     environment:
       - TZ=America/New_York
       - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_NUM_PARALLEL=16
+      - OLLAMA_NUM_PARALLEL=${HIVESENSE_WORKERS:-8}
       - OLLAMA_NUM_THREADS=16
       - OLLAMA_KEEP_ALIVE=-1
       - OLLAMA_MODELS=/tmp/ollama
+      - OLLAMA_NUM_GPU=0
     tty: true
     networks:
       haf-network:
     volumes:
       - type: bind
-        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/hivesense/ollama
+        source: ${HIVESENSE_OLLAMA_MODELS_DIR:-/cache/hivesense/ollama}
         target: /tmp/ollama
     entrypoint: /bin/sh
     command: >
@@ -439,7 +446,7 @@ services:
         done
 
         echo 'Pulling model...'
-        ollama pull ${HIVESENSE_MODEL:-yxchia/multilingual-e5-base:F16}
+        ollama pull ${HIVESENSE_MODEL:-all-minilm:l6-v2}
         echo 'Ready.'
 
         wait
@@ -451,33 +458,26 @@ services:
       POSTGRES_HOST: haf
     command:
       - install_app
-      - "--llm=${HIVESENSE_MODEL:-yxchia/multilingual-e5-base:F16}"
-      - "--vector_size=${HIVESENSE_VECTOR_SIZE:-768}"
-      - "--ollama=${HIVESENSE_OLLAMA:-http://haproxy:7012}"
+      - "--llm=${HIVESENSE_MODEL:-all-minilm:l6-v2}"
+      - "--vector_size=${HIVESENSE_VECTOR_SIZE:-384}"
+      - "--ollama=${HIVESENSE_OLLAMA:-http://hivesense-ollama:11434}"
       - "--start_block=${HIVESENSE_START_BLOCK:-1}"
-      - "--parallel_workers=${HIVESENSE_WORKERS:-16}"
-      - "--embedding_batch_size=${HIVESENSE_EMBEDDING_BATCH_SIZE:-100}"
-      - "--tokenizer-model=${HIVESENSE_TOKENIZER_MODEL_NAME:-e5-base}"
+      - "--parallel_workers=${HIVESENSE_WORKERS:-8}"
+      - "--embedding_batch_size=${HIVESENSE_EMBEDDING_BATCH_SIZE:-50}"
+      - "--tokenizer-model=${HIVESENSE_TOKENIZER_MODEL_NAME:-all-MiniLM-L6-v2}"
       - "--tokens_per_chunk=${HIVESENSE_TOKENS_PER_CHUNK:-512}"
       - "--overlap_amount=${HIVESENSE_OVERLAP_AMOUNT:-0.15}"
-      - "--use-halfvec-index=${HIVESENSE_USE_HALFVEC_INDEX:-TRUE}"
-      - "--store-halfvec-embeddings=${HIVESENSE_STORE_HALFVEC_EMBEDDINGS:-TRUE}"
-      - "--document-prefix=${HIVESENSE_DOCUMENT_PREFIX-passage: }"
-      - "--query-prefix=${HIVESENSE_QUERY_PREFIX-query: }"
+      - "--use-halfvec-index=${HIVESENSE_USE_HALFVEC_INDEX:-FALSE}"
+      - "--store-halfvec-embeddings=${HIVESENSE_STORE_HALFVEC_EMBEDDINGS:-FALSE}"
+      - "--document-prefix=${HIVESENSE_DOCUMENT_PREFIX-}"
+      - "--query-prefix=${HIVESENSE_QUERY_PREFIX-}"
       - "--min-token-threshold=${HIVESENSE_MIN_TOKEN_THRESHOLD:-75}"
       - "--min-token-search-threshold=${HIVESENSE_MIN_TOKEN_SEARCH_THRESHOLD:-0}"
       - "--swagger-url=${PUBLIC_HOSTNAME:-localhost}/"
-      - "--use-reduced-embeddings=${HIVESENSE_USE_REDUCED_EMBEDDINGS:-true}"
-      - "--reduced-matrix-source=${HIVESENSE_MATRIX_SOURCE:-https://gitlab.syncad.com/hive/hivesense/-/wikis/uploads/0eebabf30d7cceb5776cb62c41abb2c9/projection_matrix_768_128_20250722.json.gz}"
-      - "--config-dir=/hivesense/config"
-      - "--reduced-dim=${HIVESENSE_REDUCED_DIMENSION:-128}"
+      - "--use-reduced-embeddings=${HIVESENSE_USE_REDUCED_EMBEDDINGS:-false}"
       - "--hnsw-m=${HIVESENSE_HNSW_M:-16}"
       - "--hnsw-ef-construction=${HIVESENSE_HNSW_EF_CONSTRUCTION:-200}"
-      - "--maintenance-work-mem=${HIVESENSE_MAINTENANCE_WORK_MEM:-28}"
-    volumes:
-      - type: bind
-        source: ${HAF_DATA_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}}/hivesense/config
-        target: /hivesense/config
+      - "--maintenance-work-mem=${HIVESENSE_MAINTENANCE_WORK_MEM:-2}"
     networks:
       haf-network:
     depends_on:
@@ -486,18 +486,20 @@ services:
       hivemind-install:
         condition: service_completed_successfully
 
-  hivesense-sync:
-    image: ${HIVESENSE_SYNCER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/syncer}:${HIVESENSE_VERSION}
+  hivesense-process-blocks:
+    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION}
     environment:
-      POSTGRES_URI: postgresql://hivesense_owner@haf/haf_block_log?application_name=hivesense_sync
-      HIVESENSE_API: ${HIVESENSE_SYNC_API:-https://api.hive.blog/hivesense-api}
-      LOG_LEVEL: INFO
+      POSTGRES_HOST: haf
+    command: >
+      process_blocks --stop-at-block=${HIVESENSE_STOP_AT_BLOCK:-1000000}
     init: true
     networks:
       haf-network:
     depends_on:
       hivesense-install-schema:
         condition: service_completed_successfully
+      hivesense-ollama:
+        condition: service_started
       haf:
         condition: service_healthy
 
