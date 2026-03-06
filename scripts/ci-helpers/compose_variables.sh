@@ -26,13 +26,13 @@ fi
 if [ -z "${HIVEMIND_VERSION:-}" ]; then
     # Default to a stable version if not provided
     # This should match the version of hivemind compatible with the HAF version being used
-    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-1.27.11}"
+    HIVEMIND_VERSION="${HIVE_API_NODE_VERSION:-1.28.6-rc10}"
     echo "WARN: HIVEMIND_VERSION not set, using default: $HIVEMIND_VERSION"
 fi
 
 # Reputation tracker version - use REPUTATION_TRACKER_VERSION if set, otherwise default
 if [ -z "${REPUTATION_TRACKER_VERSION:-}" ]; then
-    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.27.12rc2}"
+    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.28.6-rc10}"
 fi
 
 GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
