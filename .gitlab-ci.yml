@@ -221,12 +221,6 @@ sync:
   extends: .docker_image_builder_job_template
   stage: sync
   image: registry.gitlab.syncad.com/hive/haf_api_node/dind:1.27.11rc2
-  # TODO: Fix sync test - currently fails because the external sync API returns
-  # operations for blocks beyond the 1M test data. Options to fix:
-  # 1. Create a CI-specific mock API endpoint
-  # 2. Pre-cache hivesense database like HAF
-  # 3. Expand test block_log to 1.3M+ blocks
-  allow_failure: true
   needs:
   - job: find_haf_image
     artifacts: true
@@ -306,7 +300,7 @@ sync:
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix haf > ${LOGS_DIR}/haf.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix haproxy > ${LOGS_DIR}/haproxy.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-install-schema > ${LOGS_DIR}/hivesense-install.log || true
-    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-sync > ${LOGS_DIR}/hivesense-sync.log || true
+    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-process-blocks > ${LOGS_DIR}/hivesense-process-blocks.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-postgrest > ${LOGS_DIR}/hivesense-postgrest.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix swagger > ${LOGS_DIR}/hivesense-swagger.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-postgrest-rewriter > ${LOGS_DIR}/hivesense-postgrest-rewriter.log || true

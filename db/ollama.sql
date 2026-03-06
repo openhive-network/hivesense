@@ -76,7 +76,9 @@ IMMUTABLE
 PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $BODY$
-    import json, requests, time, plpy
+    import json, time, plpy
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
 
     # Resolve host URL
     if host is None:
@@ -122,12 +124,17 @@ AS $BODY$
             payload["options"] = opts
 
         url = host_url.rstrip('/') + "/api/embed"
+        body = json.dumps(payload).encode('utf-8')
         while True:
             try:
-                resp = requests.post(url, json=payload, timeout=300)
-                if resp.status_code == 200:
+                req = Request(url, data=body, headers={'Content-Type': 'application/json'})
+                resp = urlopen(req, timeout=300)
+                status_code = resp.getcode()
+                if status_code == 200:
                     break
-                plpy.notice(f"[Batch {start}:{end}] HTTP {resp.status_code}, retrying in {delay_secs}s")
+                plpy.notice(f"[Batch {start}:{end}] HTTP {status_code}, retrying in {delay_secs}s")
+            except HTTPError as e:
+                plpy.notice(f"[Batch {start}:{end}] HTTP {e.code}, retrying in {delay_secs}s")
             except Exception as e:
                 plpy.notice(f"[Batch {start}:{end}] Exception: {e}, retrying in {delay_secs}s")
             time.sleep(delay_secs)
@@ -135,7 +142,7 @@ AS $BODY$
         # reset backoff for next batch
         delay_secs = initial_delay
 
-        data = resp.json()
+        data = json.loads(resp.read().decode('utf-8'))
         for idx, vec in enumerate(data.get("embeddings", [])):
             embeddings.append((batch_pids[idx], batch_nums[idx], vec))
 
