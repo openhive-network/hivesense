@@ -6,6 +6,51 @@ set -e
 SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
 COMPOSE_DIR="${SCRIPTPATH}/../../docker/ci"
 
+# After replaying a finite block_log with P2P disabled, hived never transitions
+# to live sync, so HAF's deferred indexes/FKs remain in 'missing' state.
+# This makes hive.is_instance_ready() return false, blocking all apps.
+# Restore them before waiting for apps to process blocks.
+ensure_haf_indexes() {
+    echo "Checking if HAF indexes need restoration..."
+
+    READY=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT hive.is_instance_ready();" 2>/dev/null || echo "")
+    if [ "$READY" = "t" ]; then
+        echo "HAF indexes already created, skipping."
+        return
+    fi
+
+    echo "Waiting for HAF events_queue to be populated..."
+    for attempt in $(seq 1 120); do
+        HAS_EVENTS=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT EXISTS(SELECT 1 FROM hafd.events_queue);" 2>/dev/null || echo "")
+        if [ "$HAS_EVENTS" = "t" ]; then
+            echo "HAF events_queue populated (attempt $attempt)."
+            break
+        fi
+        if [ "$attempt" -eq 120 ]; then
+            echo "ERROR: Timed out waiting for HAF events_queue"
+            exit 1
+        fi
+        sleep 5
+    done
+
+    echo "Restoring HAF indexes..."
+    docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT hive.enable_indexes_of_irreversible();"
+
+    echo "Restoring HAF foreign keys..."
+    for tbl in hafd.account_operations hafd.transactions hafd.accounts hafd.transactions_multisig hafd.hive_state hafd.blocks hafd.applied_hardforks; do
+        docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT hive.restore_foreign_keys('$tbl');"
+    done
+
+    READY=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT hive.is_instance_ready();")
+    echo "hive.is_instance_ready() = $READY"
+    if [ "$READY" != "t" ]; then
+        echo "ERROR: HAF instance still not ready after index restoration"
+        docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT index_constraint_name, status FROM hafd.indexes_constraints WHERE status <> 'created';"
+        exit 1
+    fi
+    echo "HAF indexes restored successfully."
+}
+
 wait_for_hivesense_startup() {
     COMMAND="SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'i' AND n.nspname = 'hivesense_app' AND c.relname = hivesense_app.get_hnsw_index_name());"
     MESSAGE="Waiting for Hivesense to finish processing blocks..."
@@ -64,6 +109,7 @@ wait_for_hivesense_startup() {
 }
 
 
+ensure_haf_indexes
 wait_for_hivesense_startup
 
 

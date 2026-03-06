@@ -306,7 +306,6 @@ sync:
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix swagger > ${LOGS_DIR}/hivesense-swagger.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-postgrest-rewriter > ${LOGS_DIR}/hivesense-postgrest-rewriter.log || true
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-ollama > ${LOGS_DIR}/hivesense-ollama.log || true
-    docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix haf-enable-indexes > ${LOGS_DIR}/haf-enable-indexes.log || true
 
     # Check if jmeter results exist and add them to the archive
     if [ -d "jmeter_results" ]; then
