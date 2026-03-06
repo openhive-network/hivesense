@@ -61,6 +61,8 @@ services:
         host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
         host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-install-schema-1.${NETWORK_NAME:-haf}            trust\n
         host    haf_block_log    hivesense_owner  ${COMPOSE_PROJECT_NAME:-haf}-hivesense-process-blocks-1.${NETWORK_NAME:-haf}              trust\n
+        # HAF index restoration (CI only)\n
+        host    haf_block_log    haf_admin        ${COMPOSE_PROJECT_NAME:-haf}-haf-enable-indexes-1.${NETWORK_NAME:-haf}                    trust\n
         "
       SHM_DIR: /home/hived/shm_dir
       ROCKSDB_DIR: /home/hived/rocksdb_dir
@@ -94,6 +96,41 @@ services:
       timeout: 2s
       retries: 10
       start_period: 72h
+
+  # ===========================================================================
+  # HAF Post-Replay Index Restoration (CI only)
+  # ===========================================================================
+  # After replay with a finite block_log and no P2P, hived never transitions
+  # to live sync, so HAF's deferred indexes/FKs remain in 'missing' state.
+  # This makes hive.is_instance_ready() return false, blocking all apps.
+  # This one-shot service restores them so apps can proceed.
+  haf-enable-indexes:
+    image: ${HAF_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf}:${HAF_VERSION:-latest}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for HAF indexes to be restorable..."
+        until psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT EXISTS(SELECT 1 FROM hafd.events_queue)" 2>/dev/null | grep -q t; do
+          sleep 2
+        done
+        echo "Restoring HAF indexes and foreign keys..."
+        psql -U haf_admin -d haf_block_log -h haf -c "SELECT hive.enable_indexes_of_irreversible();"
+        for tbl in hafd.account_operations hafd.transactions hafd.accounts hafd.transactions_multisig hafd.hive_state hafd.blocks hafd.applied_hardforks; do
+          psql -U haf_admin -d haf_block_log -h haf -c "SELECT hive.restore_foreign_keys('$tbl');"
+        done
+        echo "Verifying hive.is_instance_ready()..."
+        READY=$(psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT hive.is_instance_ready();")
+        echo "is_instance_ready = $READY"
+        if [ "$READY" != "t" ]; then
+          echo "WARNING: Instance still not ready after index restoration"
+          exit 1
+        fi
+        echo "HAF indexes restored successfully."
+    networks:
+      haf-network:
+    depends_on:
+      haf:
+        condition: service_healthy
 
   # ===========================================================================
   # Connection Pooling
@@ -282,6 +319,8 @@ services:
         condition: service_completed_successfully
       haf:
         condition: service_healthy
+      haf-enable-indexes:
+        condition: service_completed_successfully
 
   reputation-tracker-postgrest:
     image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.28.6-rc10}}
@@ -369,6 +408,8 @@ services:
       haf:
         condition: service_healthy
       hivemind-install:
+        condition: service_completed_successfully
+      haf-enable-indexes:
         condition: service_completed_successfully
 
   hivemind-postgrest-server:
@@ -502,6 +543,8 @@ services:
         condition: service_started
       haf:
         condition: service_healthy
+      haf-enable-indexes:
+        condition: service_completed_successfully
 
   hivesense-postgrest:
     image: ${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf_api_node/postgrest:${HAF_API_NODE_VERSION:-${HIVE_API_NODE_VERSION:-1.28.6-rc10}}
