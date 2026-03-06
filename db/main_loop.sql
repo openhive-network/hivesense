@@ -537,7 +537,16 @@ BEGIN
 
         -- nothing to do yet
         IF __blocks_range IS NULL THEN
-            -- RAISE NOTICE '__blocks_range IS NULL';
+            __breaking_reason := isbreakingpending(__context_name, _max_block_limit, NULL);
+            IF __breaking_reason IS NOT NULL THEN
+                IF __breaking_reason = 'BLOCK_LIMIT_REACHED'
+                   AND _max_block_limit IS NOT NULL
+                   AND hive.app_get_current_block_num(__context_name) >= _max_block_limit THEN
+                    CALL ensure_indexes_are_created();
+                END IF;
+                RETURN;
+            END IF;
+            PERFORM pg_sleep(1);
             CONTINUE;
         END IF;
 
