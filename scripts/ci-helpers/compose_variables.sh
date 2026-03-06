@@ -43,7 +43,7 @@ PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME:-"localhost"}
 
 # HAF and Hivemind
 # HAF_VERSION is set above from HAF_COMMIT env var
-ARGUMENTS="--replay-blockchain --stop-at-block=$((NUMBER_OF_BLOCKS_TO_SYNC + 1))"
+ARGUMENTS="--replay-blockchain --stop-at-block=$((NUMBER_OF_BLOCKS_TO_SYNC + 1)) --p2p-seed-node="
 # HIVEMIND_VERSION is set above from env var
 export REPUTATION_TRACKER_VERSION
 HIVEMIND_SYNC_ARGS="--test-max-block=${NUMBER_OF_BLOCKS_TO_SYNC}"
