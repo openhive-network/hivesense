@@ -21,7 +21,7 @@ fi
 
 # 2. check number of chunks
 number_of_chunks=$(query_database "SELECT COUNT(*) FROM hivesense_app.posts_vectors")
-EXPECTED_CHUNK_COUNT=${EXPECTED_CHUNK_COUNT:-3260}
+EXPECTED_CHUNK_COUNT=${EXPECTED_CHUNK_COUNT:-3437}
 if [ "$number_of_chunks" -ne "$EXPECTED_CHUNK_COUNT" ]; then
   echo "Wrong number of chunks ${number_of_chunks} != ${EXPECTED_CHUNK_COUNT}" >&2
   exit 1
