@@ -30,7 +30,7 @@ services:
   # HAF Core Service
   # ===========================================================================
   haf:
-    image: ${HAF_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf}:${HAF_VERSION}
+    image: ${HAF_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf}:${HAF_VERSION:-latest}
     networks:
       - haf-network
     tty: true
@@ -332,7 +332,7 @@ services:
   # Hivemind - Social Data Layer (Dependency for Hivesense)
   # ===========================================================================
   hivemind-install:
-    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION}
+    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION:-latest}
     networks:
       haf-network:
     command:
@@ -349,7 +349,7 @@ services:
         condition: service_completed_successfully
 
   hivemind-block-processing:
-    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION}
+    image: ${HIVEMIND_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind}:${HIVEMIND_VERSION:-latest}
     networks:
       haf-network:
     command:
@@ -402,7 +402,7 @@ services:
         condition: service_healthy
 
   hivemind-postgrest-rewriter:
-    image: ${HIVEMIND_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind/postgrest-rewriter}:${HIVEMIND_VERSION}
+    image: ${HIVEMIND_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivemind/postgrest-rewriter}:${HIVEMIND_VERSION:-latest}
     healthcheck:
       test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
       interval: 10s
@@ -453,7 +453,7 @@ services:
       "
 
   hivesense-install-schema:
-    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION}
+    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION:-latest}
     environment:
       POSTGRES_HOST: haf
     command:
@@ -487,7 +487,7 @@ services:
         condition: service_completed_successfully
 
   hivesense-process-blocks:
-    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION}
+    image: ${HIVESENSE_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense}:${HIVESENSE_VERSION:-latest}
     environment:
       POSTGRES_HOST: haf
     command: >
@@ -534,7 +534,7 @@ services:
         condition: service_healthy
 
   hivesense-postgrest-rewriter:
-    image: ${HIVESENSE_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/postgrest-rewriter}:${HIVESENSE_VERSION}
+    image: ${HIVESENSE_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/hivesense/postgrest-rewriter}:${HIVESENSE_VERSION:-latest}
     healthcheck:
       test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
       interval: 10s

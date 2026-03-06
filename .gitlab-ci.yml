@@ -37,6 +37,7 @@ variables:
   # NFS cache configuration for sync data sharing across builders
   DATA_CACHE_NFS_PREFIX: "/nfs/ci-cache"
   BLOCK_LOG_SOURCE_DIR_5M: /blockchain/block_log_5m
+  BLOCK_LOG_SOURCE_DIR_1M: /blockchain/block_log_1m
   FF_NETWORK_PER_BUILD: 1
   PYTEST_NUMBER_OF_PROCESSES: 8
   BUILDER_IMAGE_TAG: "$TEST_HAF_IMAGE_TAG"
@@ -272,7 +273,7 @@ sync:
   - docker compose version
   - |
     echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting the test environment..."
-    scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_5M}
+    scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_1M}
     echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
 
     echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for Hivesense sync..."
