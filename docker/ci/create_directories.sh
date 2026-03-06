@@ -73,6 +73,7 @@ shared-file-full-threshold = 9500
 shared-file-scale-rate = 1000
 flush-state-interval = 0
 webserver-thread-pool-size = 8
+p2p-seed-node =
 CONFIGEOF
 
 # Create hivesense directories
