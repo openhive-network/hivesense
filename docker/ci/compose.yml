@@ -106,23 +106,38 @@ services:
   # This one-shot service restores them so apps can proceed.
   haf-enable-indexes:
     image: ${HAF_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/haf}:${HAF_VERSION:-latest}
+    environment:
+      PGPASSWORD: ""
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        echo "Waiting for HAF indexes to be restorable..."
-        until psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT EXISTS(SELECT 1 FROM hafd.events_queue)" 2>/dev/null | grep -q t; do
-          sleep 2
+        export PATH="/usr/lib/postgresql/17/bin:/usr/lib/postgresql/16/bin:$$PATH"
+        echo "Waiting for HAF to be ready for index restoration..."
+        for i in $$(seq 1 360); do
+          RESULT=$$(psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT EXISTS(SELECT 1 FROM hafd.events_queue)" 2>/dev/null || echo "")
+          if echo "$$RESULT" | grep -q t; then
+            echo "HAF events_queue is populated."
+            break
+          fi
+          if [ "$$i" -eq 360 ]; then
+            echo "ERROR: Timed out waiting for HAF"
+            exit 1
+          fi
+          echo "  HAF not ready yet (attempt $$i), waiting..."
+          sleep 5
         done
-        echo "Restoring HAF indexes and foreign keys..."
+        echo "Restoring HAF indexes..."
         psql -U haf_admin -d haf_block_log -h haf -c "SELECT hive.enable_indexes_of_irreversible();"
+        echo "Restoring HAF foreign keys..."
         for tbl in hafd.account_operations hafd.transactions hafd.accounts hafd.transactions_multisig hafd.hive_state hafd.blocks hafd.applied_hardforks; do
-          psql -U haf_admin -d haf_block_log -h haf -c "SELECT hive.restore_foreign_keys('$tbl');"
+          psql -U haf_admin -d haf_block_log -h haf -c "SELECT hive.restore_foreign_keys('$$tbl');"
         done
         echo "Verifying hive.is_instance_ready()..."
-        READY=$(psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT hive.is_instance_ready();")
-        echo "is_instance_ready = $READY"
-        if [ "$READY" != "t" ]; then
+        READY=$$(psql -U haf_admin -d haf_block_log -h haf -tAc "SELECT hive.is_instance_ready();")
+        echo "is_instance_ready = $$READY"
+        if [ "$$READY" != "t" ]; then
           echo "WARNING: Instance still not ready after index restoration"
+          psql -U haf_admin -d haf_block_log -h haf -c "SELECT index_constraint_name, status FROM hafd.indexes_constraints WHERE status <> 'created';"
           exit 1
         fi
         echo "HAF indexes restored successfully."
