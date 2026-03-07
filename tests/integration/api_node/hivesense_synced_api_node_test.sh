@@ -27,28 +27,14 @@ if [ "$number_of_chunks" -ne "$EXPECTED_CHUNK_COUNT" ]; then
   exit 1
 fi
 
-# 3. wait for caddy to be ready (fast embedding generation may finish before caddy is up)
-echo "Waiting for caddy to be ready..."
-for attempt in $(seq 1 30); do
-  if docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO /dev/null --no-check-certificate "https://${HOST_NAME}/" 2>/dev/null; then
-    echo "Caddy is ready (attempt $attempt)."
-    break
-  fi
-  if [ "$attempt" -eq 30 ]; then
-    echo "Caddy not ready after 30 attempts" >&2
-    exit 1
-  fi
-  sleep 5
-done
-
-# 3. check if Swagger works
-if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-swagger/" | grep -q "Swagger UI"; then
+# 3. check if Swagger works (query swagger service directly via Docker network)
+if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - "http://swagger:80/" | grep -q "Swagger UI"; then
   echo "Swagger UI content not detected" >&2
   exit 1
 fi
 
-# 4. check if OpenAPI hivesense endpoint is working
-if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - --no-check-certificate "https://${HOST_NAME}/hivesense-api/" | grep -q '"title":[[:space:]]*"Hivesense"'; then
+# 4. check if OpenAPI hivesense endpoint is working (query PostgREST directly)
+if ! docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy wget -qO - "http://hivesense-postgrest:3000/" | grep -q '"title":[[:space:]]*"Hivesense"'; then
   echo "OpenAPI endpoint is NOT available or missing expected title: Hivesense" >&2
   exit 1
 fi
