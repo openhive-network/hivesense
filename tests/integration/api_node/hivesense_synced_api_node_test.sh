@@ -1,8 +1,5 @@
 #!/bin/sh
 
-# Test requires up and running API node
-HOST_NAME=${PUBLIC_HOSTNAME:-"localhost"}
-
 # Get the directory where docker compose is running
 SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
 COMPOSE_DIR="${SCRIPTPATH}/../../../docker/ci"
