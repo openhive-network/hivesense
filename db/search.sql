@@ -265,7 +265,7 @@ BEGIN
                  ORDER BY post_id, sim
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim        AS similarity,
+                   sim::real  AS similarity,
                    post_id,
                    chunk_number
               FROM best_chunk
