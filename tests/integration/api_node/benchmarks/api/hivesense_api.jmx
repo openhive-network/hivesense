@@ -39,7 +39,7 @@
           </elementProp>
           <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstones&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstones&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -66,7 +66,7 @@
           </elementProp>
           <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstones&amp;tr_body=25&amp;posts_limit=20&amp;start_author=doom&amp;start_permlink=blocktrades-dev-uses-privileged-possition-to-dump-steem-then-takes-vacation-</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstones&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -95,7 +95,7 @@
           </elementProp>
           <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstones&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstones&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -124,7 +124,7 @@
           </elementProp>
           <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstones&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstones&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -156,7 +156,7 @@
           <stringProp name="HTTPSampler.port"></stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstones&amp;tr_body=25&amp;posts_limit=20&amp;observer=dantheman</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstones&amp;truncate=25&amp;result_limit=20&amp;observer=dantheman</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -190,7 +190,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -224,7 +224,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -258,7 +258,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -292,7 +292,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarposts?pattern=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/search?q=thailandbeacheswithshipsandnicegirlssittingonstonesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&amp;truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -325,7 +325,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarpostsbypost?author=alex90342fastn1&amp;permlink=panamapapers&amp;tr_body=25&amp;posts_limit=10</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/alex90342fastn1/panamapapers/similar?truncate=25&amp;result_limit=10</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -358,7 +358,7 @@
           <stringProp name="HTTPSampler.port" />
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding" />
-          <stringProp name="HTTPSampler.path">/similarpostsbypost?author=dantheman&amp;permlink=how-to-interpret-steemits-post-valuations&amp;tr_body=25&amp;posts_limit=20</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/dantheman/how-to-interpret-steemits-post-valuations/similar?truncate=25&amp;result_limit=20</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -392,7 +392,7 @@
           <stringProp name="HTTPSampler.port"></stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
-          <stringProp name="HTTPSampler.path">/similarpostsbypost?author=dantheman&amp;permlink=how-to-interpret-steemits-post-valuations&amp;tr_body=25&amp;posts_limit=20&amp;observer=dantheman</stringProp>
+          <stringProp name="HTTPSampler.path">/posts/dantheman/how-to-interpret-steemits-post-valuations/similar?truncate=25&amp;result_limit=20&amp;observer=dantheman</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -423,7 +423,7 @@
     </elementProp>
     <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
     <stringProp name="HTTPSampler.protocol">http</stringProp>
-    <stringProp name="HTTPSampler.path">/thematiccontributors?thematic=Make witness node secure against hackers attack and emergency situations&amp;authors_limit=10</stringProp>
+    <stringProp name="HTTPSampler.path">/authors/search?topic=Make witness node secure against hackers attack and emergency situations&amp;result_limit=10</stringProp>
     <stringProp name="HTTPSampler.method">GET</stringProp>
     <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
     <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
@@ -454,7 +454,7 @@
     </elementProp>
     <stringProp name="HTTPSampler.domain">hivesense-postgrest-rewriter</stringProp>
     <stringProp name="HTTPSampler.protocol">http</stringProp>
-    <stringProp name="HTTPSampler.path">/thematiccontributors?thematic=Make witness node secure against hackers attack and emergency situations&amp;authors_limit=10&amp;observer=dantheman</stringProp>
+    <stringProp name="HTTPSampler.path">/authors/search?topic=Make witness node secure against hackers attack and emergency situations&amp;result_limit=10&amp;observer=dantheman</stringProp>
     <stringProp name="HTTPSampler.method">GET</stringProp>
     <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
     <boolProp name="HTTPSampler.auto_redirects">false</boolProp>

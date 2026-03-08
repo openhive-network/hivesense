@@ -185,7 +185,7 @@ echo "====================================================="
 echo "Benchmark completed with: WORKERS=$WORKERS, LOOPS=$LOOPS, TEST=$TEST_TYPE"
 TOTAL_TESTS=1
 if [ "$TEST_TYPE" = "all" ]; then
-    TOTAL_TESTS=11
+    TOTAL_TESTS=14
 fi
 echo "Total requests: $((WORKERS * LOOPS * TOTAL_TESTS))"
 echo "Open jmeter_results/html-report/index.html to view results"
