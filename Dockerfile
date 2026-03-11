@@ -14,7 +14,7 @@ WORKDIR /home/haf_admin
 
 ENTRYPOINT [ "/bin/bash", "-c" ]
 
-FROM alpine AS version-injection
+FROM psql_client AS version-injection
 ARG API_VERSION="dev"
 COPY endpoints /tmp/src/endpoints
 WORKDIR /tmp/src
