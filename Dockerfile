@@ -5,7 +5,7 @@ FROM ghcr.io/alphagov/paas/psql:${PAAS_PSQL_VERSION} AS psql_client
 
 RUN <<EOF
   set -e
-  apk add --no-cache bash curl
+  apk add --no-cache bash curl su-exec
   adduser -s /bin/bash -G users -D "haf_admin"
 EOF
 
@@ -51,14 +51,12 @@ RUN <<EOF
   chown haf_admin /app
 EOF
 
-USER haf_admin
-
-COPY scripts/install_app.sh /app/scripts/install_app.sh
-COPY scripts/uninstall_app.sh /app/scripts/uninstall_app.sh
-COPY scripts/process_blocks.sh /app/scripts/process_blocks.sh
-COPY scripts/matrix_handler.sh /app/scripts/matrix_handler.sh
-COPY db /app/db
-COPY --from=version-injection /tmp/src/endpoints /app/endpoints
+COPY --chown=haf_admin:users scripts/install_app.sh /app/scripts/install_app.sh
+COPY --chown=haf_admin:users scripts/uninstall_app.sh /app/scripts/uninstall_app.sh
+COPY --chown=haf_admin:users scripts/process_blocks.sh /app/scripts/process_blocks.sh
+COPY --chown=haf_admin:users scripts/matrix_handler.sh /app/scripts/matrix_handler.sh
+COPY --chown=haf_admin:users db /app/db
+COPY --chown=haf_admin:users --from=version-injection /tmp/src/endpoints /app/endpoints
 COPY docker/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
