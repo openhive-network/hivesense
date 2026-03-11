@@ -15,6 +15,7 @@ WORKDIR /home/haf_admin
 ENTRYPOINT [ "/bin/bash", "-c" ]
 
 FROM psql_client AS version-injection
+USER root
 ARG API_VERSION="dev"
 COPY endpoints /tmp/src/endpoints
 WORKDIR /tmp/src
