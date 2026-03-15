@@ -2,12 +2,12 @@
 set -e
 
 # Fix ownership of bind-mounted directories that may be root:root from the host.
-# This runs as root; actual commands run as haf_admin via su-exec.
+# This runs as root; actual commands run as hived via su-exec.
 if [ "$(id -u)" = "0" ]; then
   if [ -d /hivesense/config ]; then
-    chown -R haf_admin:users /hivesense/config
+    chown -R hived:users /hivesense/config
   fi
-  exec su-exec haf_admin "$0" "$@"
+  exec su-exec hived "$0" "$@"
 fi
 
 cd /app/scripts
