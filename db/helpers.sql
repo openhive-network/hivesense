@@ -141,6 +141,7 @@ RETURNS text LANGUAGE plpgsql STABLE AS
 $$
 DECLARE
     use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    red_mode    text    := hivesense_app.reduction_mode();
     half        boolean := hivesense_app.use_halfvec_index();
     store       boolean := hivesense_app.store_halfvec_embeddings();
     tgt_table   text;
@@ -150,7 +151,12 @@ BEGIN
     /* -----------------------------------------------------------
      * Decide which table/column we are indexing
      * ----------------------------------------------------------*/
-    IF use_reduced THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka: expression index on main table
+        tgt_table := 'hivesense_app.posts_vectors';
+        tgt_col   := 'embedding';
+    ELSIF use_reduced THEN
+        -- PCA: index on reduced table
         tgt_table := 'hivesense_app.posts_vectors_reduced';
         tgt_col   := 'reduced_embedding';
     ELSE
@@ -166,7 +172,9 @@ BEGIN
        substring(tgt_table from '[^.]+$'),        -- strip schema
        tgt_col,
        CASE
-         WHEN store OR half THEN 'half' ELSE 'full'
+         WHEN use_reduced AND red_mode = 'slice' THEN 'slice'
+         WHEN store OR half THEN 'half'
+         ELSE 'full'
        END
     );
 END;
@@ -177,6 +185,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    red_mode    text    := hivesense_app.reduction_mode();
     dim         int     := CASE WHEN use_reduced
                                 THEN hivesense_app.reduced_dims()
                                 ELSE hivesense_app.embedding_dims()
@@ -193,7 +202,10 @@ BEGIN
     /* -----------------------------------------------------------
      * Decide which table/column we are indexing
      * ----------------------------------------------------------*/
-    IF use_reduced THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        tgt_table := 'hivesense_app.posts_vectors';
+        tgt_col   := 'embedding';
+    ELSIF use_reduced THEN
         tgt_table := 'hivesense_app.posts_vectors_reduced';
         tgt_col   := 'reduced_embedding';
     ELSE
@@ -222,7 +234,13 @@ BEGIN
      * Compose CREATE INDEX statement
      * ----------------------------------------------------------*/
 
-    IF store THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka: expression index truncating embedding to reduced dims
+        EXECUTE format(
+          'CREATE INDEX %I ON %s USING hnsw ((%I::public.vector(%s)) public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, m, efc
+        );
+    ELSIF store THEN
         EXECUTE format(
           'CREATE INDEX %I ON %s USING hnsw (%I public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
           idx_name, tgt_table, tgt_col, m, efc
@@ -263,7 +281,7 @@ DECLARE
           WHEN hivesense_app.use_reduced_embeddings()
                THEN hivesense_app.reduced_dims()
           ELSE hivesense_app.embedding_dims()
-         END;
+         END;  -- for slice mode, reduced_dims is the index dimension
     __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
                                   FROM   hivesense_app.hivesense_app_status
                                   LIMIT  1);
@@ -289,7 +307,8 @@ BEGIN
     END IF;
 
     -- Get table size and row count before index creation (use correct table based on configuration)
-    IF hivesense_app.use_reduced_embeddings() THEN
+    IF hivesense_app.use_reduced_embeddings()
+       AND hivesense_app.reduction_mode() <> 'slice' THEN
         SELECT
             PG_RELATION_SIZE('hivesense_app.posts_vectors_reduced') AS table_size,
             COUNT(*) AS row_count
@@ -537,6 +556,11 @@ CREATE OR REPLACE FUNCTION hivesense_app.reduced_dims()
 RETURNS int
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 AS $$ SELECT reduced_dim FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
+
+CREATE OR REPLACE FUNCTION hivesense_app.reduction_mode()
+RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT reduction_mode FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
 
 CREATE OR REPLACE FUNCTION hivesense_app.allow_debugging()
 RETURNS boolean IMMUTABLE PARALLEL SAFE LANGUAGE sql AS

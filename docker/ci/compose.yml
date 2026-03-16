@@ -87,6 +87,14 @@ services:
         source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/all-MiniLM-L6-v2
         target: /home/hived/tokenizer-files/all-MiniLM-L6-v2
         read_only: true
+      - type: bind
+        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/e5-base
+        target: /home/hived/tokenizer-files/e5-base
+        read_only: true
+      - type: bind
+        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/jina-v5-small
+        target: /home/hived/tokenizer-files/jina-v5-small
+        read_only: true
     shm_size: ${HAF_SHM_SIZE:-8gb}
     healthcheck:
       test: ["CMD-SHELL", "wget -T2 -nv -t1 --spider http://127.0.0.1:8091/ || exit 1"]
@@ -475,6 +483,7 @@ services:
       - "--min-token-search-threshold=${HIVESENSE_MIN_TOKEN_SEARCH_THRESHOLD:-0}"
       - "--swagger-url=${PUBLIC_HOSTNAME:-localhost}/"
       - "--use-reduced-embeddings=${HIVESENSE_USE_REDUCED_EMBEDDINGS:-false}"
+      - "--reduction-mode=${HIVESENSE_REDUCTION_MODE:-none}"
       - "--hnsw-m=${HIVESENSE_HNSW_M:-16}"
       - "--hnsw-ef-construction=${HIVESENSE_HNSW_EF_CONSTRUCTION:-200}"
       - "--maintenance-work-mem=${HIVESENSE_MAINTENANCE_WORK_MEM:-2}"

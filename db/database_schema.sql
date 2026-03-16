@@ -35,6 +35,7 @@ BEGIN
     store_halfvec_embeddings BOOLEAN NOT NULL DEFAULT false, -- if true, both full & reduced embeddings are halfvec
     use_reduced_embeddings   BOOLEAN NOT NULL DEFAULT false, -- enable 2-stage ANN+rering
     reduced_dim             INT,                            -- required when ^ = true
+    reduction_mode          TEXT    NOT NULL DEFAULT 'none', -- 'none', 'pca', or 'slice' (matryoshka)
     hnsw_m                  INT    NOT NULL DEFAULT 32,
     hnsw_ef_construction    INT    NOT NULL DEFAULT 400,
     default_ef_search INT    NOT NULL DEFAULT 500,
@@ -108,7 +109,8 @@ BEGIN
   /* ————————————————————————————————————————————————————————————
    * REDUCED-SIZE EMBEDDINGS (only created when flag is TRUE)
    * ————————————————————————————————————————————————————————————*/
-  IF current_setting('PG_TEMP.USE_REDUCED_EMBEDDINGS',   TRUE)::BOOLEAN THEN
+  IF current_setting('PG_TEMP.USE_REDUCED_EMBEDDINGS',   TRUE)::BOOLEAN
+     AND COALESCE(current_setting('PG_TEMP.REDUCTION_MODE', TRUE), 'none') <> 'slice' THEN
     EXECUTE format($$
       CREATE TABLE IF NOT EXISTS posts_vectors_reduced (
           post_id      INT NOT NULL,
@@ -164,6 +166,7 @@ INSERT INTO hivesense_app_status
   store_halfvec_embeddings,
   use_reduced_embeddings,
   reduced_dim,
+  reduction_mode,
   hnsw_m,
   hnsw_ef_construction,
   default_ef_search,
@@ -197,6 +200,7 @@ VALUES
     current_setting('PG_TEMP.STORE_HALFVEC_EMBEDDINGS', TRUE)::BOOLEAN,
     current_setting('PG_TEMP.USE_REDUCED_EMBEDDINGS', TRUE)::BOOLEAN,
     NULLIF(current_setting('PG_TEMP.REDUCED_DIM', TRUE)::INT,0),
+    COALESCE(current_setting('PG_TEMP.REDUCTION_MODE', TRUE), 'none'),
     current_setting('PG_TEMP.HNSW_M', TRUE)::INT,
     current_setting('PG_TEMP.HNSW_EF_CONSTRUCTION', TRUE)::INT,
     current_setting('PG_TEMP.DEFAULT_EF_SEARCH', TRUE)::INT,

@@ -251,7 +251,9 @@ BEGIN
         WHERE post_id = rec.post_id
         ORDER BY chunk_number;
 
-        IF hivesense_app.use_reduced_embeddings() THEN
+        IF hivesense_app.use_reduced_embeddings()
+           AND hivesense_app.reduction_mode() <> 'slice' THEN
+            -- PCA mode: compute and store reduced embeddings
             INSERT INTO hivesense_app.posts_vectors_reduced(
                 post_id, chunk_number, reduced_embedding
             )
@@ -266,6 +268,7 @@ BEGIN
             FROM tmp_vectors
             WHERE post_id = rec.post_id
             ORDER BY chunk_number;
+            -- Slice mode: no separate reduced table — expression index handles truncation
         END IF;
 
         GET DIAGNOSTICS __c = ROW_COUNT;
