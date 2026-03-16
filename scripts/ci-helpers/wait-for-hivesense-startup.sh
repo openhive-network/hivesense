@@ -13,7 +13,9 @@ COMPOSE_DIR="${SCRIPTPATH}/../../docker/ci"
 ensure_haf_indexes() {
     echo "Checking if HAF indexes need restoration..."
 
-    READY=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT hive.is_instance_ready();" 2>/dev/null || echo "")
+    PSQL="docker compose -f ${COMPOSE_DIR}/compose.yml exec -T haf psql -U haf_admin -d haf_block_log"
+
+    READY=$($PSQL -t -A -c "SELECT hive.is_instance_ready();" 2>/dev/null || echo "")
     if [ "$READY" = "t" ]; then
         echo "HAF indexes already created, skipping."
         return
@@ -21,7 +23,7 @@ ensure_haf_indexes() {
 
     echo "Waiting for HAF events_queue to be populated..."
     for attempt in $(seq 1 120); do
-        HAS_EVENTS=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT EXISTS(SELECT 1 FROM hafd.events_queue);" 2>/dev/null || echo "")
+        HAS_EVENTS=$($PSQL -t -A -c "SELECT EXISTS(SELECT 1 FROM hafd.events_queue);" 2>/dev/null || echo "")
         if [ "$HAS_EVENTS" = "t" ]; then
             echo "HAF events_queue populated (attempt $attempt)."
             break
@@ -34,18 +36,18 @@ ensure_haf_indexes() {
     done
 
     echo "Restoring HAF indexes..."
-    docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT hive.enable_indexes_of_irreversible();"
+    $PSQL -c "SELECT hive.enable_indexes_of_irreversible();"
 
     echo "Restoring HAF foreign keys..."
     for tbl in hafd.account_operations hafd.transactions hafd.accounts hafd.transactions_multisig hafd.hive_state hafd.blocks hafd.applied_hardforks; do
-        docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT hive.restore_foreign_keys('$tbl');"
+        $PSQL -c "SELECT hive.restore_foreign_keys('$tbl');"
     done
 
-    READY=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "SELECT hive.is_instance_ready();")
+    READY=$($PSQL -t -A -c "SELECT hive.is_instance_ready();")
     echo "hive.is_instance_ready() = $READY"
     if [ "$READY" != "t" ]; then
         echo "ERROR: HAF instance still not ready after index restoration"
-        docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -c "SELECT index_constraint_name, status FROM hafd.indexes_constraints WHERE status <> 'created';"
+        $PSQL -c "SELECT index_constraint_name, status FROM hafd.indexes_constraints WHERE status <> 'created';"
         exit 1
     fi
     echo "HAF indexes restored successfully."
