@@ -24,6 +24,7 @@ AS $$
 DECLARE
     /* ───────── flags & dims ───────── */
     use_reduced   boolean := hivesense_app.use_reduced_embeddings();
+    red_mode      text    := hivesense_app.reduction_mode();
     store_half    boolean := hivesense_app.store_halfvec_embeddings();
     half_index    boolean := hivesense_app.use_halfvec_index();
 
@@ -98,7 +99,14 @@ BEGIN
      WHERE id = 1;
 
     /* — build reduced query vector & distance clause — */
-    IF use_reduced THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka: truncate the query vector to reduced dims
+        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+          USING _embedding INTO query_red;
+        -- Expression distance on posts_vectors.embedding truncated to reduced dims
+        dist_red := format(
+          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
+    ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
 
         IF store_half THEN
@@ -194,8 +202,54 @@ BEGIN
         ORDER BY sim, post_id
         LIMIT _limit;
 	RETURN;
+    ELSIF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka slicing: ANN on posts_vectors with expression distance, rerank with full embedding
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pv.post_id,
+                       pv.chunk_number,
+                       %s                           AS ann_dist
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($3 IS NULL OR pv.post_id <> $3)
+                   AND ($4 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $4
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY ann_dist, pv.post_id
+                 LIMIT %s
+            ),
+            best_chunk AS (
+                SELECT DISTINCT ON (pv.post_id)
+                       pv.post_id,
+                       pv.chunk_number,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id     = ann.post_id
+                   AND pv.chunk_number = ann.chunk_number
+                 ORDER BY pv.post_id, sim
+            )
+            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+                   sim::real AS similarity,
+                   post_id,
+                   chunk_number
+              FROM best_chunk
+             ORDER BY sim, post_id
+             LIMIT %s
+        $q$,
+          dist_red,                     -- %s  ann distance expr (expression on embedding)
+          (__min_tokens = 0),           -- %L  token filter off?
+          __min_tokens,                 -- %s
+          ann_candidates,               -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, query_red, _exclude_post_id, _observer_id;
+
     ELSIF use_reduced THEN
-        -- this is the branch we expect most configurations to use
+        -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
         RETURN QUERY EXECUTE format($q$
             WITH ann AS (
                 SELECT pr.post_id,
@@ -301,6 +355,7 @@ DECLARE
     -- global flags & dimensions
     ----------------------------------------------------------------
     use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    red_mode    text    := hivesense_app.reduction_mode();
     store_half  boolean := hivesense_app.store_halfvec_embeddings();
     half_index  boolean := hivesense_app.use_halfvec_index();
 
@@ -316,11 +371,11 @@ DECLARE
     dist_full   text := hivesense_app.distance_clause(1);  -- for rerank
     dist_red    text;                                      -- for ANN
 
-    tgt_tbl     text := CASE WHEN use_reduced
+    tgt_tbl     text := CASE WHEN use_reduced AND red_mode <> 'slice'
                               THEN 'hivesense_app.posts_vectors_reduced'
                               ELSE 'hivesense_app.posts_vectors'
                          END;
-    tgt_col     text := CASE WHEN use_reduced
+    tgt_col     text := CASE WHEN use_reduced AND red_mode <> 'slice'
                               THEN 'reduced_embedding'
                               ELSE 'embedding'
                          END;
@@ -345,7 +400,10 @@ BEGIN
     ----------------------------------------------------------------
     -- Build reduced query once (if needed)
     ----------------------------------------------------------------
-    IF use_reduced THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+          USING _embedding INTO query_red;
+    ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
     END IF;
 
@@ -354,6 +412,9 @@ BEGIN
     ----------------------------------------------------------------
     IF NOT use_reduced THEN
         dist_red := dist_full;        -- same column & same param pos
+    ELSIF red_mode = 'slice' THEN
+        dist_red := format(
+          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
     ELSE
         IF store_half THEN
             dist_red := format('%I <=> $2::public.halfvec(%s)', tgt_col, red_dim);
@@ -391,7 +452,33 @@ BEGIN
     ----------------------------------------------------------------
     LOOP
         /* ============== 1️⃣  compose the ANN query ============== */
-        IF use_reduced THEN
+        IF use_reduced AND red_mode = 'slice' THEN
+            -- Matryoshka: ANN on posts_vectors with expression distance
+            sql := format($q$
+                WITH ann AS (
+                    SELECT hpv.post_id,
+                           hpv.chunk_number,
+                           %s AS ann_dist
+                      FROM hivesense_app.posts_vectors hpv
+                      JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+                     WHERE ($3 IS NULL OR hpv.post_id <> $3)
+                       AND ($4 = 0 OR NOT EXISTS (
+                             SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                              WHERE m.observer_id = $4
+                                AND m.muted_id    = hp.author_id))
+                     ORDER BY ann_dist, hpv.post_id
+                     LIMIT %s
+                )
+                SELECT ann.post_id,
+                       ann.chunk_number,
+                       (pv.embedding <=> $1)::float4 AS similarity
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id = ann.post_id
+            $q$, dist_red, batch_size);
+
+        ELSIF use_reduced THEN
+            -- PCA: ANN on posts_vectors_reduced
             sql := format($q$
                 WITH ann AS (
                     SELECT hpv.post_id,
@@ -641,6 +728,7 @@ AS $BODY$
 DECLARE
     /* ───────── flags & dims ───────── */
     use_reduced   boolean := hivesense_app.use_reduced_embeddings();
+    red_mode      text    := hivesense_app.reduction_mode();
     store_half    boolean := hivesense_app.store_halfvec_embeddings();
     half_index    boolean := hivesense_app.use_halfvec_index();
 
@@ -662,7 +750,7 @@ DECLARE
     exploratory_factor int := default_ef;
     ann_candidates     int;             -- computed below
     exhaustive boolean := false;
-    
+
     /* ───────── author tracking ───────── */
     __max_embedding_limit INT    := 300000;
     author_scores  jsonb := '{}'::jsonb;  -- track best score per author
@@ -719,7 +807,13 @@ BEGIN
      WHERE id = 1;
 
     /* — build reduced query vector & distance clause — */
-    IF use_reduced THEN
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka: truncate the query vector to reduced dims
+        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+          USING _embedding INTO query_red;
+        dist_red := format(
+          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
+    ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
 
         IF store_half THEN
@@ -808,8 +902,64 @@ BEGIN
         LIMIT _limit;
         RETURN;
 
+    ELSIF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka slicing: ANN on posts_vectors with expression distance
+        RETURN QUERY EXECUTE format($q$
+            WITH ann AS (
+                SELECT pv.post_id,
+                       pv.chunk_number,
+                       hp.author_id,
+                       %s AS ann_dist
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND ($3 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $3
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY ann_dist, pv.post_id
+                 LIMIT %s
+            ),
+            reranked AS (
+                SELECT ann.author_id,
+                       ann.post_id,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM ann
+                  JOIN hivesense_app.posts_vectors pv
+                    ON pv.post_id = ann.post_id
+                   AND pv.chunk_number = ann.chunk_number
+            ),
+            ranked AS (
+                SELECT author_id,
+                       sim,
+                       row_number() OVER (ORDER BY sim) AS rn
+                  FROM reranked
+            ),
+            author_best AS (
+                SELECT author_id,
+                       MIN(sim) AS best_sim,
+                       SUM(1.0 / sqrt(rn)) AS score
+                  FROM ranked
+                 GROUP BY author_id
+            )
+            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
+                   author_id,
+                   best_sim::real AS similarity
+              FROM author_best
+             ORDER BY score DESC, author_id
+             LIMIT %s
+        $q$,
+          dist_red,                     -- %s  ann distance expr
+          (__min_search_tokens = 0),    -- %L  token filter off?
+          __min_search_tokens,          -- %s
+          ann_candidates,               -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, query_red, _observer_id;
+
     ELSIF use_reduced THEN
-        -- Use reduced embeddings for initial search
+        -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
         RETURN QUERY EXECUTE format($q$
             WITH ann AS (
                 SELECT pr.post_id,

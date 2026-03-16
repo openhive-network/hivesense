@@ -37,9 +37,19 @@ install_tokenizer() {
   cat << EOF > /tmp/download-tokenizer-files.py
 from huggingface_hub import snapshot_download
 
+# e5-base (default model)
 snapshot_download(
     repo_id="intfloat/multilingual-e5-base",
     local_dir="/home/hived/tokenizer-files/e5-base",
+    allow_patterns=[
+      "tokenizer.json"
+    ]
+)
+
+# Jina v5 small
+snapshot_download(
+    repo_id="jinaai/jina-embeddings-v5-text-small",
+    local_dir="/home/hived/tokenizer-files/jina-v5-small",
     allow_patterns=[
       "tokenizer.json"
     ]

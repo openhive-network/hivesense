@@ -60,6 +60,7 @@ print_help () {
     echo "  --minimum-ann-candidates              Always consider at least this many candidates for reranking"
     echo "  --use-reduced-embeddings=BOOL         Enable dimension reduction (true/false, yes/no, on/off, 1/0, case insensitive)"
     echo "  --reduced-dim=NUMBER                  Reduced dimension size"
+    echo "  --reduction-mode=MODE                 Reduction method: 'none', 'pca', or 'slice' (matryoshka truncation)"
     echo "  --reduced-matrix-source=PATH|URL      Path to matrix file or URL to download (auto-detected)"
     echo "  --reduced-matrix-json=PATH            (Deprecated) Path to reduction matrix JSON file"
     echo "  --reduced-matrix-url=URL              (Deprecated) URL to download reduction matrix JSON"
@@ -96,6 +97,7 @@ MAX_EMBEDINGS_PER_POST=0
 MAINTENANCE_WORK_MEM=28    # GB
 USE_REDUCED_EMBEDDINGS=false
 REDUCED_DIM=0          # must be set when flag=true
+REDUCTION_MODE='none'  # 'none', 'pca', or 'slice' (matryoshka)
 REDUCED_MATRIX_JSON=""
 REDUCED_MATRIX_URL=""
 REDUCED_MATRIX_FILE=""
@@ -175,6 +177,9 @@ while [ $# -gt 0 ]; do
 	;;
     --reduced-dim=*)
 	REDUCED_DIM="${1#*=}"
+	;;
+    --reduction-mode=*)
+	REDUCTION_MODE="${1#*=}"
 	;;
     --reduced-matrix-source=*)
 	REDUCED_MATRIX_SOURCE="${1#*=}"
@@ -270,6 +275,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.MAINTENANCE_WORK_MEM TO ${MAINTENANCE_WORK_MEM};
   SET pg_temp.USE_REDUCED_EMBEDDINGS TO ${USE_REDUCED_EMBEDDINGS};
   SET pg_temp.REDUCED_DIM           TO ${REDUCED_DIM};
+  SET pg_temp.REDUCTION_MODE        TO '${REDUCTION_MODE}';
   SET pg_temp.HNSW_M                TO ${HNSW_M};
   SET pg_temp.HNSW_EF_CONSTRUCTION  TO ${HNSW_EF_CONSTRUCTION};
   SET pg_temp.DEFAULT_EF_SEARCH TO ${DEFAULT_EF_SEARCH};
@@ -279,8 +285,8 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
 
-# Handle matrix JSON configuration only if USE_REDUCED_EMBEDDINGS is true
-if [ "$USE_REDUCED_EMBEDDINGS" = "true" ]; then
+# Handle matrix JSON configuration only if USE_REDUCED_EMBEDDINGS is true and mode is PCA
+if [ "$USE_REDUCED_EMBEDDINGS" = "true" ] && [ "$REDUCTION_MODE" != "slice" ]; then
   # Handle new unified matrix source parameter
   if [ -n "$REDUCED_MATRIX_SOURCE" ]; then
     # Detect if it's a URL or file path
