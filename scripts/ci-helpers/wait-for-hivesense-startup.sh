@@ -54,6 +54,7 @@ ensure_haf_indexes() {
 }
 
 wait_for_hivesense_startup() {
+    PSQL="docker compose -f ${COMPOSE_DIR}/compose.yml exec -T haf psql -U haf_admin -d haf_block_log"
     COMMAND="SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'i' AND n.nspname = 'hivesense_app' AND c.relname = hivesense_app.get_hnsw_index_name());"
     MESSAGE="Waiting for Hivesense to finish processing blocks..."
     HIVEMIND_BLOCK_COMMAND="SELECT last_completed_block_num FROM hivemind_app.hive_state"
@@ -90,18 +91,18 @@ wait_for_hivesense_startup() {
                                FROM pg_locks
                                JOIN pg_stat_activity ON pg_locks.pid = pg_stat_activity.pid
                                ORDER BY pg_stat_activity.query_start;"
-            docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "${LOCK_DUMP_COMMAND}";
+            $PSQL -t -A -c "${LOCK_DUMP_COMMAND}";
             exit 1
         fi
-        HAF_BLOCK=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "$HAF_BLOCK_COMMAND";)
-        HIVEMIND_BLOCK=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "$HIVEMIND_BLOCK_COMMAND";)
-        HIVESENSE_BLOCK=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "$HIVESENSE_BLOCK_COMMAND";)
+        HAF_BLOCK=$($PSQL -t -A -c "$HAF_BLOCK_COMMAND";)
+        HIVEMIND_BLOCK=$($PSQL -t -A -c "$HIVEMIND_BLOCK_COMMAND";)
+        HIVESENSE_BLOCK=$($PSQL -t -A -c "$HIVESENSE_BLOCK_COMMAND";)
 
         echo "HAF is on block: ${HAF_BLOCK}"
         echo "Hivemind is on block: ${HIVEMIND_BLOCK}"
         echo "Hivesense is on block: ${HIVESENSE_BLOCK}"
 
-        RESULT=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -d haf_block_log -t -A -c "$COMMAND")
+        RESULT=$($PSQL -t -A -c "$COMMAND")
         if [ "$RESULT" = "t" ]; then
             break
         fi
