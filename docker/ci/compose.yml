@@ -84,15 +84,15 @@ services:
         source: ${HAF_WAL_DIRECTORY:-${TOP_LEVEL_DATASET_MOUNTPOINT}/shared_memory/haf_wal}
         target: /home/hived/wal_dir
       - type: bind
-        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/all-MiniLM-L6-v2
+        source: ${HIVESENSE_TOKENIZER_DIR:-/hivesense/tokenizer-files}/all-MiniLM-L6-v2
         target: /home/hived/tokenizer-files/all-MiniLM-L6-v2
         read_only: true
       - type: bind
-        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/e5-base
+        source: ${HIVESENSE_TOKENIZER_DIR:-/hivesense/tokenizer-files}/e5-base
         target: /home/hived/tokenizer-files/e5-base
         read_only: true
       - type: bind
-        source: ${HIVESENSE_TOKENIZER_DIR:-/cache/hivesense/tokenizer-files}/jina-v5-small
+        source: ${HIVESENSE_TOKENIZER_DIR:-/hivesense/tokenizer-files}/jina-v5-small
         target: /home/hived/tokenizer-files/jina-v5-small
         read_only: true
     shm_size: ${HAF_SHM_SIZE:-8gb}
