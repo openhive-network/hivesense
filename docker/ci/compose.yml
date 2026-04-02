@@ -257,7 +257,7 @@ services:
   # Reputation Tracker - Dependency for Hivemind
   # ===========================================================================
   reputation-tracker-install:
-    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.28.6-rc10}}
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-1.27.12-rc3}
     environment:
       POSTGRES_HOST: haf
     networks:
@@ -271,7 +271,7 @@ services:
         condition: service_healthy
 
   reputation-tracker-block-processing:
-    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.28.6-rc10}}
+    image: ${REPUTATION_TRACKER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker}:${REPUTATION_TRACKER_VERSION:-1.27.12-rc3}
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: reptracker_owner
@@ -323,7 +323,7 @@ services:
         condition: service_healthy
 
   reputation-tracker-postgrest-rewriter:
-    image: ${REPUTATION_TRACKER_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker/postgrest-rewriter}:${REPUTATION_TRACKER_VERSION:-${HIVE_API_NODE_VERSION:-1.28.6-rc10}}
+    image: ${REPUTATION_TRACKER_REWRITER_IMAGE:-${HIVE_API_NODE_REGISTRY:-registry.gitlab.syncad.com/hive}/reputation_tracker/postgrest-rewriter}:${REPUTATION_TRACKER_VERSION:-1.27.12-rc3}
     healthcheck:
       test: ["CMD-SHELL", "wget --timeout=2 -nv -t1 --spider 127.0.0.1:81/health || exit 1"]
       interval: 10s
