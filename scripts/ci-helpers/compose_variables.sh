@@ -32,7 +32,7 @@ fi
 
 # Reputation tracker version - use REPUTATION_TRACKER_VERSION if set, otherwise default
 if [ -z "${REPUTATION_TRACKER_VERSION:-}" ]; then
-    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-latest}"
+    REPUTATION_TRACKER_VERSION="${HIVE_API_NODE_VERSION:-1.27.12-rc3}"
 fi
 
 GIT_COMMIT_SHA=$(git -C "$(git rev-parse --show-superproject-working-tree --show-toplevel | head -1)" rev-parse HEAD || true)
