@@ -12,13 +12,20 @@ ROOT_SRC_PATH="${CI_PROJECT_DIR:-$ROOT_SRC_PATH}"
 # HAF version comes from HAF_COMMIT env var (set by CI from find_haf_image job)
 # or HAF_UPSTREAM_COMMIT directly. Falls back to HAF_VERSION if already set.
 if [ -z "${HAF_VERSION:-}" ]; then
-    HAF_VERSION="${HAF_COMMIT:-${HAF_UPSTREAM_COMMIT:-}}"
-    if [ -z "$HAF_VERSION" ]; then
-        echo "ERROR: HAF_COMMIT or HAF_UPSTREAM_COMMIT must be set (no HAF submodule)"
-        exit 1
+    # If find_haf_image found no image in the registry, fall back to 'latest'
+    if [ "${HAF_UPSTREAM_CACHE_HIT:-}" = "false" ]; then
+        echo "WARN: No HAF image found in registry for recent commits, falling back to 'latest'"
+        HAF_VERSION="latest"
+    else
+        HAF_VERSION="${HAF_COMMIT:-${HAF_UPSTREAM_COMMIT:-}}"
+        if [ -z "$HAF_VERSION" ]; then
+            echo "WARN: HAF_COMMIT not set, falling back to 'latest'"
+            HAF_VERSION="latest"
+        else
+            # Use short SHA (8 chars) for image tag
+            HAF_VERSION=$(echo "$HAF_VERSION" | cut -c1-8)
+        fi
     fi
-    # Use short SHA (8 chars) for image tag
-    HAF_VERSION=$(echo "$HAF_VERSION" | cut -c1-8)
 fi
 
 # Hivemind version must be provided via environment variable
