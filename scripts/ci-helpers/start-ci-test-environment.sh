@@ -69,6 +69,9 @@ if [ -n "${BLOCK_LOG_DIRECTORY}" ]; then
   chmod a+w "${HAF_DATA_DIRECTORY}/blockchain/block_log.artifacts"
 fi
 
+# Ensure Ollama model cache exists (persists across CI runs to avoid re-pulling)
+mkdir -p "${HIVESENSE_OLLAMA_MODELS_DIR:-/cache/hivesense/ollama}"
+
 # Start Docker Compose using local CI compose file
 COMPOSE_DIR="${ROOT_SRC_PATH}/docker/ci"
 
