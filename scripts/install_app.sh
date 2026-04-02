@@ -65,6 +65,7 @@ print_help () {
     echo "  --reduced-matrix-json=PATH            (Deprecated) Path to reduction matrix JSON file"
     echo "  --reduced-matrix-url=URL              (Deprecated) URL to download reduction matrix JSON"
     echo "  --reduced-matrix-file=PATH            (Deprecated) Alternative to --reduced-matrix-json"
+    echo "  --num-ctx=NUMBER                      Ollama context size (0 = use Ollama default, set > tokens_per_chunk for large-context models)"
     echo "  --allow-debugging=BOOL                Enable debugging flags for API calls (true/false, yes/no, on/off, 1/0)"
     echo "  --help                                Display this help screen and exit"
     echo
@@ -101,6 +102,7 @@ REDUCTION_MODE='none'  # 'none', 'pca', or 'slice' (matryoshka)
 REDUCED_MATRIX_JSON=""
 REDUCED_MATRIX_URL=""
 REDUCED_MATRIX_FILE=""
+NUM_CTX=0              # 0 = use Ollama default; set > tokens_per_chunk for large-context models
 HNSW_M=32
 HNSW_EF_CONSTRUCTION=400
 DEFAULT_EF_SEARCH=500
@@ -204,6 +206,9 @@ while [ $# -gt 0 ]; do
         ;;
     --minimum-ann-candidates=*)
         MINIMUM_ANN_CANDIDATES="${1#*=}"
+        ;;
+    --num-ctx=*)
+        NUM_CTX="${1#*=}"
         ;;
     --allow-debugging=*)
         ALLOW_DEBUGGING=$(normalize_bool "${1#*=}")
@@ -367,7 +372,7 @@ EOF
 fi
 
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/ollama.sql"
-psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};SET pg_temp.LLM TO '${LLM}'; SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';SET pg_temp.NUM_CTX TO ${NUM_CTX};SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/main_loop.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/search.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/posts_preprocessing.sql"
 

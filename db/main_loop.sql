@@ -2,9 +2,18 @@ SET ROLE hivesense_owner;
 
 DO $BODY$
 DECLARE
-    __llm    TEXT := current_setting('pg_temp.LLM',       TRUE);
-    __ollama TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
+    __llm     TEXT := current_setting('pg_temp.LLM',        TRUE);
+    __ollama  TEXT := current_setting('pg_temp.OLLAMA_HOST', TRUE);
+    __num_ctx INT  := NULLIF(current_setting('pg_temp.NUM_CTX', TRUE)::INT, 0);
+    __opts    TEXT := '';
 BEGIN
+    -- When num_ctx is set, pass it as embedding_options so Ollama
+    -- allocates enough context for large-chunk models (e.g. Jina v5 small
+    -- with tokens_per_chunk=2048 exceeds Ollama's default num_ctx of 2048)
+    IF __num_ctx IS NOT NULL THEN
+        __opts := format($$, embedding_options => '{"num_ctx": %s}'::jsonb$$, __num_ctx);
+    END IF;
+
     EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_post TEXT)
             RETURNS vector
@@ -14,10 +23,10 @@ BEGIN
         AS
         $BODY2$
         BEGIN
-            RETURN hivesense_app.ollama_embed('%s', _post, host => '%s');
+            RETURN hivesense_app.ollama_embed('%s', _post, host => '%s'%s);
         END;
         $BODY2$
-    $$, __llm, __ollama);
+    $$, __llm, __ollama, __opts);
 
     EXECUTE format($$
         CREATE OR REPLACE FUNCTION hivesense_embed(_posts hivesense_app.id_and_post_chunk[])
@@ -28,10 +37,10 @@ BEGIN
         AS
         $BODY2$
         BEGIN
-            RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s');
+            RETURN hivesense_app.ollama_embed('%s', _posts, host => '%s'%s);
         END;
         $BODY2$
-    $$, __llm, __ollama);
+    $$, __llm, __ollama, __opts);
 END;
 $BODY$;
 
