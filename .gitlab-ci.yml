@@ -101,8 +101,8 @@ lint_bash_scripts:
   - apk add xmlstarlet
   script:
   # Exclude .git directory
-  - find . -name .git -type d -prune -o -type f -name
-    \*.sh -exec shellcheck -f checkstyle {} + | tee shellcheck-checkstyle-result.xml
+  - find . -name .git -type d -prune -o -type f -name \*.sh -exec shellcheck -f checkstyle
+    {} + | tee shellcheck-checkstyle-result.xml
   after_script:
   - xmlstarlet tr misc/checkstyle2junit.xslt shellcheck-checkstyle-result.xml > shellcheck-junit-result.xml
   artifacts:
@@ -152,6 +152,7 @@ find_haf_image:
     UPSTREAM_REGISTRY: "registry.gitlab.syncad.com/hive/haf"
     UPSTREAM_BRANCH: "develop"
     UPSTREAM_OUTPUT: "haf_image.env"
+    UPSTREAM_OVERRIDE_TAG: 0d2f5cdf
   before_script:
     # docker-builder image already has git, bash, and curl
     # Fetch source patterns from HAF's script (single source of truth)
