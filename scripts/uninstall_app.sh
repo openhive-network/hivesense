@@ -76,6 +76,12 @@ BEGIN
      EXECUTE format('DROP SCHEMA IF EXISTS %s CASCADE', '${HIVESENSE_SCHEMA}' || worker);
     END IF;
   END LOOP;
+
+  -- Remove the main context (must happen before DROP SCHEMA CASCADE,
+  -- which would destroy the HAF views but leave the context registered)
+  IF hive.app_context_exists('${HIVESENSE_SCHEMA}') THEN
+    PERFORM hive.app_remove_context('${HIVESENSE_SCHEMA}');
+  END IF;
 END\$\$;
 EOF
 )
