@@ -234,10 +234,16 @@ BEGIN
      * Compose CREATE INDEX statement
      * ----------------------------------------------------------*/
 
-    IF use_reduced AND red_mode = 'slice' THEN
-        -- Matryoshka: expression index truncating embedding to reduced dims
+    IF use_reduced AND red_mode = 'slice' AND store THEN
+        -- Matryoshka on halfvec column: subvector returns halfvec
         EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw ((%I::public.vector(%s)) public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          'CREATE INDEX %I ON %s USING hnsw ((subvector(%I, 1, %s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, m, efc
+        );
+    ELSIF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka on vector column: subvector returns vector
+        EXECUTE format(
+          'CREATE INDEX %I ON %s USING hnsw ((subvector(%I, 1, %s)) public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
           idx_name, tgt_table, tgt_col, dim, m, efc
         );
     ELSIF store THEN
