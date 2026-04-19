@@ -106,10 +106,10 @@ BEGIN
         -- Expression distance on posts_vectors.embedding truncated to reduced dims
         IF store_half THEN
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+              'public.subvector(embedding, 1, %s)::public.halfvec(%s) <=> $2::public.halfvec(%s)', red_dim, red_dim, red_dim);
         ELSE
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2', red_dim);
+              'public.subvector(embedding, 1, %s)::public.vector(%s) <=> $2', red_dim, red_dim);
         END IF;
     ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
@@ -420,10 +420,10 @@ BEGIN
     ELSIF red_mode = 'slice' THEN
         IF store_half THEN
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+              'public.subvector(embedding, 1, %s)::public.halfvec(%s) <=> $2::public.halfvec(%s)', red_dim, red_dim, red_dim);
         ELSE
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2', red_dim);
+              'public.subvector(embedding, 1, %s)::public.vector(%s) <=> $2', red_dim, red_dim);
         END IF;
     ELSE
         IF store_half THEN
@@ -823,10 +823,10 @@ BEGIN
           USING _embedding INTO query_red;
         IF store_half THEN
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+              'public.subvector(embedding, 1, %s)::public.halfvec(%s) <=> $2::public.halfvec(%s)', red_dim, red_dim, red_dim);
         ELSE
             dist_red := format(
-              'public.subvector(embedding, 1, %s) <=> $2', red_dim);
+              'public.subvector(embedding, 1, %s)::public.vector(%s) <=> $2', red_dim, red_dim);
         END IF;
     ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
