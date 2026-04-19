@@ -101,11 +101,16 @@ BEGIN
     /* — build reduced query vector & distance clause — */
     IF use_reduced AND red_mode = 'slice' THEN
         -- Matryoshka: truncate the query vector to reduced dims
-        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+        EXECUTE format('SELECT subvector($1, 1, %s)', red_dim)
           USING _embedding INTO query_red;
         -- Expression distance on posts_vectors.embedding truncated to reduced dims
-        dist_red := format(
-          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
+        IF store_half THEN
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+        ELSE
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2', red_dim);
+        END IF;
     ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
 
@@ -401,7 +406,7 @@ BEGIN
     -- Build reduced query once (if needed)
     ----------------------------------------------------------------
     IF use_reduced AND red_mode = 'slice' THEN
-        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+        EXECUTE format('SELECT subvector($1, 1, %s)', red_dim)
           USING _embedding INTO query_red;
     ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
@@ -413,8 +418,13 @@ BEGIN
     IF NOT use_reduced THEN
         dist_red := dist_full;        -- same column & same param pos
     ELSIF red_mode = 'slice' THEN
-        dist_red := format(
-          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
+        IF store_half THEN
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+        ELSE
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2', red_dim);
+        END IF;
     ELSE
         IF store_half THEN
             dist_red := format('%I <=> $2::public.halfvec(%s)', tgt_col, red_dim);
@@ -809,10 +819,15 @@ BEGIN
     /* — build reduced query vector & distance clause — */
     IF use_reduced AND red_mode = 'slice' THEN
         -- Matryoshka: truncate the query vector to reduced dims
-        EXECUTE format('SELECT $1::public.vector(%s)', red_dim)
+        EXECUTE format('SELECT subvector($1, 1, %s)', red_dim)
           USING _embedding INTO query_red;
-        dist_red := format(
-          '(embedding::public.vector(%s)) <=> $2::public.vector(%s)', red_dim, red_dim);
+        IF store_half THEN
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2::public.halfvec(%s)', red_dim, red_dim);
+        ELSE
+            dist_red := format(
+              'subvector(embedding, 1, %s) <=> $2', red_dim);
+        END IF;
     ELSIF use_reduced THEN
         query_red := hivesense_app.reduce_embedding(_embedding);
 
