@@ -195,6 +195,7 @@ def apply_op(cur, op, post_id):
     )
     cur.execute("""
         SELECT hivesense_app.use_reduced_embeddings()
+               AND hivesense_app.reduction_mode() <> 'slice'
     """)
     use_reduced_embeddings = cur.fetchone()[0]
     if op["op"] == "delete":
