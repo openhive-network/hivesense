@@ -427,7 +427,7 @@ services:
   # Hivesense Services
   # ===========================================================================
   hivesense-ollama:
-    image: ${OLLAMA_IMAGE:-ollama/ollama}:${OLLAMA_VERSION:-0.6.5}
+    image: registry.gitlab.syncad.com/hive/hivesense/ollama:0.18.0
     environment:
       - TZ=America/New_York
       - OLLAMA_HOST=0.0.0.0
