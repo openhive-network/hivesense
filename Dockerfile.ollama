@@ -1,4 +1,4 @@
-FROM ollama/ollama:0.6.5 AS binary-source
+FROM ollama/ollama:0.18.0 AS binary-source
 FROM debian:bookworm-slim
 
 # Add CA certs and other basic runtime deps
