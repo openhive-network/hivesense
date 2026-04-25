@@ -31,7 +31,8 @@ CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model             TEXT,
     input_text        TEXT,
     host              TEXT    DEFAULT NULL::text,
-    embedding_options JSONB   DEFAULT NULL::jsonb
+    embedding_options JSONB   DEFAULT NULL::jsonb,
+    max_retries       INTEGER DEFAULT 3
 )
 RETURNS vector
 IMMUTABLE
@@ -47,12 +48,15 @@ BEGIN
         ROW(1, input_text, 1)::hivesense_app.id_and_post_chunk
     ];
 
-    -- call the batch endpoint (which always normalizes)
+    -- Single-text path is used by interactive search (find_nearest_posts).
+    -- Bound the retries so a broken/slow ollama fails fast instead of
+    -- holding a snapshot open and starving autovacuum across the DB.
     batch_out := hivesense_app.ollama_embed(
         model,
         batch_in,
         host              => host,
-        embedding_options => embedding_options
+        embedding_options => embedding_options,
+        max_retries       => max_retries
     );
 
     -- extract and return the single vector
@@ -68,7 +72,8 @@ CREATE OR REPLACE FUNCTION hivesense_app.ollama_embed(
     model             TEXT,
     posts             hivesense_app.id_and_post_chunk[],
     host              TEXT           DEFAULT NULL::text,
-    embedding_options JSONB          DEFAULT NULL::jsonb
+    embedding_options JSONB          DEFAULT NULL::jsonb,
+    max_retries       INTEGER        DEFAULT NULL
 )
 RETURNS hivesense_app.post_and_vector_chunk[]
 LANGUAGE plpython3u
@@ -113,6 +118,11 @@ AS $BODY$
     max_delay     = 120
     delay_secs    = initial_delay
 
+    # max_retries=None means infinite retries (sync path: never drop posts).
+    # A finite max_retries (search path) bounds the wait so a broken/slow
+    # ollama can't hold a snapshot open and starve autovacuum DB-wide.
+    retry_label = max_retries if max_retries is not None else 'inf'
+
     for start in range(0, total, max_batch):
         end = min(start + max_batch, total)
         batch_texts = flat_texts[start:end]
@@ -125,18 +135,28 @@ AS $BODY$
 
         url = host_url.rstrip('/') + "/api/embed"
         body = json.dumps(payload).encode('utf-8')
+        attempts = 0
         while True:
+            last_err = None
+            # Only catch network-layer errors. plpy.QueryCanceledError and
+            # other plpy exceptions must propagate so pg_terminate_backend /
+            # pg_cancel_backend actually work — a bare `except Exception`
+            # here will silently swallow cancellation.
             try:
                 req = Request(url, data=body, headers={'Content-Type': 'application/json'})
-                resp = urlopen(req, timeout=300)
+                resp = urlopen(req, timeout=30)
                 status_code = resp.getcode()
                 if status_code == 200:
                     break
-                plpy.notice(f"[Batch {start}:{end}] HTTP {status_code}, retrying in {delay_secs}s")
+                last_err = f"HTTP {status_code}"
             except HTTPError as e:
-                plpy.notice(f"[Batch {start}:{end}] HTTP {e.code}, retrying in {delay_secs}s")
-            except Exception as e:
-                plpy.notice(f"[Batch {start}:{end}] Exception: {e}, retrying in {delay_secs}s")
+                last_err = f"HTTP {e.code}"
+            except (URLError, OSError) as e:
+                last_err = f"network error: {e}"
+            attempts += 1
+            if max_retries is not None and attempts >= max_retries:
+                plpy.error(f"[Batch {start}:{end}] giving up after {attempts} attempts: {last_err}")
+            plpy.notice(f"[Batch {start}:{end}] {last_err}, retrying in {delay_secs}s ({attempts}/{retry_label})")
             time.sleep(delay_secs)
             delay_secs = min(delay_secs * 2, max_delay)
         # reset backoff for next batch
@@ -149,6 +169,6 @@ AS $BODY$
     return embeddings
 $BODY$;
 
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO haf_admin WITH GRANT OPTION;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO hivesense_user;
-GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb) TO pg_database_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb, integer) TO haf_admin WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb, integer) TO hivesense_user;
+GRANT EXECUTE ON FUNCTION hivesense_app.ollama_embed(text, hivesense_app.id_and_post_chunk [], text, jsonb, integer) TO pg_database_owner WITH GRANT OPTION;
