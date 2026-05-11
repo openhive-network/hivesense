@@ -258,6 +258,18 @@ async def create_indexes_with_live_notices(dsn):
         await aconn.commit()
 
 
+def ensure_context_detached(conn):
+    # Park hivesense_app's events_id at hive.unreachable_event_id() so it does
+    # not pin hafd.events_queue cleanup. Called every iteration so that if
+    # anything ever attaches the context (operator action, install ordering,
+    # etc.), the next pass re-parks it.
+    with conn.cursor() as cur:
+        cur.execute("SELECT hive.app_context_is_attached('hivesense_app')")
+        if cur.fetchone()[0]:
+            cur.execute("SELECT hive.app_context_detach('hivesense_app')")
+    conn.commit()
+
+
 def main():
     conn = psycopg.connect(DB_DSN)
     conn = setup_notice_handler(conn)
@@ -268,15 +280,12 @@ def main():
     conn = ensure_connection_alive(conn)
     sync_uuid = validate_local_state(conn, server_status)
 
-    with conn.cursor() as cur:
-        cur.execute("""SELECT hive.app_context_is_attached('hivesense_app')""")
-        if cur.fetchone()[0]:
-            cur.execute("""SELECT hive.app_context_detach('hivesense_app')""")
-        conn.commit()
+    ensure_context_detached(conn)
 
     last_seen_current_block_num = None
     while True:
         conn = ensure_connection_alive(conn)
+        ensure_context_detached(conn)
 
         # determine how far we've synced
         with conn.cursor() as cur:
@@ -333,21 +342,6 @@ def main():
             if current_block != last_seen_current_block_num:
                 with conn.cursor() as cur:
                     cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (current_block,))
-                conn.commit()
-                # Advance hivesense_app events_id so HAF can clean up events_queue
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE hafd.contexts
-                        SET events_id = sub.max_event_id
-                        FROM (
-                            SELECT COALESCE(MAX(id), 0) AS max_event_id
-                            FROM hafd.events_queue
-                            WHERE block_num <= %s
-                              AND event != 'BACK_FROM_FORK'
-                        ) sub
-                        WHERE name = 'hivesense_app'
-                          AND events_id < sub.max_event_id
-                    """, (current_block,))
                 conn.commit()
                 last_seen_current_block_num = current_block
             time.sleep(3)
@@ -427,21 +421,6 @@ def main():
                 cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
                 last_seen_current_block_num = max_last_vectors_block
 
-        conn.commit()
-        # Advance hivesense_app events_id so HAF can clean up events_queue
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE hafd.contexts
-                SET events_id = sub.max_event_id
-                FROM (
-                    SELECT COALESCE(MAX(id), 0) AS max_event_id
-                    FROM hafd.events_queue
-                    WHERE block_num <= %s
-                      AND event != 'BACK_FROM_FORK'
-                ) sub
-                WHERE name = 'hivesense_app'
-                  AND events_id < sub.max_event_id
-            """, (max_last_vectors_block,))
         conn.commit()
 
         elapsed = time.monotonic() - batch_start
