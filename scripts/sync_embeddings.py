@@ -46,6 +46,7 @@ def ensure_connection_alive(conn):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
+        conn.rollback()  # release implicit txn opened by SELECT 1
         return conn
     except (psycopg.OperationalError, psycopg.DatabaseError) as e:
         logging.warning("PostgreSQL connection was lost (%s). Reconnecting.", type(e).__name__)
