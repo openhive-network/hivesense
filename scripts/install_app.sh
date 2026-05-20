@@ -251,7 +251,7 @@ POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POS
 # the wrapper logs the holder and exits 0 without invoking this script.
 if [[ -z "${HAF_INSTALL_LOCK_HELD:-}" ]]; then
   export HAF_INSTALL_LOCK_HELD=1
-  exec /usr/local/bin/install_with_app_lock.py hivesense "$POSTGRES_ACCESS" "$0" "${ORIGINAL_ARGS[@]}"
+  exec python3 /usr/local/bin/install_with_app_lock.py hivesense "$POSTGRES_ACCESS" "$0" "${ORIGINAL_ARGS[@]}"
 fi
 
 #pushd "$hivesense_dir"
