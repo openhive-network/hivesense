@@ -470,8 +470,12 @@ DECLARE
     __current_uuid                  UUID;
     __new_uuid                      UUID;
 BEGIN
+    -- Block until any active hivemind/hivesense installer releases its
+    -- exclusive lock; held by this session until the scheduler returns.
+    PERFORM hive.acquire_app_block_processor_locks(ARRAY['hivemind', 'hivesense']);
+
     -- Check our sync UUID -- if we're just starting out (empty database), or if we were downloading pre-computed embeddings
-    -- from another server but are now switching to computing them locally, generate a new UUID here 
+    -- from another server but are now switching to computing them locally, generate a new UUID here
     SELECT syncing_embeddings, sync_uuid INTO __current_syncing, __current_uuid FROM hivesense_app.hivesense_app_status WHERE id = 1;
 
     IF __current_syncing IS NULL OR __current_syncing THEN
@@ -804,6 +808,10 @@ DECLARE
     __done_key_namespace            INT;
     __ack_key_namespace             INT;
 BEGIN
+    -- Block until any active hivemind/hivesense installer releases its
+    -- exclusive lock; held by this session until the worker loop returns.
+    PERFORM hive.acquire_app_block_processor_locks(ARRAY['hivemind', 'hivesense']);
+
     SELECT advisory_lock_namespace_begin INTO __advisory_lock_namespace_begin
     FROM   hivesense_app.hivesense_app_status;
 

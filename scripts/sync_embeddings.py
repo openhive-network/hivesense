@@ -42,6 +42,17 @@ def setup_notice_handler(conn):
     conn.add_notice_handler(notice_processor)
     return conn
 
+# Apps this syncer reads from. Advisory locks are session-scoped, so this
+# must be re-acquired on every reconnect (see ensure_connection_alive).
+APP_LOCK_DEPS = ['hivemind', 'hivesense']
+
+def acquire_app_locks(conn):
+    """Take shared advisory locks for the apps this syncer reads from.
+    Blocks (with NOTICE logs) until any active installer releases."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT hive.acquire_app_block_processor_locks(%s)",
+                    (APP_LOCK_DEPS,))
+
 def ensure_connection_alive(conn):
     try:
         with conn.cursor() as cur:
@@ -55,7 +66,9 @@ def ensure_connection_alive(conn):
         except Exception:
             pass
         new_conn = psycopg.connect(DB_DSN)
-        return setup_notice_handler(new_conn)
+        new_conn = setup_notice_handler(new_conn)
+        acquire_app_locks(new_conn)
+        return new_conn
 
 def fetch_server_status():
     backoff = RETRY_SLEEP
@@ -274,6 +287,7 @@ def ensure_context_detached(conn):
 def main():
     conn = psycopg.connect(DB_DSN)
     conn = setup_notice_handler(conn)
+    acquire_app_locks(conn)
 
     # fetch server status and validate
     server_status = fetch_server_status()

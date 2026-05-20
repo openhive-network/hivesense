@@ -1,11 +1,12 @@
 # docker build -t hivesense:local .
 # syntax=docker/dockerfile:1.5
-ARG PAAS_PSQL_VERSION=11251948d5dd4867552f9b9836a9e02110304df5
-FROM ghcr.io/alphagov/paas/psql:${PAAS_PSQL_VERSION} AS psql_client
+ARG PSQL_CLIENT_VERSION=14-2
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:${PSQL_CLIENT_VERSION} AS psql_client
 
+USER root
 RUN <<EOF
   set -e
-  apk add --no-cache bash curl su-exec
+  apk add --no-cache curl su-exec
   adduser -s /bin/bash -G users -D "hived"
 EOF
 
