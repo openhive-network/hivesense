@@ -244,14 +244,21 @@ done
 
 POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=${POSTGRES_APP_NAME}"}
 
-# Re-exec under the install-lock wrapper if not already running under it.
-# The wrapper holds an exclusive advisory lock on `hivesense` for the lifetime
-# of this script, preventing a block-processor from running concurrently
-# against the in-progress schema. If a BP is already holding the shared lock,
-# the wrapper logs the holder and exits 0 without invoking this script.
+# Re-exec under the install-lock wrapper if not already running under it AND
+# the wrapper plus python3 are actually available (e.g. inside the production
+# install image). The wrapper holds an exclusive advisory lock on `hivesense`
+# for the lifetime of this script. When the wrapper isn't installed (e.g.
+# running this script directly on a CI runner host outside the production
+# image), print a WARNING and run without the lock -- the lock is a
+# production safety mechanism, not a correctness requirement for tests.
 if [[ -z "${HAF_INSTALL_LOCK_HELD:-}" ]]; then
-  export HAF_INSTALL_LOCK_HELD=1
-  exec python3 /usr/local/bin/install_with_app_lock.py hivesense "$POSTGRES_ACCESS" "$0" "${ORIGINAL_ARGS[@]}"
+  if command -v python3 >/dev/null 2>&1 && [[ -f /usr/local/bin/install_with_app_lock.py ]]; then
+    export HAF_INSTALL_LOCK_HELD=1
+    exec python3 /usr/local/bin/install_with_app_lock.py hivesense "$POSTGRES_ACCESS" "$0" "${ORIGINAL_ARGS[@]}"
+  else
+    echo "WARNING: install_with_app_lock.py wrapper not found; running install without HAF advisory lock (expected in CI test setups, not in production install images)." >&2
+    export HAF_INSTALL_LOCK_HELD=1
+  fi
 fi
 
 #pushd "$hivesense_dir"
