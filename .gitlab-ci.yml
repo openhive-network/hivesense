@@ -288,6 +288,41 @@ sync:
     echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KBenchmark hivesense sync..."
     tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):lock_skip_test[collapsed=true]\r\e[0KAssert advisory-lock skip path..."
+    # Regression test for advisory-lock coordination:
+    #  - BP (hivesense-process-blocks) is already up and holding the shared lock
+    #  - Force-recreate the install service; it must exit 0 AND log the skip,
+    #    AND must NOT log the wrapper-not-found degrade warning.
+    # Catches: missing wrapper/python3 in install image, broken install_app.sh
+    # re-exec, missing/unused PERFORM in BP main loop, helpers missing in haf.
+    COMPOSE_DIR="${CI_PROJECT_DIR}/docker/ci"
+    docker compose -f "${COMPOSE_DIR}/compose.yml" up -d --no-deps --force-recreate hivesense-install-schema
+    cid=$(docker compose -f "${COMPOSE_DIR}/compose.yml" ps -q hivesense-install-schema)
+    docker wait "$cid"
+    ec=$(docker inspect "$cid" --format '{{.State.ExitCode}}')
+    docker logs "$cid" > /tmp/lock_test_install.log 2>&1
+    cat /tmp/lock_test_install.log | tail -30
+    if [ "$ec" != "0" ]; then
+      echo "FAIL: hivesense-install-schema exited $ec (expected 0)"
+      exit 1
+    fi
+    if ! grep -qE "Skipping hivesense install.*lock held by" /tmp/lock_test_install.log; then
+      echo "FAIL: expected wrapper-skip log line not found"
+      echo "  Expected pattern: 'Skipping hivesense install ... lock held by'"
+      echo "  This usually means: BP not holding the lock, install image missing"
+      echo "  the wrapper, install_app.sh re-exec broken, or haf helpers missing."
+      exit 1
+    fi
+    if grep -q "WARNING: install_with_app_lock.py wrapper not found" /tmp/lock_test_install.log; then
+      echo "FAIL: install image silently degraded to wrapper-not-found path"
+      echo "  This means the install image either lost python3 or lost"
+      echo "  /usr/local/bin/install_with_app_lock.py. Check PSQL_CLIENT_VERSION"
+      echo "  pinning and docker-bake.hcl build-arg overrides."
+      exit 1
+    fi
+    echo "PASS: install correctly hit the advisory-lock skip path"
+    echo -e "\e[0Ksection_end:$(date +%s):lock_skip_test\r\e[0K"
   after_script:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
