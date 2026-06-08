@@ -277,10 +277,23 @@ def ensure_context_detached(conn):
     # not pin hafd.events_queue cleanup. Called every iteration so that if
     # anything ever attaches the context (operator action, install ordering,
     # etc.), the next pass re-parks it.
+    #
+    # The syncer never consumes HAF events (it advances current_block_num
+    # itself via app_set_current_block_num), so hivesense_app must never hold
+    # the events_queue trim floor. HAF trims events_queue up to min(events_id)
+    # across all contexts, and treats events_id = 0 as uninitialized -> a
+    # context left at 0 pins the shared queue at 0 forever, starving every
+    # other HAF app on the instance. The UPDATE runs unconditionally each pass
+    # (not only when attached); the events_id guard makes it a no-op write
+    # after the first pass so we don't churn hafd.contexts every iteration.
     with conn.cursor() as cur:
         cur.execute("SELECT hive.app_context_is_attached('hivesense_app')")
         if cur.fetchone()[0]:
             cur.execute("SELECT hive.app_context_detach('hivesense_app')")
+        cur.execute(
+            "UPDATE hafd.contexts SET events_id = hive.unreachable_event_id() "
+            "WHERE name = 'hivesense_app' AND events_id <> hive.unreachable_event_id()"
+        )
     conn.commit()
 
 
