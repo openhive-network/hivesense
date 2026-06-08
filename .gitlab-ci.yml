@@ -344,6 +344,48 @@ sync:
     fi
     echo "PASS: install correctly hit the advisory-lock skip path"
     echo -e "\e[0Ksection_end:$(date +%s):lock_skip_test\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):events_id_test[collapsed=true]\r\e[0KAssert syncer parks events_id..."
+    # Regression test for issue #54: the syncer's ensure_context_detached()
+    # must park hivesense_app's events_id at hive.unreachable_event_id() so it
+    # does not pin hafd.events_queue and starve co-located HAF apps. A
+    # post-1.28.6 refactor silently dropped the events_id UPDATE, leaving it at
+    # 0 (= queue trim floor pinned forever).
+    #
+    # CI runs process_blocks (the in-DB path), not the syncer, so we exercise
+    # the REAL ensure_context_detached() from the just-built syncer image
+    # against the running HAF DB. We first seed events_id back to 0 to simulate
+    # the uninitialized/regressed state, then assert the function lifts it to
+    # hive.unreachable_event_id(). Connecting through pgbouncer as haf_admin
+    # (already trusted in PG_ACCESS) avoids per-container pg_hba matching.
+    COMPOSE_DIR="${CI_PROJECT_DIR}/docker/ci"
+    SYNCER_IMG="registry.gitlab.syncad.com/hive/hivesense/syncer:${CI_COMMIT_SHORT_SHA}"
+    NET=$(docker inspect -f '{{range $k,$_ := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' \
+      "$(docker compose -f "${COMPOSE_DIR}/compose.yml" ps -q haf)" | head -1)
+    psql_t() { docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -U haf_admin -A -t -d haf_block_log -c "$1" | tr -d '[:space:]'; }
+    UNREACH=$(psql_t "SELECT hive.unreachable_event_id();")
+    # sanity: context row must exist
+    if [ "$(psql_t "SELECT count(*) FROM hafd.contexts WHERE name='hivesense_app';")" != "1" ]; then
+      echo "FAIL: hivesense_app context row not found in hafd.contexts"; exit 1
+    fi
+    # seed the regressed state
+    psql_t "UPDATE hafd.contexts SET events_id = 0 WHERE name='hivesense_app';" >/dev/null
+    before=$(psql_t "SELECT events_id FROM hafd.contexts WHERE name='hivesense_app';")
+    echo "Seeded events_id=$before (expected 0); running real ensure_context_detached() from $SYNCER_IMG ..."
+    docker run --rm --network "$NET" -e POSTGRES_URI="postgresql://haf_admin@pgbouncer:6432/haf_block_log" \
+      "$SYNCER_IMG" python -c \
+      "import os, psycopg, sync_embeddings as s; c=psycopg.connect(os.environ['POSTGRES_URI']); s.ensure_context_detached(c); c.close(); print('ensure_context_detached ran')"
+    after=$(psql_t "SELECT events_id FROM hafd.contexts WHERE name='hivesense_app';")
+    echo "events_id after: $after (unreachable_event_id=$UNREACH)"
+    if [ "$after" != "$UNREACH" ]; then
+      echo "FAIL: syncer did not park events_id (got $after, expected $UNREACH)"
+      echo "  Means ensure_context_detached() no longer issues the"
+      echo "  'UPDATE hafd.contexts SET events_id = hive.unreachable_event_id()'."
+      echo "  This is the issue #54 regression: events_queue would be pinned."
+      exit 1
+    fi
+    echo "PASS: syncer parks hivesense_app events_id at unreachable_event_id()"
+    echo -e "\e[0Ksection_end:$(date +%s):events_id_test\r\e[0K"
   after_script:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
