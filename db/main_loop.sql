@@ -395,42 +395,13 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE PROCEDURE hivesense_app.wait_for_advisory_lock(_namespace INT, _worker INT, _timeout_ms INT DEFAULT 5000)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  LOOP
-    -- a) close out any open tx so xmin can advance
-    COMMIT;
-    -- b) bound our blocking lock to _timeout_ms
-    PERFORM set_config('lock_timeout', _timeout_ms::text, true);
-
-    BEGIN
-      -- c) normal blocking advisory lock
-      PERFORM pg_advisory_lock(_namespace, _worker);
-      -- d) on success, clear the timeout and stop looping
-      PERFORM set_config('lock_timeout', '0', true);
-      EXIT;
-    EXCEPTION
-      WHEN SQLSTATE '55P03'  -- lock_timeout
-       OR  SQLSTATE '57014'  -- statement_timeout
-      THEN
-        -- If the race gave us the lock just as the timeout fired,
-        -- detect it in pg_locks, clear timeout, and exit.
-        IF EXISTS (SELECT FROM pg_locks
-           WHERE locktype = 'advisory'
-             AND classid  = _namespace
-             AND objid    = _worker
-             AND pid      = pg_backend_pid()
-        ) THEN
-          PERFORM set_config('lock_timeout', '0', true);
-          EXIT;
-        END IF;
-        -- otherwise fall through to retry
-    END;
-  END LOOP;
-END;
-$$;
+-- Dropped: the advisory-lock based scheduler/worker handshake has been replaced
+-- by state-based coordination through hivesense_app.block_tasks (see scheduler()
+-- and worker_loop() below).  The old unlock/relock "pulse" protocol could lose a
+-- wakeup whenever the peer was not already blocked in the lock wait-queue,
+-- eventually leaving every worker parked while the scheduler polled a queue that
+-- nobody could ever drain.
+DROP PROCEDURE IF EXISTS hivesense_app.wait_for_advisory_lock(INT, INT, INT);
 
 
 /** Application entry point, which starts application main-loop (which iterates infinitely).
@@ -459,12 +430,12 @@ DECLARE
     __extra                         INT;
     __from_block                    INT;
     __to_block                      INT;
-    __advisory_lock_namespace_begin INT;
-    __start_key_namespace           INT;
-    __done_key_namespace            INT;
-    __ack_key_namespace             INT;
-    __shard                         INT;
     __posts_per_chunk      CONSTANT INT := 100;
+
+    -- progress tracking for the batch-completion wait
+    __last_todo                     INT;
+    __last_progress                 TIMESTAMPTZ;
+    __last_warning                  TIMESTAMPTZ;
 
     __current_syncing               BOOLEAN;
     __current_uuid                  UUID;
@@ -485,25 +456,18 @@ BEGIN
     END IF;
 
     -- read configured start_block
-    SELECT start_block, advisory_lock_namespace_begin INTO __start_block, __advisory_lock_namespace_begin
+    SELECT start_block INTO __start_block
     FROM   hivesense_app.hivesense_app_status;
 
-    __start_key_namespace := __advisory_lock_namespace_begin;
-    __done_key_namespace := __advisory_lock_namespace_begin + 1;
-    __ack_key_namespace := __advisory_lock_namespace_begin + 2;
-
     --------------------------------------------------------------------------------
-    -- **At initialization: acquire every start_key_i** so that workers block.
-    --
-    --     Here, we grab start_key_i and ack_key_i.  done_key_i is left unlocked,
-    --     so that as soon as a worker tries to lock it at loop-top, it succeeds.
+    -- Discard any tasks left over from an unclean shutdown.  The main loop below
+    -- re-dispatches starting from the context's current block, so stale tasks
+    -- would only duplicate work.
     --------------------------------------------------------------------------------
-    FOR __shard IN 1.._workers LOOP
-        PERFORM pg_advisory_lock(__start_key_namespace, __shard);  -- hold start_key_i
-        PERFORM pg_advisory_lock(__ack_key_namespace, __shard);  -- hold ack_key_i
-    END LOOP;
+    TRUNCATE hivesense_app.block_tasks;
+    COMMIT;
 
-    RAISE NOTICE 'Scheduler: start_keys locked for all % workers; entering main loop...', _workers;
+    RAISE NOTICE 'Scheduler: entering main loop (% workers expected)...', _workers;
 
     IF _max_block_limit IS NOT NULL THEN
         RAISE NOTICE 'Max block limit is specified as: %', _max_block_limit;
@@ -695,67 +659,48 @@ BEGIN
         ORDER BY id                                -- ☚ guarantees lock order
         ON CONFLICT (post_id) DO NOTHING;
 
-        COMMIT;            -- let workers see tasks
+        COMMIT;            -- publish the batch: from this moment the tasks are
+                           -- visible to the workers, which poll block_tasks and
+                           -- claim pending rows on their own
 
         --------------------------------------------------------------------------------
-        -- WAKE ALL WORKERS by dropping each start_key_i
+        -- Wait until every task of this batch is done.
         --
-        -- After that, each worker will:
-        --   • acquire start_key_i (unblocks them)
-        --   • then (below) will do their FCFS pulls until the queue is empty,
-        --   • then signal back on done_key_i.
+        -- All scheduler/worker coordination happens through the committed state
+        -- of hivesense_app.block_tasks (level-triggered), so no wakeup can be
+        -- lost: a worker that was busy or slow at publish time simply sees the
+        -- pending rows on its next poll.  A task abandoned by a failed worker
+        -- rolls back to 'pending', where any other worker will pick it up.
         --------------------------------------------------------------------------------
-        FOR __shard IN 1.._workers LOOP
-            PERFORM pg_advisory_unlock(__start_key_namespace, __shard);
-        END LOOP;
-
-        --------------------------------------------------------------------------------
-        -- Wait for each worker to finish, then ACK it, all in one consistent order:
-        --   1) BLOCK on done_key_i   (i.e. wait until worker UNLOCKs it)
-        --   2) immediately UNLOCK done_key_i  (reset it for next iteration)
-        --   3) UNLOCK  ack_key_i   (tell the worker “I saw your done”)
-        --   4) BLOCK on ack_key_i   (re‐grab it so it’s once again held by scheduler)
-        --   5) Now lock start_key_i so that worker will block at next loop
-        --
-        -- At no point do we do “LOCK(done_key_i); LOCK(start_key_i);”.
-        -- We do it in the order:  LOCK(done_key_i) → UNLOCK(done_key_i) → UNLOCK(ack_key_i) → LOCK(ack_key_i) → LOCK(start_key_i)
-        --------------------------------------------------------------------------------
-        FOR __shard IN 1.._workers LOOP
-
-          -- Wait for worker_i to signal “done”:
-          -- PERFORM pg_advisory_lock(__done_key_namespace, __shard);
-          CALL hivesense_app.wait_for_advisory_lock(__done_key_namespace, __shard);
-
-          -- Immediately drop done_key_i so that next time the worker can LOCK it:
-          PERFORM pg_advisory_unlock(__done_key_namespace, __shard);
-
-          -- ACK the worker’s “done” by unlocking ack_key_i
-          PERFORM pg_advisory_unlock(__ack_key_namespace, __shard);
-
-          -- re‐grab ack_key_i so that the next time the worker tries to LOCK it, it will block
-          PERFORM pg_advisory_lock(__ack_key_namespace, __shard);
-
-          -- Pre‐lock start_key_i again so that the worker will block on it next loop
-          PERFORM pg_advisory_lock(__start_key_namespace, __shard);
-        END LOOP;
-
-        -------------------------------------------------------------------
-        -- Wait until the whole batch finishes
-        -- the locks should guarantee that the batch has already finished,
-        -- this is a double-check
-        -------------------------------------------------------------------
+        __last_todo     := NULL;
+        __last_progress := clock_timestamp();
+        __last_warning  := NULL;
         LOOP
-            -- RAISE NOTICE 'SCHEDULER: checking whether all shards are done...';
             SELECT COUNT(*) INTO __todo
             FROM   hivesense_app.block_tasks
             WHERE  batch_id = __batch_id
               AND  status  <> 'done';
 
             EXIT WHEN __todo = 0;
-            RAISE NOTICE 'SCHEDULER: Error -- scheduler was woken up but job queue is not empty...';
-            RAISE NOTICE 'SCHEDULER: switching to polling...';
+
+            IF __todo IS DISTINCT FROM __last_todo THEN
+                __last_todo     := __todo;
+                __last_progress := clock_timestamp();
+            END IF;
+
+            -- A long time without progress is not necessarily fatal (a single
+            -- large task can keep a worker embedding for minutes), but it is
+            -- worth reporting.
+            IF clock_timestamp() - __last_progress > interval '120 seconds'
+               AND (__last_warning IS NULL
+                    OR clock_timestamp() - __last_warning > interval '120 seconds') THEN
+                RAISE WARNING 'SCHEDULER: batch % has % unfinished task(s) with no progress for %; a large task may still be embedding, or workers may have failed',
+                              __batch_id, __todo, clock_timestamp() - __last_progress;
+                __last_warning := clock_timestamp();
+            END IF;
+
+            COMMIT;   -- do not hold a transaction (and xmin) open while waiting
             PERFORM pg_sleep(0.1);
-            --PERFORM pg_sleep(5);
         END LOOP;
 
         -- clean up the tasks table, the tasks are all done, we don't need to keep that info around forever
@@ -775,12 +720,6 @@ BEGIN
         IF hive.get_current_stage_name(__context_name) = 'live' THEN
             CALL ensure_indexes_are_created();
         END IF;
-
-        -- At this point, for EVERY i:
-        --   • start_key_i is back under scheduler’s control (since the worker did UNLOCK then we never dropped it again),
-        --   • done_key_i is free (we just dropped it in step 3.E.2),
-        --   • ack_key_i is back under scheduler’s control (we locked it again in 3.E.4).
-        -- Everything is reset for the next side‐by‐side handshake.
     END LOOP;
 
     ASSERT FALSE, 'Scheduler: unreachable';
@@ -799,43 +738,29 @@ DECLARE
     __task                          RECORD;
     __stats                         hivesense_app.embedding_stats;
     __breaking_reason               break_reason := NULL;
-    __advisory_lock_namespace_begin INT;
-    __start_key_namespace           INT;
-    __done_key_namespace            INT;
-    __ack_key_namespace             INT;
 BEGIN
-    SELECT advisory_lock_namespace_begin INTO __advisory_lock_namespace_begin
-    FROM   hivesense_app.hivesense_app_status;
-
-    __start_key_namespace := __advisory_lock_namespace_begin;
-    __done_key_namespace := __advisory_lock_namespace_begin + 1;
-    __ack_key_namespace := __advisory_lock_namespace_begin + 2;
-
-    -- by default, postgresql logs when threads are blocked on a lock for more than a second.
-    -- we use locks for synchronization, and expect threads to be blocked for at least 3s
-    -- at a time.  Disable that logging to avoid spamming the log file
-    --
-    -- turns out we need higher privileges to do this, skip for now
-    --
-    -- PERFORM set_config('deadlock_timeout', '5s', true);
-    -- PERFORM set_config('log_lock_waits',    'off',  true);
     -- workers run forever until break conditions tell them to exit
     LOOP
         --------------------------------------------------------------------
-        -- Take done_key_i (never blocks for long)
+        -- Wait for work.  The scheduler publishes a batch by COMMITting
+        -- rows into hivesense_app.block_tasks; the committed queue is the
+        -- only signal, so a wakeup can never be lost.
+        --
+        -- Break conditions are evaluated *before* the queue check and only
+        -- honoured while the queue is empty: when the scheduler publishes a
+        -- final batch atomically with state that satisfies a break condition
+        -- (e.g. the context reaching _max_block_limit), the batch is drained
+        -- before the worker exits.
         --------------------------------------------------------------------
-        PERFORM pg_advisory_lock(__done_key_namespace, _worker);
-
-        --------------------------------------------------------------------------------
-        -- Now block until the scheduler says “go” by unlocking start_key_i.
-        -- As soon as that happens, we acquire start_key_i.
-        --------------------------------------------------------------------------------
-        CALL hivesense_app.wait_for_advisory_lock(__start_key_namespace, _worker);
-
-        --------------------------------------------------------------------------------
-        -- Immediately release start_key_i so it’s available for the next batch.
-        --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(__start_key_namespace, _worker);
+        LOOP
+            COMMIT;   -- close out any open tx so xmin can advance while idle
+            __breaking_reason := isbreakingpending(_app_context_name, _max_block_limit, NULL);
+            EXIT WHEN EXISTS (SELECT FROM hivesense_app.block_tasks WHERE status = 'pending');
+            IF __breaking_reason IS NOT NULL THEN
+                RETURN;
+            END IF;
+            PERFORM pg_sleep(0.1);
+        END LOOP;
 
         LOOP
             ------------------------------------------------------------------
@@ -914,25 +839,8 @@ BEGIN
             COMMIT; -- to let the scheduler and other workers see our progress
         END LOOP;
 
-        --------------------------------------------------------------------------------
-        -- We have emptied the queue (or hit break conditions).
-        --     Signal “I’m done” by UNLOCKing done_key_i.
-        --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(__done_key_namespace, _worker);
-
-        -- Now block on ack_key_i until the scheduler “acks” our done_key_i.
-        CALL hivesense_app.wait_for_advisory_lock(__ack_key_namespace, _worker);
-        -- As soon as the scheduler does `UNLOCK(ack_key_i)`, this returns.
-
-        --------------------------------------------------------------------------------
-        -- Immediately release ack_key_i so that the scheduler can lock it for the next iteration
-        --------------------------------------------------------------------------------
-        PERFORM pg_advisory_unlock(__ack_key_namespace, _worker);
-
-        __breaking_reason := isbreakingpending(_app_context_name, _max_block_limit, NULL);
-        IF __breaking_reason IS NOT NULL THEN
-          RETURN;
-        END IF;
+        -- Queue drained; loop back to waiting for the next batch.  Break
+        -- conditions are evaluated in the wait loop above.
     END LOOP;
 
     ASSERT FALSE, 'Worker loop: unreachable';
