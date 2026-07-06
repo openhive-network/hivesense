@@ -241,7 +241,9 @@ sync:
     PUBLIC_HOSTNAME: "localhost"
     # Compose file location for CI tests
     COMPOSE_DIR: "${CI_PROJECT_DIR}/docker/ci"
-  timeout: 1 hours
+  # Three embedding configurations are synced and tested (full, pca, slice),
+  # so allow extra time beyond the initial HAF replay + hivemind sync
+  timeout: 90 minutes
   before_script:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
@@ -283,10 +285,15 @@ sync:
     echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KTest hivesense sync..."
     netstat -tuln
     tests/integration/api_node/hivesense_synced_api_node_test.sh
+    # Search-test failures are collected across all three embedding
+    # configurations and reported at the end of the job, so a failure in one
+    # configuration doesn't hide results from the others.
+    tests/integration/api_node/hivesense_search_test.sh --mode=none || SEARCH_TEST_RC=1
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
 
     echo -e "\e[0Ksection_start:$(date +%s):test[collapsed=true]\r\e[0KBenchmark hivesense sync..."
     tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
+    mv jmeter_results jmeter_results-full
     echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):lock_skip_test[collapsed=true]\r\e[0KAssert advisory-lock skip path..."
@@ -386,6 +393,36 @@ sync:
     fi
     echo "PASS: syncer parks hivesense_app events_id at unreachable_event_id()"
     echo -e "\e[0Ksection_end:$(date +%s):events_id_test\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):pca_phase[collapsed=true]\r\e[0KReconfigure to PCA-reduced embeddings and re-test..."
+    # Reuse the synced HAF/hivemind stack: compute a PCA matrix from the
+    # full-mode embeddings, reinstall hivesense in pca mode, resync, and run
+    # the same test suite.
+    scripts/ci-helpers/reconfigure-hivesense.sh --mode=pca
+    tests/integration/api_node/hivesense_synced_api_node_test.sh
+    tests/integration/api_node/hivesense_search_test.sh --mode=pca || SEARCH_TEST_RC=1
+    tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
+    mv jmeter_results jmeter_results-pca
+    echo -e "\e[0Ksection_end:$(date +%s):pca_phase\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):slice_phase[collapsed=true]\r\e[0KReconfigure to Matryoshka-sliced embeddings and re-test..."
+    # Slice mode uses a Matryoshka-trained model. mxbai-embed-xsmall-v1 is
+    # MiniLM-based, so it shares the all-MiniLM-L6-v2 tokenizer already
+    # staged on the builders and produces the same chunking as full mode.
+    scripts/ci-helpers/reconfigure-hivesense.sh --mode=slice \
+      --model="hf.co/mixedbread-ai/mxbai-embed-xsmall-v1:F16" \
+      --query-prefix="Represent this sentence for searching relevant passages: "
+    tests/integration/api_node/hivesense_synced_api_node_test.sh
+    tests/integration/api_node/hivesense_search_test.sh --mode=slice || SEARCH_TEST_RC=1
+    tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
+    mv jmeter_results jmeter_results-slice
+    echo -e "\e[0Ksection_end:$(date +%s):slice_phase\r\e[0K"
+  - |
+    if [ "${SEARCH_TEST_RC:-0}" -ne 0 ]; then
+      echo "FAIL: search tests failed in one or more embedding configurations (see FAIL lines in the sections above)"
+      exit 1
+    fi
+    echo "Search tests passed in all embedding configurations."
   after_script:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):compose2[collapsed=true]\r\e[0KStopping test environment..."
@@ -406,10 +443,11 @@ sync:
     docker compose -f "${COMPOSE_DIR}/compose.yml" logs --no-log-prefix hivesense-ollama > ${LOGS_DIR}/hivesense-ollama.log || true
 
     # Check if jmeter results exist and add them to the archive
-    if [ -d "jmeter_results" ]; then
+    # (one jmeter_results-<phase> directory per embedding configuration)
+    if ls -d jmeter_results* >/dev/null 2>&1; then
       echo "Adding JMeter benchmark results to container logs archive..."
       # Add jmeter results to the tar file
-      tar -cf - ${LOGS_DIR}/*.log $(pwd)/jmeter_results | gzip > docker/container-logs.tar.gz
+      tar -cf - ${LOGS_DIR}/*.log $(pwd)/jmeter_results* | gzip > docker/container-logs.tar.gz
     else
       # Just include the logs if no jmeter results
       tar -cf - ${LOGS_DIR}/*.log | gzip > docker/container-logs.tar.gz
