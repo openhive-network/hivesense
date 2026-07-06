@@ -199,7 +199,11 @@ if [ "$schema_exists" != "t" ]; then
   exit 1
 fi
 
-# PostgREST caches the schema; restart so it picks up the fresh install.
+# The uninstall dropped and recreated the hivesense roles, and PostgREST
+# caches the schema. pgbouncer's pooled server connections still reference
+# the dropped role (PostgREST gets HTTP 401 through them), so bounce
+# pgbouncer first, then the PostgREST services.
+compose restart pgbouncer
 compose restart hivesense-postgrest hivesense-postgrest-rewriter
 
 # 4. Regenerate embeddings and rebuild the index.
