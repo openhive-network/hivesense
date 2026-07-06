@@ -133,5 +133,5 @@ Stages: detect → lint → build → sync → test → publish → cleanup
 - **lint_bash_scripts**: Shellcheck validation
 - **lint_sql_scripts**: SQLFluff validation
 - **build_images**: Builds and pushes Docker images
-- **sync**: Integration test with HAF API node (syncs 1M blocks) using docker/ci/compose.yml
+- **sync**: Integration test with HAF API node (syncs 1M blocks) using docker/ci/compose.yml. Tests all three embedding configurations: full vectors, PCA-reduced (matrix computed in-job by the pca image), and Matryoshka slice (mxbai-embed-xsmall-v1). Reconfiguration between phases reuses the synced HAF/hivemind stack via `scripts/ci-helpers/reconfigure-hivesense.sh`; per-configuration search tests live in `tests/integration/api_node/hivesense_search_test.sh`
 - **publish_images**: Tags releases for protected branches
