@@ -398,6 +398,7 @@ DECLARE
     batch_multiplier   int := 5;
     exploratory_factor int := 1000;
     batch_size         int;
+    rows_fetched       int;
     sql                text;
     __min_search_tokens int;
     _num_tokens         int;
@@ -461,63 +462,69 @@ BEGIN
     -- MAIN retrieval loop
     ----------------------------------------------------------------
     LOOP
-        /* ============== 1️⃣  compose the ANN query ============== */
-        IF use_reduced AND red_mode = 'slice' THEN
-            -- Matryoshka: ANN on posts_vectors with expression distance
-            sql := format($q$
-                WITH ann AS (
-                    SELECT hpv.post_id,
-                           hpv.chunk_number,
-                           %s AS ann_dist
-                      FROM hivesense_app.posts_vectors hpv
-                      JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
-                     WHERE ($3 IS NULL OR hpv.post_id <> $3)
-                       AND ($4 = 0 OR NOT EXISTS (
-                             SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                              WHERE m.observer_id = $4
-                                AND m.muted_id    = hp.author_id))
-                     ORDER BY ann_dist, hpv.post_id
-                     LIMIT %s
-                )
-                SELECT ann.post_id,
-                       ann.chunk_number,
-                       (pv.embedding <=> $1)::float4 AS similarity
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id = ann.post_id
-            $q$, dist_red, batch_size);
+        rows_fetched := 0;
 
-        ELSIF use_reduced THEN
-            -- PCA: ANN on posts_vectors_reduced
-            sql := format($q$
-                WITH ann AS (
-                    SELECT hpv.post_id,
-                           hpv.chunk_number,
-                           %s AS ann_dist
-                      FROM hivesense_app.posts_vectors_reduced hpv
-                      JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
-                     WHERE ($3 IS NULL OR hpv.post_id <> $3)
-                       AND ($4 = 0 OR NOT EXISTS (
-                             SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                              WHERE m.observer_id = $4
-                                AND m.muted_id    = hp.author_id))
-                     ORDER BY ann_dist, hpv.post_id
-                     LIMIT %s
-                )
-                SELECT ann.post_id,
-                       ann.chunk_number,
-                       (pv.embedding <=> $1)::float4 AS similarity
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id = ann.post_id
-            $q$, dist_red, batch_size);
+        /* ============== 1️⃣  compose & run the ANN query ============== */
+        IF use_reduced THEN
+            IF red_mode = 'slice' THEN
+                -- Matryoshka: ANN on posts_vectors with expression distance
+                sql := format($q$
+                    WITH ann AS (
+                        SELECT hpv.post_id,
+                               hpv.chunk_number,
+                               %s AS ann_dist
+                          FROM hivesense_app.posts_vectors hpv
+                          JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+                         WHERE ($3 IS NULL OR hpv.post_id <> $3)
+                           AND ($4 = 0 OR NOT EXISTS (
+                                 SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                                  WHERE m.observer_id = $4
+                                    AND m.muted_id    = hp.author_id))
+                         ORDER BY ann_dist, hpv.post_id
+                         LIMIT %s
+                    )
+                    SELECT ann.post_id,
+                           ann.chunk_number,
+                           (pv.embedding <=> $1)::float4 AS similarity
+                      FROM ann
+                      JOIN hivesense_app.posts_vectors pv
+                        ON pv.post_id = ann.post_id
+                $q$, dist_red, batch_size);
+            ELSE
+                -- PCA: ANN on posts_vectors_reduced
+                sql := format($q$
+                    WITH ann AS (
+                        SELECT hpv.post_id,
+                               hpv.chunk_number,
+                               %s AS ann_dist
+                          FROM hivesense_app.posts_vectors_reduced hpv
+                          JOIN hivemind_app.hive_posts hp ON hp.id = hpv.post_id
+                         WHERE ($3 IS NULL OR hpv.post_id <> $3)
+                           AND ($4 = 0 OR NOT EXISTS (
+                                 SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                                  WHERE m.observer_id = $4
+                                    AND m.muted_id    = hp.author_id))
+                         ORDER BY ann_dist, hpv.post_id
+                         LIMIT %s
+                    )
+                    SELECT ann.post_id,
+                           ann.chunk_number,
+                           (pv.embedding <=> $1)::float4 AS similarity
+                      FROM ann
+                      JOIN hivesense_app.posts_vectors pv
+                        ON pv.post_id = ann.post_id
+                $q$, dist_red, batch_size);
+            END IF;
 
+            -- both reduced queries use the same parameter layout
             FOR rec IN EXECUTE sql
-                USING _embedding,               -- $1  full 768-d
-                      query_red,                -- $2  reduced 128-d
+                USING _embedding,               -- $1  full-dim (rerank)
+                      query_red,                -- $2  reduced/sliced query
                       _exclude_post_id,         -- $3
                       _observer_id              -- $4
             LOOP
+                rows_fetched := rows_fetched + 1;
+
                 -- global duplicate filter
                 IF rec.post_id = ANY(seen_ids) THEN
                     CONTINUE;
@@ -578,6 +585,8 @@ BEGIN
                       _exclude_post_id,         -- $2
                       _observer_id              -- $3
             LOOP
+                rows_fetched := rows_fetched + 1;
+
                 -- global duplicate filter
                 IF rec.post_id = ANY(seen_ids) THEN
                     CONTINUE;
@@ -620,8 +629,12 @@ BEGIN
 
         END IF;
 
-        /* ---------- stop / expand batch logic (unchanged) ---------- */
+        /* ---------- stop / expand batch logic ---------- */
         EXIT WHEN count_posts >= max_posts;
+        -- fewer rows than requested means the candidate set is exhausted
+        -- (or capped by ef_search); a larger batch cannot yield new rows
+        -- and doubling would run until integer overflow
+        EXIT WHEN rows_fetched < batch_size;
         batch_size := batch_size * 2;
     END LOOP;
 END;
