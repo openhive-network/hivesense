@@ -166,9 +166,38 @@ if [ -n "$MODEL" ]; then
   echo "Model ${HIVESENSE_MODEL} is available."
 fi
 
-# 3. Reinstall the app with the new configuration.
+# 3. Reinstall the app with the new configuration. install_app skips (with
+#    exit code 0) while a block processor holds the app advisory lock, so
+#    wait until the exclusive lock can be taken — the same probe the install
+#    wrapper uses — before uninstalling.
+echo "Waiting for the hivesense app advisory lock to be free..."
+i=0
+while :; do
+  lock_free=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log -c \
+    "SELECT pg_try_advisory_xact_lock(hashtext('hive_fork_manager_app_lock'), hashtext('hivesense'));" | tr -d '[:space:]')
+  if [ "$lock_free" = "t" ]; then
+    break
+  fi
+  i=$((i+1))
+  if [ "$i" -gt 60 ]; then
+    echo "ERROR: hivesense app advisory lock still held after 5 minutes" >&2
+    exit 1
+  fi
+  sleep 5
+done
+
 run_one_shot hivesense-uninstall-schema
 run_one_shot hivesense-install-schema
+
+# Guard against the install having been skipped anyway (exit code 0)
+schema_exists=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+  psql -U haf_admin -q -A -t -d haf_block_log -c \
+  "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'hivesense_app');" | tr -d '[:space:]')
+if [ "$schema_exists" != "t" ]; then
+  echo "ERROR: hivesense_app schema missing after install (install skipped?)" >&2
+  exit 1
+fi
 
 # PostgREST caches the schema; restart so it picks up the fresh install.
 compose restart hivesense-postgrest hivesense-postgrest-rewriter

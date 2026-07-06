@@ -6,7 +6,10 @@ COMPOSE_DIR="${SCRIPTPATH}/../../../docker/ci"
 
 query_database() {
   query=$1
-  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -A -t -d haf_block_log -c "$query" | tr -d '[:space:]'
+  # explicit -U: newer HAF images default psql to the hived user, which
+  # cannot read hivesense_app tables (the chunk-count check would silently
+  # degrade into a no-op)
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -U haf_admin -A -t -d haf_block_log -c "$query" | tr -d '[:space:]'
 }
 
 # 1. check if hivesense is synced
