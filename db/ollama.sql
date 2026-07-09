@@ -94,11 +94,19 @@ AS $BODY$
     else:
         host_url = host
 
-    # Batch size from config
+    # Batch size and embedding-API style from config.
+    # embedding_api selects the wire protocol:
+    #   'ollama' (default) -> native /api/embed, response {"embeddings":[[...]]}
+    #   'openai'           -> /v1/embeddings, response {"data":[{"index","embedding"}]}
+    #                         (e.g. llama-swap / llama.cpp server). Used for the
+    #                         local-network GPU pool; ollama remains the default so
+    #                         existing/legacy deployments are unaffected.
     r = plpy.execute(
-      "SELECT embedding_batch_size FROM hivesense_app.hivesense_app_status LIMIT 1"
+      "SELECT embedding_batch_size, coalesce(embedding_api, 'ollama') AS embedding_api "
+      "FROM hivesense_app.hivesense_app_status LIMIT 1"
     )
     max_batch = r[0].get('embedding_batch_size', 100)
+    api_style = (r[0].get('embedding_api') or 'ollama').lower()
 
     # Flatten inputs
     flat_texts, flat_pids, flat_nums = [], [], []
@@ -130,10 +138,14 @@ AS $BODY$
         batch_nums  = flat_nums[start:end]
 
         payload = {"model": model, "input": batch_texts}
-        if opts is not None:
-            payload["options"] = opts
-
-        url = host_url.rstrip('/') + "/api/embed"
+        if api_style == 'openai':
+            # llama-server ignores an ollama-style "options" block; context size
+            # is fixed at server launch, so num_ctx et al. are not sent.
+            url = host_url.rstrip('/') + "/v1/embeddings"
+        else:
+            if opts is not None:
+                payload["options"] = opts
+            url = host_url.rstrip('/') + "/api/embed"
         body = json.dumps(payload).encode('utf-8')
         attempts = 0
         while True:
@@ -163,7 +175,16 @@ AS $BODY$
         delay_secs = initial_delay
 
         data = json.loads(resp.read().decode('utf-8'))
-        for idx, vec in enumerate(data.get("embeddings", [])):
+        if api_style == 'openai':
+            # OpenAI /v1/embeddings: {"data":[{"index":i,"embedding":[...]}, ...]}.
+            # Sort by index to guarantee alignment with the input order.
+            batch_vecs = [it["embedding"]
+                          for it in sorted(data.get("data", []),
+                                           key=lambda o: o.get("index", 0))]
+        else:
+            # ollama /api/embed: {"embeddings":[[...], ...]} in input order.
+            batch_vecs = data.get("embeddings", [])
+        for idx, vec in enumerate(batch_vecs):
             embeddings.append((batch_pids[idx], batch_nums[idx], vec))
 
     return embeddings
