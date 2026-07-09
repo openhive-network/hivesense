@@ -26,6 +26,7 @@ BEGIN
     parallel_workers INT,
     llm TEXT,
     ollama TEXT,
+    embedding_api TEXT NOT NULL DEFAULT 'ollama', -- embedding wire protocol: 'ollama' (native /api/embed) or 'openai' (/v1/embeddings, e.g. llama-swap on the local GPU pool)
     start_block INT,
     embedding_batch_size INT, -- send this many texts to ollama in a single API call, it will generate this many embedding vectors and sent them back
     tokenizer_model TEXT, -- model used for counting tokens, must be compatible with `llm`'s tokenizer
@@ -150,6 +151,11 @@ BEGIN
   END
 $BODY$;
 
+-- Backfill for pre-existing installs (CREATE TABLE IF NOT EXISTS above won't add
+-- new columns to an already-created table). Defaults to legacy ollama behaviour.
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS embedding_api TEXT NOT NULL DEFAULT 'ollama';
+
 INSERT INTO hivesense_app_status
 (
   id,
@@ -157,6 +163,7 @@ INSERT INTO hivesense_app_status
   parallel_workers,
   llm,
   ollama,
+  embedding_api,
   start_block,
   embedding_batch_size,
   tokenizer_model,
@@ -191,6 +198,7 @@ VALUES
     current_setting('PG_TEMP.PARALLEL_WORKERS', TRUE)::INT,
     current_setting('PG_TEMP.LLM', TRUE)::TEXT,
     current_setting('PG_TEMP.OLLAMA_HOST', TRUE)::TEXT,
+    COALESCE(current_setting('PG_TEMP.EMBEDDING_API', TRUE), 'ollama')::TEXT,
     current_setting('PG_TEMP.START_BLOCK', TRUE)::INT,
     current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT,
     current_setting('PG_TEMP.TOKENIZER_MODEL', TRUE)::TEXT,
@@ -221,9 +229,10 @@ VALUES
 ON CONFLICT (id)
 DO UPDATE SET
 ollama = excluded.ollama,
+embedding_api = excluded.embedding_api,
 embedding_batch_size = excluded.embedding_batch_size;
--- only ollama host and batch size can be overridden by subsequent install
--- changing llm model or number of host requires resync
+-- only ollama host, embedding api, and batch size can be overridden by subsequent
+-- install; changing llm model or number of host requires resync
 
 CREATE SEQUENCE IF NOT EXISTS hivesense_app.batch_seq START 1;
 

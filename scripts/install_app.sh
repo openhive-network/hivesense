@@ -43,7 +43,8 @@ print_help () {
     echo "  --indexes-only                        Only creates indexes"
     echo "  --schema-only                         Only creates schema, but not indexes"
     echo "  --llm=MODEL_NAME                      Choose LLM model (defaults: bge-m3:latest)"
-    echo "  --ollama=OLLAMA_URLS                  Choose OLLAMA server (defaults: http://192.168.6.17:11434)"
+    echo "  --ollama=OLLAMA_URLS                  Choose embedding server URL (defaults: http://192.168.6.17:11434)"
+    echo "  --embedding-api=STYLE                 Embedding wire protocol: 'ollama' (default, native /api/embed) or 'openai' (/v1/embeddings, e.g. llama-swap GPU pool)"
     echo "  --vector_size=NUMBER                  Choose vector size for embeddings (defaults: 768)"
     echo "  --start_block=NUMBER                  Choose start block to sync (default: 1)"
     echo "  --parallel_workers=NUMBER             Choose number of parallel contexts that ask OLLAMA"
@@ -84,6 +85,7 @@ SWAGGER_URL=${SWAGGER_URL:-"{hivesense-host}"}
 POSTGRES_APP_NAME=hivesense_install
 LLM='yxchia/multilingual-e5-base:F16'
 OLLAMA_HOST='http://192.168.6.17:11434'
+EMBEDDING_API='ollama'  # 'ollama' (native /api/embed) or 'openai' (/v1/embeddings, e.g. llama-swap GPU pool)
 VECTOR_SIZE=768
 PARALLEL_WORKERS=16
 EMBEDDING_BATCH_SIZE=100
@@ -134,6 +136,9 @@ while [ $# -gt 0 ]; do
         ;;
     --ollama=*)
         OLLAMA_HOST="${1#*=}"
+        ;;
+    --embedding-api=*)
+        EMBEDDING_API="${1#*=}"
         ;;
     --vector_size=*)
         VECTOR_SIZE="${1#*=}"
@@ -285,6 +290,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.VECTOR_SIZE TO ${VECTOR_SIZE};
   SET pg_temp.LLM TO '${LLM}';
   SET pg_temp.OLLAMA_HOST TO '${OLLAMA_HOST}';
+  SET pg_temp.EMBEDDING_API TO '${EMBEDDING_API}';
   SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};
   SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};
   SET pg_temp.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}';
