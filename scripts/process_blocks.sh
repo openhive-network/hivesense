@@ -68,6 +68,7 @@ postgres_access(){
 NUMBER_OF_WORKERS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT parallel_workers FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 LLM="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT llm FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 OLLAMA_ADDRESS="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT ollama FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
+EMBEDDING_API="$(psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t -c "SELECT coalesce(embedding_api, 'ollama') FROM ${HIVESENSE_SCHEMA}.hivesense_app_status" | xargs)";
 
 
 initialize_ollama() {
@@ -78,6 +79,33 @@ initialize_ollama() {
   local response=""
   local curl_exit=0
   local llm_pull_request_sent=0
+
+  if [ "${EMBEDDING_API}" = "openai" ]; then
+    # OpenAI-compatible embedding server (e.g. llama-swap): there is no
+    # /api/pull -- the server manages its own models. Probe readiness with a
+    # minimal /v1/embeddings request instead.
+    echo "Checking OpenAI-compatible embedding server at ${OLLAMA_ADDRESS} with model: ${LLM}"
+    while [ "$attempt" -lt "$max_retries" ]; do
+      if [ "$attempt" -gt 0 ]; then
+        echo "Waiting for embedding server to become ready, attempt ${attempt}"
+        sleep "$delay"
+      fi
+      set +e
+      http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${OLLAMA_ADDRESS}/v1/embeddings" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\": \"${LLM}\", \"input\": \"readiness probe\"}")
+      curl_exit=$?
+      set -e
+      if [ "$curl_exit" -eq 0 ] && [ "$http_code" = "200" ]; then
+        echo "Embedding server is ready (model ${LLM})."
+        return 0
+      fi
+      echo "Embedding server not ready yet (curl_exit=${curl_exit} http=${http_code})"
+      attempt=$((attempt + 1))
+    done
+    echo "Timed out waiting for embedding server at ${OLLAMA_ADDRESS}."
+    return 1
+  fi
 
   echo "Checking if Ollama at ${OLLAMA_ADDRESS} has pulled model: ${LLM}"
 
