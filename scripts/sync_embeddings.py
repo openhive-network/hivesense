@@ -21,6 +21,12 @@ EMBEDS_URL = f"{API_URL}/embedding-updates"
 BATCH = 1000
 RETRY_SLEEP = 3
 MAX_BACKOFF = 60
+# How many times (1s apart) to re-check hivemind for a post that isn't there yet
+# before treating it as permanently absent and skipping it. We only reach the
+# retry after already waiting for hivemind's head to pass the post's block, so a
+# post still missing here will never appear (see #57); the retries only absorb a
+# small settling window. 0 disables retrying (skip immediately).
+MISSING_POST_RETRIES = int(os.environ.get("MISSING_POST_RETRIES", "30"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -397,28 +403,60 @@ def main():
                 )
                 time.sleep(1)
 
-        # resolve all post_ids (retry on missing posts)
+        # resolve all post_ids (bounded retry on missing posts, then skip -- #57)
         resolved = []  # list of tuples (op, post_id)
+        absent = 0
         with conn.cursor() as cur:
             for op in ops:
                 post_id = resolve_post_id(cur, op["author"], op["permlink"])
-                while post_id is None:
+                attempts = 0
+                while post_id is None and attempts < MISSING_POST_RETRIES:
+                    attempts += 1
                     logging.warning(
-                        "Post %s/%s not found after block %s; retrying in 1s",
-                        op["author"], op["permlink"], max_block
+                        "Post %s/%s not found after block %s; retry %s/%s",
+                        op["author"], op["permlink"], max_block,
+                        attempts, MISSING_POST_RETRIES
                     )
                     # rollback to close the transaction and release the lock on hive_posts
                     conn.rollback()
                     time.sleep(1)
                     post_id = resolve_post_id(cur, op["author"], op["permlink"])
+                if post_id is None:
+                    # We already waited (above) for hivemind's head to reach max_block, so a
+                    # still-missing post is PERMANENTLY absent from hivemind -- e.g. a block
+                    # hivemind silently skipped after a mid-block crash (context pointer
+                    # advanced, work uncommitted; see hive/hivemind#336). The old unbounded
+                    # `while post_id is None` could then never terminate and stalled the
+                    # syncer for 17h on a single missing post. Skip it: hivemind cannot
+                    # serve this post, so no embedding for it would ever be reachable.
+                    absent += 1
+                    logging.error(
+                        "Post %s/%s absent from hivemind after %s retries (hivemind past "
+                        "block %s) -- SKIPPING op; no embedding will exist for this post",
+                        op["author"], op["permlink"], MISSING_POST_RETRIES, max_block
+                    )
+                    continue
                 resolved.append((op, post_id))
+        if absent:
+            logging.error(
+                "Skipped %s op(s) whose posts are permanently absent from hivemind", absent
+            )
+
+        # Advance the sequence past EVERY op in this batch -- resolved AND skipped.
+        # A skipped op is permanently absent, so it must never be re-fetched; the seq
+        # has to reach the batch maximum regardless of which ops resolved. Taking the
+        # max over `resolved` alone would (a) raise ValueError and crash-loop when a
+        # whole batch is skipped, and (b) leave a skipped op whose sync_seq is higher
+        # than the last resolved op un-cleared, re-fetching it forever -- both revive
+        # the exact permanent stall this fix removes.
+        batch_max_seq = max(op["sync_seq"] for op in ops)
 
         max_last_vectors_block = 0
         batch_start = time.monotonic()
         inserts = 0
         deletes = 0
-        skipped = 0
-        # apply each operation in one batch transaction
+        skipped = absent
+        # apply each resolved operation in one batch transaction
         with conn.cursor() as cur:
             for op, post_id in resolved:
                 last_vectors_block = op.get("last_vectors_block")
@@ -435,17 +473,19 @@ def main():
                 else:
                     inserts += 1
 
-            # advance local sequence & visibility
-            max_seq = max(op["sync_seq"] for op, _ in resolved)
+            # advance local sequence & visibility to the batch max (covers skipped ops)
             cur.execute(
                 "SELECT setval('hivesense_app.sync_seq', %s, true)",
-                (max_seq,)
+                (batch_max_seq,)
             )
             cur.execute(
                 "UPDATE hivesense_app.hivesense_app_status SET max_visible_sync_seq = %s WHERE id = 1",
-                (max_seq,)
+                (batch_max_seq,)
             )
-            if max_last_vectors_block != last_seen_current_block_num:
+            # Only advance the context block when we actually resolved ops: an
+            # all-skipped batch leaves max_last_vectors_block at 0, and we must not
+            # rewind the context to block 0.
+            if max_last_vectors_block and max_last_vectors_block != last_seen_current_block_num:
                 cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
                 last_seen_current_block_num = max_last_vectors_block
 
@@ -458,7 +498,7 @@ def main():
         logging.info(
             "Applied %d ops (%d inserts, %d deletes%s) in %.1fs (%.1f ops/s) | seq=%s block=%s",
             total_ops, inserts, deletes, skip_part,
-            elapsed, ops_per_sec, max_seq, max_last_vectors_block
+            elapsed, ops_per_sec, batch_max_seq, max_last_vectors_block
         )
 
         # Optionally create indexes if caught up
