@@ -211,6 +211,14 @@ initialize_ollama
 # record the startup time for use in health checks
 date -uIseconds > /tmp/block_processing_startup_time.txt
 
+# Clear any stop request left over from a previous shutdown before launching
+# anything: workers treat continue_processing=false as an exit condition and
+# poll it immediately, while the scheduler only resets the flag partway
+# through its startup -- on a restart the workers would lose that race and
+# exit, leaving the scheduler waiting on tasks no one will claim.
+psql "$(postgres_access hivesense_block_processing)" -v "ON_ERROR_STOP=on" -t \
+  -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};SELECT ${HIVESENSE_SCHEMA}.allowProcessing();"
+
 launch_scheduler "$NUMBER_OF_WORKERS" "$PROCESS_BLOCK_LIMIT" &
 
 # gen number of workers
