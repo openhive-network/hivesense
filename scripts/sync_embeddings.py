@@ -22,16 +22,28 @@ BATCH = 1000
 RETRY_SLEEP = 3
 MAX_BACKOFF = 60
 # How many times (1s apart) to re-check hivemind for a post that isn't there yet
-# before treating it as permanently absent and skipping it. We only reach the
-# retry after already waiting for hivemind's head to pass the post's block, so a
-# post still missing here will never appear (see #57); the retries only absorb a
-# small settling window. 0 disables retrying (skip immediately).
+# before treating it as permanently absent. We only reach the retry after
+# already waiting for hivemind's head to pass the post's block, so a post still
+# missing here will never appear (see #57); the retries only absorb a small
+# settling window. 0 disables retrying.
 MISSING_POST_RETRIES = int(os.environ.get("MISSING_POST_RETRIES", "30"))
+# What to do once a post is deemed permanently absent:
+#   skip - drop the op and keep syncing; the post will never have embeddings
+#   exit - stop the syncer so the operator can repair hivemind (e.g. restore a
+#          known-good snapshot); under docker the container will restart-loop
+#          until the underlying hivemind problem is fixed
+MISSING_POST_ACTION = os.environ.get("MISSING_POST_ACTION", "skip").strip().lower()
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s  %(levelname)s  %(message)s"
 )
+
+if MISSING_POST_ACTION not in ("skip", "exit"):
+    logging.critical(
+        "Invalid MISSING_POST_ACTION=%r; must be 'skip' or 'exit'", MISSING_POST_ACTION
+    )
+    sys.exit(1)
 
 def notice_processor(diag):
     """Process PostgreSQL NOTICE messages and log them."""
@@ -403,7 +415,7 @@ def main():
                 )
                 time.sleep(1)
 
-        # resolve all post_ids (bounded retry on missing posts, then skip -- #57)
+        # resolve all post_ids (bounded retry on missing posts, then skip or exit -- #57)
         resolved = []  # list of tuples (op, post_id)
         absent = 0
         with conn.cursor() as cur:
@@ -427,13 +439,30 @@ def main():
                     # hivemind silently skipped after a mid-block crash (context pointer
                     # advanced, work uncommitted; see hive/hivemind#336). The old unbounded
                     # `while post_id is None` could then never terminate and stalled the
-                    # syncer for 17h on a single missing post. Skip it: hivemind cannot
-                    # serve this post, so no embedding for it would ever be reachable.
+                    # syncer for 17h on a single missing post.
+                    logging.error(
+                        "Post %s/%s has embeddings upstream but does not exist in the local "
+                        "hivemind database, even though hivemind has synced past its block "
+                        "(hivemind head > %s, re-checked %s times). This usually means the "
+                        "local hivemind database is inconsistent (e.g. hivemind skipped a "
+                        "block after a mid-block crash, see hive/hivemind#336); the reliable "
+                        "repair is to restore hivemind from a known-good snapshot and resync.",
+                        op["author"], op["permlink"], max_block, MISSING_POST_RETRIES
+                    )
+                    if MISSING_POST_ACTION == "exit":
+                        logging.critical(
+                            "MISSING_POST_ACTION=exit: stopping the syncer without applying "
+                            "this batch so the hivemind problem cannot go unnoticed. Repair "
+                            "hivemind, or set MISSING_POST_ACTION=skip to sync past posts "
+                            "hivemind is missing (they will never have embeddings)."
+                        )
+                        sys.exit(1)
                     absent += 1
                     logging.error(
-                        "Post %s/%s absent from hivemind after %s retries (hivemind past "
-                        "block %s) -- SKIPPING op; no embedding will exist for this post",
-                        op["author"], op["permlink"], MISSING_POST_RETRIES, max_block
+                        "MISSING_POST_ACTION=skip: dropping the op for %s/%s and continuing; "
+                        "this post will never have embeddings on this node. Set "
+                        "MISSING_POST_ACTION=exit to stop the syncer instead.",
+                        op["author"], op["permlink"]
                     )
                     continue
                 resolved.append((op, post_id))
