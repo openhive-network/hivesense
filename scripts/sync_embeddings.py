@@ -165,8 +165,18 @@ def validate_local_state(conn, server):
 
 
 def get_last_seq(cur) -> int:
+    # max_visible_sync_seq is a floor here: it is advanced to the batch max (in
+    # the same transaction that applies the batch), so it also covers ops that
+    # were skipped because their posts are permanently absent from hivemind
+    # (#57). Those ops leave no rows in posts_vectors/deleted_embeddings, so
+    # without the floor a skipped op at the tail of the stream would be
+    # re-fetched (and re-retried) on every iteration and every restart.
     cur.execute("""
-        SELECT COALESCE(MAX(sync_seq), 0) FROM (
+        SELECT GREATEST(
+          COALESCE(MAX(sync_seq), 0),
+          COALESCE((SELECT max_visible_sync_seq
+                      FROM hivesense_app.hivesense_app_status WHERE id = 1), 0)
+        ) FROM (
           SELECT MAX(sync_seq) AS sync_seq FROM hivesense_app.posts_vectors
           UNION ALL
           SELECT MAX(sync_seq)           FROM hivesense_app.deleted_embeddings
@@ -477,7 +487,10 @@ def main():
         # max over `resolved` alone would (a) raise ValueError and crash-loop when a
         # whole batch is skipped, and (b) leave a skipped op whose sync_seq is higher
         # than the last resolved op un-cleared, re-fetching it forever -- both revive
-        # the exact permanent stall this fix removes.
+        # the exact permanent stall this fix removes. get_last_seq() reads
+        # max_visible_sync_seq back as a floor for after_seq, which is what actually
+        # keeps skipped ops from being re-fetched (the data tables alone can't cover
+        # a skipped op at the tail of the stream).
         batch_max_seq = max(op["sync_seq"] for op in ops)
 
         max_last_vectors_block = 0
