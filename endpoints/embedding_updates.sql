@@ -79,10 +79,12 @@ AS $$
 DECLARE
   __max_visible integer;
   __our_uuid    uuid;
+  __skipped     integer;
 BEGIN
-  -- 0) fetch the current watermark and uuid
-  SELECT max_visible_sync_seq, has.sync_uuid
-    INTO __max_visible, __our_uuid
+  -- 0) fetch the current watermark, uuid, and advertised skip count
+  SELECT max_visible_sync_seq, has.sync_uuid,
+         skipped_op_count + upstream_skipped_op_count
+    INTO __max_visible, __our_uuid, __skipped
     FROM hivesense_app.hivesense_app_status has
    WHERE id = 1;
 
@@ -92,7 +94,14 @@ BEGIN
             HINT = 'To sync with this server, you will need to wipe your hivesense data';
   END IF;
 
-  PERFORM set_config('response.headers', format('[{"X-Current-Block-Num":"%s"}]', hive.app_get_current_block_num('hivesense_app')), true);
+  -- X-Skipped-Op-Count rides on every page so a downstream syncer notices the
+  -- moment this chain starts dropping ops, not just at its next restart. The
+  -- count is bumped in the same transaction that publishes the batch containing
+  -- the gap, so any page served past a gap already carries the raised count.
+  PERFORM set_config('response.headers',
+                     format('[{"X-Current-Block-Num":"%s"},{"X-Skipped-Op-Count":"%s"}]',
+                            hive.app_get_current_block_num('hivesense_app'), __skipped),
+                     true);
 
   RETURN QUERY
   WITH 
@@ -187,6 +196,7 @@ schemas:
       overlap_amount: { type: number }
       min_token_threshold: { type: integer }
       max_embeddings_per_post: { type: integer }
+      skipped_op_count: { type: integer }
 */
 -- openapi-generated-code-begin
 DROP TYPE IF EXISTS syncsettings CASCADE;
@@ -199,7 +209,8 @@ CREATE TYPE syncsettings AS (
     "tokens_per_chunk" INT,
     "overlap_amount" FLOAT,
     "min_token_threshold" INT,
-    "max_embeddings_per_post" INT
+    "max_embeddings_per_post" INT,
+    "skipped_op_count" INT
 );
 -- openapi-generated-code-end
 
@@ -234,7 +245,10 @@ AS $$
     tokens_per_chunk,
     overlap_amount,
     min_token_threshold,
-    max_embeddings_per_post
+    max_embeddings_per_post,
+    -- total known incompleteness of the stream we serve: ops we dropped
+    -- ourselves plus everything our upstream chain admits to having dropped
+    skipped_op_count + upstream_skipped_op_count
   FROM hivesense_app_status
   ORDER BY id
   LIMIT 1;

@@ -52,7 +52,9 @@ BEGIN
     advisory_lock_namespace_begin INT, -- start of advisory lock namespace, if running multiple instances, use different values (separated by, say, 10 or so)
     max_visible_sync_seq INT NOT NULL DEFAULT 0, -- highest sync sequence number to publish, anything higher may have gaps that will be filled later
     syncing_embeddings BOOLEAN, -- true if we're syncing emeddings, false if computing locally
-    sync_uuid uuid -- uuid tracking what server we're syncing embeddings from (or whether we're generating them ourselves)
+    sync_uuid uuid, -- uuid tracking what server we're syncing embeddings from (or whether we're generating them ourselves)
+    skipped_op_count INT NOT NULL DEFAULT 0, -- ops this node's syncer dropped because their posts are absent from the local hivemind (MISSING_POST_ACTION=skip); nonzero means our embedding stream is knowingly incomplete
+    upstream_skipped_op_count INT NOT NULL DEFAULT 0 -- latest skip total advertised by our upstream sync server; added to skipped_op_count when we advertise to downstreams so incompleteness propagates through the chain
   );
 
   IF NOT hive.app_context_exists(__schema_name) THEN
@@ -155,6 +157,10 @@ $BODY$;
 -- new columns to an already-created table). Defaults to legacy ollama behaviour.
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS embedding_api TEXT NOT NULL DEFAULT 'ollama';
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS skipped_op_count INT NOT NULL DEFAULT 0;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS upstream_skipped_op_count INT NOT NULL DEFAULT 0;
 
 INSERT INTO hivesense_app_status
 (
