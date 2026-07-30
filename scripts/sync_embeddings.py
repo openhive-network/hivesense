@@ -185,6 +185,56 @@ def get_last_seq(cur) -> int:
     return cur.fetchone()[0] or 0
 
 
+_warned_no_skip_count = False
+
+def check_upstream_skip_count(count):
+    """React to the upstream's advertised skip count (from /sync-settings or the
+    X-Skipped-Op-Count header). `count` is None when the upstream predates skip
+    reporting. In exit mode a nonzero count is fatal: the upstream chain admits
+    to having dropped ops, so its stream can never be complete."""
+    global _warned_no_skip_count
+    if count is None:
+        if not _warned_no_skip_count:
+            logging.warning(
+                "Upstream does not advertise a skipped-op count (older hivesense "
+                "version); cannot verify that its embedding stream is complete"
+            )
+            _warned_no_skip_count = True
+        return
+    if count > 0 and MISSING_POST_ACTION == "exit":
+        logging.critical(
+            "Upstream reports %s skipped op(s): somewhere up the sync chain a "
+            "node ran with MISSING_POST_ACTION=skip against a hivemind database "
+            "that was missing posts, so the stream it serves is known to be "
+            "incomplete. MISSING_POST_ACTION=exit: refusing to sync from it. "
+            "Point HIVESENSE_API at a complete upstream, or set "
+            "MISSING_POST_ACTION=skip to accept the incomplete stream.",
+            count
+        )
+        sys.exit(1)
+
+
+def store_upstream_skip_count(conn, count):
+    """Persist the upstream's advertised skip count so we re-advertise it to our
+    own downstreams (added to our local skip count by the endpoints). Only
+    reached in skip mode -- exit mode dies before this on any nonzero count.
+
+    Monotonic on purpose: once we have synced past a gap, the missing ops are
+    below our after_seq and will never be back-filled, so our stream stays
+    incomplete even if the upstream is later repaired and its count drops. (An
+    exit-mode downstream halts before crossing a gap, so after an upstream
+    repair it genuinely can resume complete -- but it never stores a nonzero
+    count in the first place.)"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE hivesense_app.hivesense_app_status "
+            "SET upstream_skipped_op_count = GREATEST(upstream_skipped_op_count, %s) "
+            "WHERE id = 1 AND upstream_skipped_op_count < %s",
+            (count, count)
+        )
+    conn.commit()
+
+
 POST_LOOKUP_SQL = """
 SELECT hp.id
   FROM hivemind_app.hive_posts       hp
@@ -332,6 +382,7 @@ def main():
 
     # fetch server status and validate
     server_status = fetch_server_status()
+    check_upstream_skip_count(server_status.get("skipped_op_count"))
 
     conn = ensure_connection_alive(conn)
     sync_uuid = validate_local_state(conn, server_status)
@@ -339,6 +390,7 @@ def main():
     ensure_context_detached(conn)
 
     last_seen_current_block_num = None
+    last_seen_upstream_skips = None
     while True:
         conn = ensure_connection_alive(conn)
         ensure_context_detached(conn)
@@ -380,6 +432,18 @@ def main():
 
         # Make sure the DB handle is still alive after the (potentially long) HTTP loop above
         conn = ensure_connection_alive(conn)
+
+        # React to the upstream's skip count BEFORE applying anything from this
+        # page. The upstream bumps its count in the same transaction that
+        # publishes a batch containing a gap, so checking here guarantees an
+        # exit-mode node never applies ops from beyond a gap: our local data
+        # stays a complete prefix of the upstream stream.
+        header_skips = response.headers.get("X-Skipped-Op-Count")
+        upstream_skips = int(header_skips) if header_skips is not None else None
+        check_upstream_skip_count(upstream_skips)
+        if upstream_skips is not None and upstream_skips != last_seen_upstream_skips:
+            store_upstream_skip_count(conn, upstream_skips)
+            last_seen_upstream_skips = upstream_skips
 
         # manage the current_block_num stored in the context.  The way we manage it isn't perfect, but it's
         # probably fine for our usage.
@@ -524,6 +588,17 @@ def main():
                 "UPDATE hivesense_app.hivesense_app_status SET max_visible_sync_seq = %s WHERE id = 1",
                 (batch_max_seq,)
             )
+            if absent:
+                # Bump our advertised skip count in the same transaction that
+                # publishes the batch: any page a downstream fetches past this
+                # gap already carries the raised count (X-Skipped-Op-Count /
+                # /sync-settings), so an exit-mode downstream halts before
+                # applying anything from beyond the gap.
+                cur.execute(
+                    "UPDATE hivesense_app.hivesense_app_status "
+                    "SET skipped_op_count = skipped_op_count + %s WHERE id = 1",
+                    (absent,)
+                )
             # Only advance the context block when we actually resolved ops: an
             # all-skipped batch leaves max_last_vectors_block at 0, and we must not
             # rewind the context to block 0.
