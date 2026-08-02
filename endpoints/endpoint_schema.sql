@@ -458,6 +458,69 @@ DO $__$
           }
         }
       }
+    },
+    "/version": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "Get HiveSense''s version",
+        "description": "Get the git commit hash of the deployed HiveSense version.\nReturns `unspecified` when the image was built without a git hash.\n\nSQL example\n* `SELECT hivesense_endpoints.get_hivesense_version();`\n\nREST call example\n* `GET ''/hivesense-api/version''`\n",
+        "operationId": "hivesense_endpoints.get_hivesense_version",
+        "responses": {
+          "200": {
+            "description": "HiveSense version (git commit hash)\n\n* Returns `TEXT`\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "c2fed8958584511ef1a66dab3dbac8c40f3518f0"
+              }
+            }
+          },
+          "404": {
+            "description": "App not installed"
+          }
+        }
+      }
+    },
+    "/sync-status": {
+      "get": {
+        "tags": [
+          "Other"
+        ],
+        "summary": "Get HiveSense''s sync status",
+        "description": "Get the last block whose embeddings HiveSense has applied, as an object\ncontaining both the block number and its timestamp (UTC). This is the\nuniform HAF-app sync/health endpoint: the timestamp lets a consumer\ncompute staleness with a single call (`age = now() - last_block_time`)\nwithout needing a separate head-block reference.\n\nHiveSense syncs embeddings out of band from a remote embedding API, so\nthis value may lag chain head during catch-up.\n\nSQL example\n* `SELECT hivesense_endpoints.get_hivesense_sync_status();`\n\nREST call example\n* `GET ''/hivesense-api/sync-status''`\n",
+        "operationId": "hivesense_endpoints.get_hivesense_sync_status",
+        "responses": {
+          "200": {
+            "description": "Last block synced by HiveSense together with its timestamp.\n`last_block_time` is null if no block has been processed yet.\nWhile the HAF instance is still in massive sync (indexes not yet\nbuilt) the call fails fast with an error rather than executing an\nunindexed lookup.\n\n* Returns `JSON`\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "last_block_num": {
+                      "type": "integer",
+                      "description": "highest block number whose embeddings HiveSense has applied"
+                    },
+                    "last_block_time": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "UTC timestamp of that block"
+                    }
+                  }
+                },
+                "example": {
+                  "last_block_num": 5000000,
+                  "last_block_time": "2016-09-15T19:47:21"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -523,6 +586,9 @@ DO $__$
             "type": "integer"
           },
           "max_embeddings_per_post": {
+            "type": "integer"
+          },
+          "skipped_op_count": {
             "type": "integer"
           }
         }

@@ -70,6 +70,7 @@ docker build \
   --cache-from "registry.gitlab.syncad.com/hive/hivesense:develop" \
   --build-arg BUILDKIT_INLINE_CACHE=1 \
   --build-arg API_VERSION="$API_VERSION" \
+  --build-arg GIT_COMMIT_SHA="$GIT_COMMIT_SHA" \
   -t "registry.gitlab.syncad.com/hive/hivesense:${TAG}" \
   "${SCRIPTPATH}/.."
 
