@@ -266,9 +266,9 @@ if [[ -z "${HAF_INSTALL_LOCK_HELD:-}" ]]; then
   fi
 fi
 
-#pushd "$hivesense_dir"
-#./scripts/generate_version_sql.sh "$hivesense_dir"
-#popd
+# #45: the deployed git hash is baked into the image as HIVESENSE_GIT_HASH
+# (see Dockerfile) and recorded in the version table further below via
+# SET_VERSION(), so the /version endpoint can serve it.
 
 
 echo "Installing app..."
@@ -315,6 +315,12 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
+
+# #45: record the deployed version so /version can serve it. SET_VERSION() is
+# defined in helpers.sql (loaded just above); the image bakes the git hash into
+# HIVESENSE_GIT_HASH (see Dockerfile). Local builds without the build-arg fall
+# back to 'unspecified'.
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET ROLE hivesense_owner; SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}; SELECT set_version('${HIVESENSE_GIT_HASH:-unspecified}');"
 
 # Handle matrix JSON configuration only if USE_REDUCED_EMBEDDINGS is true and mode is PCA
 if [ "$USE_REDUCED_EMBEDDINGS" = "true" ] && [ "$REDUCTION_MODE" != "slice" ]; then
@@ -409,6 +415,8 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_S
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/find_thematic_contributors.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/get_posts_by_ids.sql"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/embedding_updates.sql"
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/get_hivesense_version.sql"
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/endpoints/get_hivesense_sync_status.sql"
 
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "SET ROLE hivesense_owner;GRANT USAGE ON SCHEMA ${HIVESENSE_SCHEMA} to hivesense_user;"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on  -c "SET ROLE hivesense_owner;GRANT SELECT ON ALL TABLES IN SCHEMA ${HIVESENSE_SCHEMA} TO hivesense_user;"

@@ -31,7 +31,9 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/get_similar_posts_by_post.sql
 ../$endpoints/find_thematic_contributors.sql
 ../$endpoints/get_posts_by_ids.sql
-../$endpoints/embedding_updates.sql"
+../$endpoints/embedding_updates.sql
+../$endpoints/get_hivesense_version.sql
+../$endpoints/get_hivesense_sync_status.sql"
 
 # Function to reverse the lines
 reverse_lines() {

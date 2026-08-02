@@ -48,6 +48,10 @@ LABEL io.hive.image.commit.log_message="$GIT_LAST_LOG_MESSAGE"
 LABEL io.hive.image.commit.author="$GIT_LAST_COMMITTER"
 LABEL io.hive.image.commit.date="$GIT_LAST_COMMIT_DATE"
 
+# #45: carry the git hash to container runtime so install_app.sh can record it in
+# the version table (SET_VERSION), which the /version endpoint serves.
+ENV HIVESENSE_GIT_HASH="$GIT_COMMIT_SHA"
+
 USER root
 
 RUN <<EOF
