@@ -1,5 +1,5 @@
 # Stage 1 – base image with only needed packages
-FROM registry.gitlab.syncad.com/hive/hivesense/python:3.13-slim
+FROM registry.gitlab.syncad.com/hive/hivesense/python:3.14-slim
 
 # Set environment variables to reduce image size and avoid Python warnings
 ENV PYTHONDONTWRITEBYTECODE=1 \
