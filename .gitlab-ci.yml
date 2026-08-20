@@ -150,7 +150,7 @@ find_haf_image:
   variables:
     UPSTREAM_REPO_URL: "https://gitlab.syncad.com/hive/haf.git"
     UPSTREAM_REGISTRY: "registry.gitlab.syncad.com/hive/haf"
-    UPSTREAM_BRANCH: "develop"
+    UPSTREAM_BRANCH: "1.29.0-rc1"
     UPSTREAM_OUTPUT: "haf_image.env"
   before_script:
     # docker-builder image already has git, bash, and curl
