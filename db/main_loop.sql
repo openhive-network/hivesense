@@ -857,3 +857,25 @@ $$;
 
 
 RESET ROLE;
+
+-- ============================================================================
+-- HAF APPLICATION REGISTRY (haf#341)
+-- ============================================================================
+-- hivesense drives its own loop (the scheduler above, or the remote-sync
+-- process), so it is registered without a process procedure. The dependency on
+-- hivemind_app makes hive.app_next_iteration withhold every block hivemind has
+-- not committed (hivemind reports its committed position through its
+-- completed-block function, exact during massive sync as well), so the
+-- scheduler's own hivemind wait loops normally find hivemind already there.
+-- hivemind must already be registered (its install runs first).
+SELECT hive.app_register( 'hivesense_app', ARRAY[ 'hivesense_app' ]::hive.contexts_group, NULL );
+DO $$
+BEGIN
+  IF EXISTS ( SELECT 1 FROM hafd.applications WHERE name = 'hivemind_app' ) THEN
+    PERFORM hive.app_add_dependency( 'hivesense_app', 'hivemind_app' );
+  ELSE
+    -- older hivemind: the scheduler's own hivemind wait loops still apply
+    RAISE WARNING 'hivemind_app is not registered in the HAF application registry; hivesense_app runs without the dependency gate';
+  END IF;
+END
+$$;

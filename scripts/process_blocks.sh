@@ -206,6 +206,12 @@ EOF
     echo "Scheduler stopped"
 }
 
+# keep a copy of the log in the datadir when asked to (haf_api_node sets LOG_FILE
+# to a file under logs/apps, which survives docker compose down)
+if [ -n "${LOG_FILE:-}" ] && [ "${LOG_FILE}" != "STDOUT" ]; then
+  exec > >(tee -a "${LOG_FILE}") 2>&1
+fi
+
 initialize_ollama
 
 # record the startup time for use in health checks
