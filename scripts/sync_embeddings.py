@@ -376,6 +376,14 @@ def ensure_context_detached(conn):
 
 
 def main():
+    # keep a copy of the log in the datadir when asked to (haf_api_node sets
+    # LOG_FILE to a file under logs/apps, which survives docker compose down)
+    log_file = os.environ.get("LOG_FILE", "")
+    if log_file and log_file != "STDOUT":
+        handler = logging.FileHandler(log_file)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+
     conn = psycopg.connect(DB_DSN)
     conn = setup_notice_handler(conn)
     acquire_app_locks(conn)
@@ -475,7 +483,14 @@ def main():
             while True:
                 conn = ensure_connection_alive(conn)
                 with conn.cursor() as cur:
-                    cur.execute("SELECT hive.app_get_current_block_num('hivemind_app')")
+                    # hivemind's committed position: during its massive sync the
+                    # context position runs ahead of the flushed data by one batch;
+                    # completed_block_num() (hivemind, haf#341) accounts for that
+                    cur.execute("""
+                        SELECT CASE WHEN to_regprocedure('hivemind_app.completed_block_num()') IS NOT NULL
+                                    THEN hivemind_app.completed_block_num()
+                                    ELSE hive.app_get_current_block_num('hivemind_app') END
+                    """)
                     head = cur.fetchone()[0]
 
                 # rollback to avoid hold any locks on the context if we sleep below
