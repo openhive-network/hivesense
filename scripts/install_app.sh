@@ -301,6 +301,7 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.DOCUMENT_PREFIX TO '${DOCUMENT_PREFIX}';
   SET pg_temp.QUERY_PREFIX TO '${QUERY_PREFIX}';
   SET pg_temp.MIN_TOKEN_THRESHOLD TO ${MIN_TOKEN_THRESHOLD};
+  SET pg_temp.NUM_CTX TO ${NUM_CTX};
   SET pg_temp.MIN_TOKEN_SEARCH_THRESHOLD TO ${MIN_TOKEN_SEARCH_THRESHOLD};
   SET pg_temp.MAX_EMBEDINGS_PER_POST TO '${MAX_EMBEDINGS_PER_POST}';
   SET pg_temp.MAINTENANCE_WORK_MEM TO ${MAINTENANCE_WORK_MEM};
@@ -314,6 +315,20 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.ALLOW_DEBUGGING   TO ${ALLOW_DEBUGGING};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
+
+# Position the (detached, not yet started) context just before --start_block:
+# the python block processor has no scheduler start-up step to do it.
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
+  DO \$\$
+  DECLARE __start_block INT;
+  BEGIN
+    SELECT COALESCE(start_block, 1) INTO __start_block FROM ${HIVESENSE_SCHEMA}.hivesense_app_status;
+    IF hive.app_get_current_block_num('${HIVESENSE_SCHEMA}') < __start_block - 1
+       AND NOT hive.app_context_is_attached('${HIVESENSE_SCHEMA}') THEN
+      PERFORM hive.app_set_current_block_num('${HIVESENSE_SCHEMA}', __start_block - 1);
+    END IF;
+  END
+  \$\$;"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
 
 # #45: record the deployed version so /version can serve it. SET_VERSION() is

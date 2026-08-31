@@ -3,7 +3,7 @@
 # Pinned to the c-c-c develop SHA tag that introduces python3 + py3-psycopg2
 # + /usr/local/bin/install_with_app_lock.py (the wrapper used by install_app.sh).
 # Bump when c-c-c publishes a new semver tag that includes the wrapper.
-ARG PSQL_CLIENT_VERSION=b80b52472f5bf6a685c95f74b9837cc1adbf7ddc
+ARG PSQL_CLIENT_VERSION=3839feb0c30846aa3ae262143f216a3c1a0fa20b
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:${PSQL_CLIENT_VERSION} AS psql_client
 
 USER root
@@ -63,6 +63,7 @@ EOF
 COPY --chown=hived:users scripts/install_app.sh /app/scripts/install_app.sh
 COPY --chown=hived:users scripts/uninstall_app.sh /app/scripts/uninstall_app.sh
 COPY --chown=hived:users scripts/process_blocks.sh /app/scripts/process_blocks.sh
+COPY --chown=hived:users scripts/hivesense_block_processor.py /app/scripts/hivesense_block_processor.py
 COPY --chown=hived:users scripts/matrix_handler.sh /app/scripts/matrix_handler.sh
 COPY --chown=hived:users db /app/db
 COPY --chown=hived:users --from=version-injection /tmp/src/endpoints /app/endpoints
