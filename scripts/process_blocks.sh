@@ -206,16 +206,36 @@ EOF
     echo "Scheduler stopped"
 }
 
+initialize_ollama
+
+# record the startup time for use in health checks
+date -uIseconds > /tmp/block_processing_startup_time.txt
+
+# The generic HAF block-processing driver (haf#341) runs the range pipeline
+# with scripts/hivesense_block_processor.py doing the embedding HTTP calls in
+# this process - the in-database scheduler/worker sessions (which blocked
+# PostgreSQL backends on network I/O via plpython) are no longer used. The
+# driver idles on its own connection between blocks, handles LOG_FILE itself
+# and, as PID 1, receives SIGTERM directly for a clean stop.
+# Set HIVESENSE_USE_LEGACY_SCHEDULER=true to fall back to the old loop.
+if command -v haf_app_driver.py >/dev/null 2>&1 && [ "${HIVESENSE_USE_LEGACY_SCHEDULER:-false}" != "true" ]; then
+    limit_arg=()
+    [ "$PROCESS_BLOCK_LIMIT" != "null" ] && limit_arg=(--stop-at-block="$PROCESS_BLOCK_LIMIT")
+    export PYTHONPATH="/app/scripts${PYTHONPATH:+:$PYTHONPATH}"
+    exec haf_app_driver.py --app="${HIVESENSE_SCHEMA}" \
+        --postgres-url="$(postgres_access hivesense_block_processing)" \
+        --process-python hivesense_block_processor \
+        --lock=hivemind --lock=hivesense \
+        --override-max-batch="${HIVESENSE_RANGE_BLOCKS:-1000}" \
+        "${limit_arg[@]}"
+fi
+echo "WARNING: using the legacy scheduler/worker loop"
+
 # keep a copy of the log in the datadir when asked to (haf_api_node sets LOG_FILE
 # to a file under logs/apps, which survives docker compose down)
 if [ -n "${LOG_FILE:-}" ] && [ "${LOG_FILE}" != "STDOUT" ]; then
   exec > >(tee -a "${LOG_FILE}") 2>&1
 fi
-
-initialize_ollama
-
-# record the startup time for use in health checks
-date -uIseconds > /tmp/block_processing_startup_time.txt
 
 # Clear any stop request left over from a previous shutdown before launching
 # anything: workers treat continue_processing=false as an exit condition and

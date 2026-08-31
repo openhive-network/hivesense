@@ -161,6 +161,8 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS skipped_op_count INT NOT NULL DEFAULT 0;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS upstream_skipped_op_count INT NOT NULL DEFAULT 0;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS num_ctx INT NOT NULL DEFAULT 0; -- 0 = server default; read by the python block processor
 
 INSERT INTO hivesense_app_status
 (
@@ -170,6 +172,7 @@ INSERT INTO hivesense_app_status
   llm,
   ollama,
   embedding_api,
+  num_ctx,
   start_block,
   embedding_batch_size,
   tokenizer_model,
@@ -205,6 +208,7 @@ VALUES
     current_setting('PG_TEMP.LLM', TRUE)::TEXT,
     current_setting('PG_TEMP.OLLAMA_HOST', TRUE)::TEXT,
     COALESCE(current_setting('PG_TEMP.EMBEDDING_API', TRUE), 'ollama')::TEXT,
+    COALESCE(current_setting('PG_TEMP.NUM_CTX', TRUE)::INT, 0),
     current_setting('PG_TEMP.START_BLOCK', TRUE)::INT,
     current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT,
     current_setting('PG_TEMP.TOKENIZER_MODEL', TRUE)::TEXT,
@@ -236,6 +240,7 @@ ON CONFLICT (id)
 DO UPDATE SET
 ollama = excluded.ollama,
 embedding_api = excluded.embedding_api,
+num_ctx = excluded.num_ctx,
 embedding_batch_size = excluded.embedding_batch_size;
 -- only ollama host, embedding api, and batch size can be overridden by subsequent
 -- install; changing llm model or number of host requires resync

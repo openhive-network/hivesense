@@ -54,41 +54,65 @@ CREATE TYPE hivesense_app.embedding_stats AS (
     embed_time_secs       DOUBLE PRECISION
 );
 
-DROP FUNCTION IF EXISTS generate_embeddings_for_posts(integer[],boolean,integer);
-CREATE OR REPLACE FUNCTION generate_embeddings_for_posts(
-    _post_ids INT[],
-    _logs     BOOLEAN,
-    _worker   INT
-)
-RETURNS hivesense_app.embedding_stats
+-- ============================================================================
+-- RANGE PROCESSING PRIMITIVES (haf#341 python block processor)
+-- ============================================================================
+-- The embedding pipeline is split around the HTTP call so that a client-side
+-- processor (scripts/hivesense_block_processor.py, run by haf_app_driver.py)
+-- can do the network work outside PostgreSQL:
+--
+--   1. hivesense_app.posts_in_range(first, last)   -> post ids to (re)vectorize
+--   2. hivesense_app.prepare_post_chunks(ids)      -> chunk texts (and session
+--      temp tables tmp_pre / tmp_chunks for step 4)
+--   3. the client embeds the chunks over HTTP and fills a session temp table
+--      tmp_vectors(post_id INT, chunk_number INT, vec public.vector)
+--   4. hivesense_app.store_post_embeddings()       -> deletions, vectors,
+--      reduced vectors, post_data, sync_seq bookkeeping
+--
+-- All four run on one connection inside one transaction (the driver's), so the
+-- ON COMMIT DROP temp tables carry state between the steps and everything
+-- becomes durable together with the context position.
+-- generate_embeddings_for_posts() (the in-database path used by the legacy
+-- scheduler/workers) is built from the same pieces with hivesense_embed()
+-- filling tmp_vectors in place of the client.
+
+-- Ordered ids of root posts created or edited in a block range (the same
+-- selection the scheduler used when building worker tasks).
+CREATE OR REPLACE FUNCTION hivesense_app.posts_in_range(_first_block INT, _last_block INT)
+RETURNS INT[]
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(ARRAY_AGG(post_id ORDER BY blk, post_id), ARRAY[]::INT[])
+    FROM (
+        SELECT hp.id AS post_id,
+               GREATEST(hp.block_num_created, hp.block_num) AS blk
+        FROM hivemind_app.hive_posts hp
+        JOIN hivemind_app.hive_post_data hpd USING(id)
+        WHERE (hp.root_id = hp.id OR hp.root_id = 0)
+          AND (
+                hp.block_num_created BETWEEN _first_block AND _last_block
+             OR hp.block_num          BETWEEN _first_block AND _last_block
+          )
+    ) p
+$$;
+
+-- Preprocess and chunk the posts; leaves tmp_pre and tmp_chunks (ON COMMIT
+-- DROP) behind for store_post_embeddings() and returns the chunks to embed.
+CREATE OR REPLACE FUNCTION hivesense_app.prepare_post_chunks(_post_ids INT[])
+RETURNS TABLE(post_id INT, chunk_number INT, chunk_text TEXT)
 LANGUAGE plpgsql
 VOLATILE
-PARALLEL SAFE
+SET search_path = hivesense_app, public
 AS $$
 DECLARE
-    -- profiling variables
-    __start_prep      TIMESTAMP := clock_timestamp();
-    __start_embed     TIMESTAMP;
-    __prep_time       DOUBLE PRECISION;
-    __embed_time      DOUBLE PRECISION;
-
-    -- stats
-    __num_discards    INT;
-    __processed_posts INT;
-    __num_chunks      INT;
-    __total_tokens    INT;
-
-    __c                      INT;
-    __tokenizer_name         TEXT;
-    __max_tokens             INT;
-    __min_new_ratio          REAL;
-    __doc_prefix             TEXT;
-    __min_token_threshold    INT;
+    __tokenizer_name          TEXT;
+    __max_tokens              INT;
+    __min_new_ratio           REAL;
+    __doc_prefix              TEXT;
+    __min_token_threshold     INT;
     __max_embeddings_per_post INT;
-    rec RECORD;
-    __sync_seq INT;
 BEGIN
-    SET search_path = hivesense_app, public;
     SELECT tokenizer_model,
            tokens_per_chunk,
            1 - overlap_amount,
@@ -104,13 +128,13 @@ BEGIN
     FROM hivesense_app.hivesense_app_status
     WHERE id = 1;
 
-    /* =====================================================================
-     * 0️⃣  PRE-PROCESS EVERY POST ONCE
-     *     ---------------------------------
-     *     We call preprocess_post with _min_token_threshold = 0 so we
-     *     *always* get (token_count, chunks[]).  Later we decide whether
-     *     the post is “big enough” (token_count ≥ __min_token_threshold).
-     * ====================================================================*/
+    -- fresh per transaction (ON COMMIT DROP); drop quietly if the caller runs
+    -- twice in one transaction
+    IF to_regclass('pg_temp.tmp_pre') IS NOT NULL THEN DROP TABLE tmp_pre; END IF;
+    IF to_regclass('pg_temp.tmp_chunks') IS NOT NULL THEN DROP TABLE tmp_chunks; END IF;
+
+    -- preprocess with threshold 0 so short posts are kept: they drive the
+    -- "post now produces zero chunks" deletion bookkeeping in the store step
     CREATE TEMP TABLE tmp_pre ON COMMIT DROP AS
     SELECT
         hp.id        AS post_id,
@@ -120,7 +144,6 @@ BEGIN
     FROM   unnest(_post_ids)          AS sel(id)
     JOIN   hivemind_app.hive_posts     hp  ON hp.id = sel.id
     LEFT   JOIN LATERAL preprocess_post(
-               /* body ---------------------------------------------------- */
                (SELECT hpd.title || E'.\n\n' || hpd.body
                   FROM hivemind_app.hive_post_data hpd
                   WHERE hpd.id = hp.id),
@@ -132,115 +155,98 @@ BEGIN
                __max_embeddings_per_post,
                TRUE,
                __doc_prefix,
-               0                      -- ← return *even if very short*
+               0
            ) AS pp
            ON TRUE;
 
-    /* =====================================================================
-     * CREATE CHUNKS FOR POSTS THAT ARE STILL “BIG ENOUGH”
-     * ====================================================================*/
     CREATE TEMP TABLE tmp_chunks ON COMMIT DROP AS
     SELECT
-        post_id,
-        generate_subscripts(chunks, 1) - 1          AS chunk_number,
-        chunks[generate_subscripts(chunks, 1)]      AS chunk_text,
-        token_count,
-        block_num
-    FROM tmp_pre
-    WHERE token_count >= __min_token_threshold
-      AND array_length(chunks, 1) IS NOT NULL;
+        p.post_id,
+        generate_subscripts(p.chunks, 1) - 1          AS chunk_number,
+        p.chunks[generate_subscripts(p.chunks, 1)]    AS chunk_text,
+        p.token_count,
+        p.block_num
+    FROM tmp_pre p
+    WHERE p.token_count >= __min_token_threshold
+      AND array_length(p.chunks, 1) IS NOT NULL;
 
+    RETURN QUERY
+    SELECT c.post_id, c.chunk_number, c.chunk_text
+    FROM tmp_chunks c
+    ORDER BY c.post_id, c.chunk_number;
+END;
+$$;
 
-    -- measure prep time
-    __prep_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_prep);
-
-    -- measure embed start
-    __start_embed := clock_timestamp();
-
-    /* =====================================================================
-     * EMBED THOSE CHUNKSS
-     * ====================================================================*/
-    CREATE TEMP TABLE tmp_vectors ON COMMIT DROP AS
-    WITH all_chunks AS (
-        SELECT ARRAY_AGG(
-                   (post_id, chunk_text, chunk_number)
-                     ::hivesense_app.id_and_post_chunk
-                   ORDER BY post_id, chunk_number
-               ) AS arr
-        FROM tmp_chunks
-    )
-    SELECT
-        pv.post_id,
-        pv.chunk_number,
-        pv.vec
-    FROM all_chunks
-    CROSS JOIN LATERAL UNNEST(hivesense_app.hivesense_embed(all_chunks.arr)) AS pv;
-
-
-    -- measure embed time
-    __embed_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_embed);
-
-    /* COUNT STATISTICS */
-    SELECT COUNT(*) INTO __num_discards FROM tmp_pre WHERE token_count < __min_token_threshold OR array_length(chunks, 1) IS NULL;
-    SELECT COUNT(DISTINCT post_id) INTO __processed_posts FROM tmp_chunks;
-    SELECT COUNT(*) INTO __num_chunks FROM tmp_vectors;
-    SELECT COALESCE(SUM(token_count),0) INTO __total_tokens FROM tmp_pre WHERE token_count >= __min_token_threshold;
-
-    /* =====================================================================
-     * POSTS THAT NOW PRODUCE ZERO CHUNKS
-     * (true deletions / under-threshold edits)
-     * ====================================================================*/
+-- Store the embeddings the caller placed in tmp_vectors (and the deletion
+-- bookkeeping for posts that produced no chunks), using the tmp_pre/tmp_chunks
+-- state from prepare_post_chunks(). Returns (discarded, processed, chunks).
+CREATE OR REPLACE FUNCTION hivesense_app.store_post_embeddings()
+RETURNS TABLE(discarded_posts INT, processed_posts INT, embedding_chunks INT, total_tokens INT)
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = hivesense_app, public
+AS $$
+DECLARE
+    rec        RECORD;
+    __sync_seq INT;
+BEGIN
+    /* posts that now produce zero chunks (true deletions / under-threshold edits) */
     CREATE TEMP TABLE tmp_empty_posts ON COMMIT DROP AS
-    SELECT post_id,
-           block_num,
-           token_count
-    FROM   tmp_pre
-    WHERE  token_count <  __min_token_threshold
-       OR  array_length(chunks,1) IS NULL;
+    SELECT p.post_id,
+           p.block_num,
+           p.token_count
+    FROM   tmp_pre p
+    LEFT   JOIN tmp_chunks c USING (post_id)
+    WHERE  c.post_id IS NULL;
 
-    /* nothing to do if no deletions */
     IF EXISTS (SELECT 1 FROM tmp_empty_posts) THEN
-
-        /* ➤ fresh sync_seq for every empty post */
         CREATE TEMP TABLE tmp_empty_seq ON COMMIT DROP AS
-        SELECT post_id,
+        SELECT ep.post_id,
                nextval('hivesense_app.sync_seq') AS sync_seq
-        FROM   tmp_empty_posts;
+        FROM   tmp_empty_posts ep;
 
-        /* ➤ delete lingering vectors */
+        -- post_data first: posts_vectors and deleted_embeddings reference it
+        -- (the scheduler used to pre-insert placeholder rows for this)
+        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
+        SELECT ep.post_id, ep.token_count, ep.block_num
+        FROM   tmp_empty_posts ep
+        ON CONFLICT (post_id) DO UPDATE
+            SET number_of_tokens   = EXCLUDED.number_of_tokens,
+                last_vectors_block = EXCLUDED.last_vectors_block;
+
         DELETE FROM hivesense_app.posts_vectors pv
         USING  tmp_empty_posts ep
         WHERE  pv.post_id = ep.post_id;
 
-        /* ➤ record the logical deletion */
         INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
-        SELECT post_id, sync_seq
-        FROM   tmp_empty_seq;
+        SELECT es.post_id, es.sync_seq
+        FROM   tmp_empty_seq es;
 
-        /* ➤ bring post_data up to date */
-        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
-        SELECT post_id, token_count, block_num
-        FROM   tmp_empty_posts
-        ON CONFLICT (post_id) DO UPDATE
-            SET number_of_tokens   = EXCLUDED.number_of_tokens,
-                last_vectors_block = EXCLUDED.last_vectors_block;
+        DROP TABLE tmp_empty_seq;
     END IF;
 
-    -- 3) per-post sync_seq, delete & insert
+    /* per-post sync_seq, delete & insert */
     FOR rec IN
-      SELECT DISTINCT post_id, block_num,
-             MAX(token_count) AS tcnt
-        FROM tmp_chunks
-       GROUP BY post_id, block_num
+      SELECT DISTINCT c.post_id, c.block_num,
+             MAX(c.token_count) AS tcnt
+        FROM tmp_chunks c
+       GROUP BY c.post_id, c.block_num
     LOOP
         SELECT nextval('hivesense_app.sync_seq') INTO __sync_seq;
 
+        -- post_data first: posts_vectors references it
+        INSERT INTO hivesense_app.post_data(post_id, number_of_tokens, last_vectors_block)
+        VALUES (rec.post_id, rec.tcnt, rec.block_num)
+        ON CONFLICT (post_id) DO UPDATE
+            SET number_of_tokens   = EXCLUDED.number_of_tokens,
+                last_vectors_block = EXCLUDED.last_vectors_block;
+
         IF EXISTS (
-           SELECT 1 FROM hivesense_app.posts_vectors
-            WHERE post_id = rec.post_id
+           SELECT 1 FROM hivesense_app.posts_vectors pv
+            WHERE pv.post_id = rec.post_id
         ) THEN
             DELETE FROM hivesense_app.posts_vectors
-             WHERE post_id = rec.post_id;
+             WHERE posts_vectors.post_id = rec.post_id;
             INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
             VALUES (rec.post_id, __sync_seq);
         END IF;
@@ -249,47 +255,115 @@ BEGIN
             post_id, chunk_number, embedding, sync_seq
         )
         SELECT
-          post_id,
-          chunk_number,
+          v.post_id,
+          v.chunk_number,
           CASE WHEN hivesense_app.store_halfvec_embeddings()
-               THEN vec::public.halfvec
-               ELSE vec
+               THEN v.vec::public.halfvec
+               ELSE v.vec
           END,
           __sync_seq
-        FROM tmp_vectors
-        WHERE post_id = rec.post_id
-        ORDER BY chunk_number;
+        FROM tmp_vectors v
+        WHERE v.post_id = rec.post_id
+        ORDER BY v.chunk_number;
 
         IF hivesense_app.use_reduced_embeddings()
            AND hivesense_app.reduction_mode() <> 'slice' THEN
-            -- PCA mode: compute and store reduced embeddings
             INSERT INTO hivesense_app.posts_vectors_reduced(
                 post_id, chunk_number, reduced_embedding
             )
             SELECT
-                post_id,
-                chunk_number,
+                v.post_id,
+                v.chunk_number,
                 CASE
                     WHEN hivesense_app.store_halfvec_embeddings()
-                         THEN hivesense_app.reduce_embedding(vec::public.vector)::public.halfvec
-                    ELSE hivesense_app.reduce_embedding(vec::public.vector)
+                         THEN hivesense_app.reduce_embedding(v.vec::public.vector)::public.halfvec
+                    ELSE hivesense_app.reduce_embedding(v.vec::public.vector)
                 END
-            FROM tmp_vectors
-            WHERE post_id = rec.post_id
-            ORDER BY chunk_number;
-            -- Slice mode: no separate reduced table — expression index handles truncation
+            FROM tmp_vectors v
+            WHERE v.post_id = rec.post_id
+            ORDER BY v.chunk_number;
         END IF;
 
-        GET DIAGNOSTICS __c = ROW_COUNT;
-
-        UPDATE hivesense_app.post_data
-           SET number_of_tokens   = rec.tcnt,
-               last_vectors_block = rec.block_num
-         WHERE post_id = rec.post_id;
     END LOOP;
 
-    /* RETURN PROFILING STATS */
-    RETURN (__num_discards, __processed_posts, __num_chunks, __total_tokens, __prep_time, __embed_time);
+    RETURN QUERY
+    SELECT
+        (SELECT COUNT(*)::INT FROM tmp_empty_posts),
+        (SELECT COUNT(DISTINCT c.post_id)::INT FROM tmp_chunks c),
+        (SELECT COUNT(*)::INT FROM tmp_vectors),
+        (SELECT COALESCE(SUM(p.token_count),0)::INT FROM tmp_pre p
+          WHERE EXISTS (SELECT 1 FROM tmp_chunks c WHERE c.post_id = p.post_id));
+
+    DROP TABLE tmp_empty_posts;
+END;
+$$;
+
+-- Publish everything stored so far to the remote-sync API (the syncers pull
+-- only up to max_visible_sync_seq; higher sequences may still have gaps).
+CREATE OR REPLACE FUNCTION hivesense_app.publish_visible_sync_seq()
+RETURNS void
+LANGUAGE sql
+VOLATILE
+AS $$
+    UPDATE hivesense_app.hivesense_app_status
+       SET max_visible_sync_seq = GREATEST(
+         COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors),0),
+         COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),0)
+       )
+     WHERE id = 1
+$$;
+
+DROP FUNCTION IF EXISTS generate_embeddings_for_posts(integer[],boolean,integer);
+CREATE OR REPLACE FUNCTION generate_embeddings_for_posts(
+    _post_ids INT[],
+    _logs     BOOLEAN,
+    _worker   INT
+)
+RETURNS hivesense_app.embedding_stats
+LANGUAGE plpgsql
+VOLATILE
+PARALLEL SAFE
+SET search_path = hivesense_app, public
+AS $$
+DECLARE
+    -- Legacy in-database path (scheduler/worker sessions): the same
+    -- prepare -> embed -> store pipeline as the python block processor, with
+    -- hivesense_app.hivesense_embed() (plpython HTTP) doing the embedding here.
+    __start_prep  TIMESTAMP := clock_timestamp();
+    __start_embed TIMESTAMP;
+    __prep_time   DOUBLE PRECISION;
+    __embed_time  DOUBLE PRECISION;
+    __stats       RECORD;
+BEGIN
+    PERFORM hivesense_app.prepare_post_chunks(_post_ids);
+    __prep_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_prep);
+
+    __start_embed := clock_timestamp();
+    CREATE TEMP TABLE tmp_vectors ON COMMIT DROP AS
+    WITH all_chunks AS (
+        SELECT ARRAY_AGG(
+                   (c.post_id, c.chunk_text, c.chunk_number)
+                     ::hivesense_app.id_and_post_chunk
+                   ORDER BY c.post_id, c.chunk_number
+               ) AS arr
+        FROM tmp_chunks c
+    )
+    SELECT
+        pv.post_id,
+        pv.chunk_number,
+        pv.vec
+    FROM all_chunks
+    CROSS JOIN LATERAL UNNEST(hivesense_app.hivesense_embed(all_chunks.arr)) AS pv;
+    __embed_time := EXTRACT(EPOCH FROM clock_timestamp() - __start_embed);
+
+    SELECT * INTO __stats FROM hivesense_app.store_post_embeddings();
+
+    DROP TABLE tmp_vectors;
+    DROP TABLE tmp_chunks;
+    DROP TABLE tmp_pre;
+
+    RETURN (__stats.discarded_posts, __stats.processed_posts, __stats.embedding_chunks,
+            __stats.total_tokens, __prep_time, __embed_time);
 END;
 $$;
 
