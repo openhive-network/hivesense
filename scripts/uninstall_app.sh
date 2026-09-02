@@ -100,6 +100,24 @@ END\$\$;
 EOF
 )
 
+  unregister_sql=$(cat << EOF
+do
+\$\$
+BEGIN
+  -- Remove the registry entry created by install_app's hive.app_register
+  -- (hive.app_remove_context does not touch the registry, and the entry would
+  -- otherwise dangle after the context is gone; dependency edges are removed
+  -- by ON DELETE CASCADE). Guarded so uninstall still works against a HAF
+  -- without the application registry.
+  IF to_regprocedure('hive.app_unregister(text)') IS NOT NULL
+     AND EXISTS ( SELECT 1 FROM hafd.applications WHERE name = '${HIVESENSE_SCHEMA}' ) THEN
+    PERFORM hive.app_unregister('${HIVESENSE_SCHEMA}');
+  END IF;
+END\$\$;
+EOF
+)
+
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "${unregister_sql}"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "${remove_context_sql}"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "DROP SCHEMA IF EXISTS ${HIVESENSE_SCHEMA} CASCADE;"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=OFF" -c "DROP SCHEMA IF EXISTS hivesense_endpoints CASCADE;"
