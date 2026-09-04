@@ -41,7 +41,16 @@ from psycopg2.extras import execute_values
 
 log = logging.getLogger("hivesense")
 if not logging.getLogger().handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+    # match the driver's timestamp format (ISO-8601 UTC, ms) so interleaved
+    # driver and processor lines read as one log
+    class _UtcIsoFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            import datetime
+            return datetime.datetime.fromtimestamp(record.created, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}Z"
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(_UtcIsoFormatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_handler)
+    logging.getLogger().setLevel(logging.INFO)
 
 _CONFIG = None
 _INDEXES_ENSURED = False
@@ -133,6 +142,11 @@ def process_blocks(conn, first_block, last_block):
     global _INDEXES_ENSURED
     cfg = _load_config(conn)
     cur = conn.cursor()
+    # hivemind's pg_search BM25 index on hive_post_data makes paradedb emit
+    # "Aggregate Scan (DataFusion) not used" warnings for our joins on every
+    # range; not actionable here, so silence it (placeholder GUC, harmless
+    # when pg_search isn't installed)
+    cur.execute("SET paradedb.check_aggregate_scan = off")
 
     cur.execute("SELECT hive.get_current_stage_name('hivesense_app')")
     stage = cur.fetchone()[0]
