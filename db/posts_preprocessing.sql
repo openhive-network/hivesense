@@ -20,11 +20,19 @@ if 'post_clean_patterns' not in globals():
         "remove_unwanted": re.compile(r'Posted via.*$|[*_]+', re.MULTILINE),
 
         "remove_base64" : re.compile(r'data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+'),
+
+        # C0 control characters (except \t \n \r) and DEL: pure noise for the
+        # embedding model, and raw separators like \x1c crash pySBD's
+        # numbered-list parser (int('\x1c2') ValueError, seen at block ~8.9M)
+        "remove_control_chars": re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'),
     }
 
 patterns = globals()['post_clean_patterns']
 
 def clean(text: str) -> str:
+    # 0) Drop control characters before anything else parses the text
+    text = patterns["remove_control_chars"].sub('', text)
+
     # 1) Unescape HTML entities like &nbsp;
     text = html.unescape(text)
 
@@ -168,7 +176,15 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
         # do a simple split instead
         return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
     else:
-        return sbd.segment(text)
+        try:
+            return sbd.segment(text)
+        except Exception as e:
+            # pySBD has more parsing bugs than the backtracking one above
+            # (e.g. int() on stray digits in its list detection). One bad post
+            # must not kill a multi-day generation run: fall back to the same
+            # simple splitter and keep going.
+            plpy.warning(f"pySBD failed on this post ({e!r}); using simple regex splitter")
+            return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
 
 def normalize_whitespace(text: str) -> str:
     return patterns["normalize_whitespace"].sub(' ', text).strip()
