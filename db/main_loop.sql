@@ -99,7 +99,12 @@ $$;
 
 -- Preprocess and chunk the posts; leaves tmp_pre and tmp_chunks (ON COMMIT
 -- DROP) behind for store_post_embeddings() and returns the chunks to embed.
-CREATE OR REPLACE FUNCTION hivesense_app.prepare_post_chunks(_post_ids INT[])
+-- With _append the tables accumulate across calls instead of being replaced,
+-- and only the new posts' chunks are returned: the client processor slices a
+-- range into pieces and preps the next slice while the previous one embeds,
+-- keeping the GPUs busy through what used to be a serial prep phase.
+DROP FUNCTION IF EXISTS hivesense_app.prepare_post_chunks(INT[]);
+CREATE OR REPLACE FUNCTION hivesense_app.prepare_post_chunks(_post_ids INT[], _append BOOLEAN DEFAULT FALSE)
 RETURNS TABLE(post_id INT, chunk_number INT, chunk_text TEXT)
 LANGUAGE plpgsql
 VOLATILE
@@ -128,19 +133,37 @@ BEGIN
     FROM hivesense_app.hivesense_app_status
     WHERE id = 1;
 
-    -- fresh per transaction (ON COMMIT DROP); drop quietly if the caller runs
-    -- twice in one transaction
-    IF to_regclass('pg_temp.tmp_pre') IS NOT NULL THEN DROP TABLE tmp_pre; END IF;
-    IF to_regclass('pg_temp.tmp_chunks') IS NOT NULL THEN DROP TABLE tmp_chunks; END IF;
+    IF NOT _append THEN
+        -- fresh per transaction (ON COMMIT DROP); drop quietly if the caller
+        -- runs twice in one transaction
+        IF to_regclass('pg_temp.tmp_pre') IS NOT NULL THEN DROP TABLE tmp_pre; END IF;
+        IF to_regclass('pg_temp.tmp_chunks') IS NOT NULL THEN DROP TABLE tmp_chunks; END IF;
+    END IF;
+
+    IF to_regclass('pg_temp.tmp_pre') IS NULL THEN
+        CREATE TEMP TABLE tmp_pre(
+            post_id     INT,
+            block_num   INT,
+            token_count INT,
+            chunks      TEXT[]
+        ) ON COMMIT DROP;
+        CREATE TEMP TABLE tmp_chunks(
+            post_id      INT,
+            chunk_number INT,
+            chunk_text   TEXT,
+            token_count  INT,
+            block_num    INT
+        ) ON COMMIT DROP;
+    END IF;
 
     -- preprocess with threshold 0 so short posts are kept: they drive the
     -- "post now produces zero chunks" deletion bookkeeping in the store step
-    CREATE TEMP TABLE tmp_pre ON COMMIT DROP AS
+    INSERT INTO tmp_pre(post_id, block_num, token_count, chunks)
     SELECT
-        hp.id        AS post_id,
+        hp.id,
         hp.block_num,
-        COALESCE(pp.token_count, 0)            AS token_count,
-        COALESCE(pp.chunks, ARRAY[]::TEXT[])   AS chunks
+        COALESCE(pp.token_count, 0),
+        COALESCE(pp.chunks, ARRAY[]::TEXT[])
     FROM   unnest(_post_ids)          AS sel(id)
     JOIN   hivemind_app.hive_posts     hp  ON hp.id = sel.id
     LEFT   JOIN LATERAL preprocess_post(
@@ -159,20 +182,22 @@ BEGIN
            ) AS pp
            ON TRUE;
 
-    CREATE TEMP TABLE tmp_chunks ON COMMIT DROP AS
+    INSERT INTO tmp_chunks(post_id, chunk_number, chunk_text, token_count, block_num)
     SELECT
         p.post_id,
-        generate_subscripts(p.chunks, 1) - 1          AS chunk_number,
-        p.chunks[generate_subscripts(p.chunks, 1)]    AS chunk_text,
+        generate_subscripts(p.chunks, 1) - 1,
+        p.chunks[generate_subscripts(p.chunks, 1)],
         p.token_count,
         p.block_num
     FROM tmp_pre p
-    WHERE p.token_count >= __min_token_threshold
+    WHERE p.post_id = ANY(_post_ids)
+      AND p.token_count >= __min_token_threshold
       AND array_length(p.chunks, 1) IS NOT NULL;
 
     RETURN QUERY
     SELECT c.post_id, c.chunk_number, c.chunk_text
     FROM tmp_chunks c
+    WHERE c.post_id = ANY(_post_ids)
     ORDER BY c.post_id, c.chunk_number;
 END;
 $$;

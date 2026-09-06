@@ -31,6 +31,7 @@ hivesense_app.hivesense_app_status, read once per process.
 
 import json
 import logging
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,12 @@ _INDEXES_ENSURED = False
 
 INITIAL_RETRY_DELAY = 5
 MAX_RETRY_DELAY = 120
+
+# Posts per prep slice. Preparing (SQL chunking) and embedding (HTTP) run
+# pipelined: while the workers embed slice N's chunks, the main thread runs
+# prepare_post_chunks for slice N+1 on the driver's connection - the GPUs no
+# longer sit idle through a whole-range serial prep phase.
+PREP_SLICE_POSTS = max(1, int(os.environ.get("HIVESENSE_PREP_SLICE_POSTS", "200")))
 
 
 def _load_config(conn):
@@ -118,23 +125,12 @@ def _embed_batch(cfg, texts, label):
     return data.get("embeddings", [])
 
 
-def _embed_chunks(cfg, chunks):
-    """chunks: [(post_id, chunk_number, text)] -> [(post_id, chunk_number, vec_text)]"""
-    batches = [chunks[i:i + cfg["batch_size"]] for i in range(0, len(chunks), cfg["batch_size"])]
-    results = [None] * len(batches)
-
-    def run(idx):
-        batch = batches[idx]
-        vecs = _embed_batch(cfg, [c[2] for c in batch], f"batch {idx + 1}/{len(batches)}")
-        if len(vecs) != len(batch):
-            raise RuntimeError(f"embedding server returned {len(vecs)} vectors for {len(batch)} inputs")
-        results[idx] = [
-            (c[0], c[1], "[" + ",".join(map(str, v)) + "]") for c, v in zip(batch, vecs)
-        ]
-
-    with ThreadPoolExecutor(max_workers=cfg["workers"]) as pool:
-        list(pool.map(run, range(len(batches))))  # list() re-raises worker errors
-    return [row for batch in results for row in batch]
+def _embed_one(cfg, batch, label):
+    """batch: [(post_id, chunk_number, text)] -> [(post_id, chunk_number, vec_text)]"""
+    vecs = _embed_batch(cfg, [c[2] for c in batch], label)
+    if len(vecs) != len(batch):
+        raise RuntimeError(f"embedding server returned {len(vecs)} vectors for {len(batch)} inputs")
+    return [(c[0], c[1], "[" + ",".join(map(str, v)) + "]") for c, v in zip(batch, vecs)]
 
 
 def process_blocks(conn, first_block, last_block):
@@ -171,14 +167,37 @@ def process_blocks(conn, first_block, last_block):
     if not post_ids:
         return
 
-    t0 = time.monotonic()
-    cur.execute("SELECT post_id, chunk_number, chunk_text FROM hivesense_app.prepare_post_chunks(%s)", (post_ids,))
-    chunks = cur.fetchall()
-    prep_secs = time.monotonic() - t0
-
-    t1 = time.monotonic()
-    vectors = _embed_chunks(cfg, chunks) if chunks else []
-    embed_secs = time.monotonic() - t1
+    # Pipeline: prep slice N+1 (SQL, main thread, driver's connection) while
+    # the pool embeds slice N's chunks (HTTP only - the connection is free).
+    # tmp_pre/tmp_chunks accumulate across slices (_append) so the store step
+    # still sees the whole range.
+    slices = [post_ids[i:i + PREP_SLICE_POSTS] for i in range(0, len(post_ids), PREP_SLICE_POSTS)]
+    prep_secs = 0.0
+    embed_started = None
+    futures = []
+    vectors = []
+    pool = ThreadPoolExecutor(max_workers=cfg["workers"])
+    try:
+        for slice_no, slice_ids in enumerate(slices):
+            t0 = time.monotonic()
+            cur.execute(
+                "SELECT post_id, chunk_number, chunk_text FROM hivesense_app.prepare_post_chunks(%s, %s)",
+                (slice_ids, slice_no > 0),
+            )
+            chunks = cur.fetchall()
+            prep_secs += time.monotonic() - t0
+            if not chunks:
+                continue
+            if embed_started is None:
+                embed_started = time.monotonic()
+            for b in range(0, len(chunks), cfg["batch_size"]):
+                batch = chunks[b:b + cfg["batch_size"]]
+                futures.append(pool.submit(_embed_one, cfg, batch, f"slice {slice_no + 1}/{len(slices)} batch {len(futures) + 1}"))
+        for f in futures:
+            vectors.extend(f.result())  # re-raises worker errors
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    embed_secs = (time.monotonic() - embed_started) if embed_started is not None else 0.0
 
     cur.execute("CREATE TEMP TABLE tmp_vectors(post_id INT, chunk_number INT, vec public.vector) ON COMMIT DROP")
     if vectors:
@@ -198,7 +217,7 @@ def process_blocks(conn, first_block, last_block):
 
     log.info(
         "blocks %s..%s: %s post(s), %s chunk(s), %s discarded, %s tokens; "
-        "prep %.2fs, embed %.2fs (%.1f chunks/s)",
+        "prep %.2fs, embed %.2fs overlapped (%.1f chunks/s)",
         first_block, last_block, processed, stored_chunks, discarded, total_tokens,
         prep_secs, embed_secs, (stored_chunks / embed_secs) if embed_secs > 0 else 0.0,
     )
