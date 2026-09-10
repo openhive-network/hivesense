@@ -170,7 +170,8 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
     sbd = cache[sbd_cache_key]
 
     if patterns["catastrophic_backtracking_trigger"].search(text):
-        plpy.warning(f"Detected possible PySBD catastrophic backtracking situation, using simple regex splitter for this post")
+        GD['hivesense_regex_fallbacks'] = GD.get('hivesense_regex_fallbacks', 0) + 1
+        plpy.debug(f"Detected possible PySBD catastrophic backtracking situation, using simple regex splitter for this post")
         # Detected something like "[111 111 111]"
         # This can trigger the PySBD bug: https://github.com/nipunsadvilkar/pySBD/issues/79
         # do a simple split instead
@@ -183,6 +184,7 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
             # (e.g. int() on stray digits in its list detection). One bad post
             # must not kill a multi-day generation run: fall back to the same
             # simple splitter and keep going.
+            GD['hivesense_regex_fallbacks'] = GD.get('hivesense_regex_fallbacks', 0) + 1
             plpy.warning(f"pySBD failed on this post ({e!r}); using simple regex splitter")
             return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
 
@@ -288,15 +290,20 @@ while i < len(sentence_tokens):
                 chunk_tokens += tlen
                 i += 1
             elif _truncate_long_sentences:
+                # Count every truncation for the caller's per-range telemetry
+                # (hivesense_app.pop_truncation_count); the per-post detail is
+                # DEBUG - enough of an excerpt to judge whether a reasonable
+                # splitter had a split point (prose in a script we don't
+                # split, e.g. Bengali danda) or the text is anomalous (base64
+                # blobs, giant lists).
+                GD['hivesense_truncated_chunks'] = GD.get('hivesense_truncated_chunks', 0) + 1
                 warning_threshold = 800
                 if tlen > warning_threshold:
-                    plpy.notice(f'Post ID: {_post_id}     Link: {_permlink}')
-                    plpy.notice(f'Truncating long sentence of {tlen} tokens to {max_content_tokens}')
-                    plpy.notice(f'Sentence is: {txt}')
+                    plpy.debug(f'Post ID: {_post_id}     Link: {_permlink}')
+                    plpy.debug(f'Truncating long sentence of {tlen} tokens to {max_content_tokens}')
+                    plpy.debug(f'Sentence is ({len(txt)} chars): {txt[:300]}{"..." if len(txt) > 300 else ""}')
                 trunc_ids = ids[:max_content_tokens]
                 trunc_txt = tok.decode(trunc_ids)
-                if tlen > warning_threshold:
-                    plpy.notice(f'Truncated to: {trunc_txt}')
                 chunk.extend([(trunc_txt, trunc_ids)])
                 added_stack.append({'txt': trunc_txt,
                                     'ids': trunc_ids,
@@ -440,3 +447,20 @@ $$;
 
 GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO hivesense_user;
 GRANT EXECUTE ON FUNCTION preprocess_post(TEXT, INT, TEXT, TEXT, INTEGER, DOUBLE PRECISION, INTEGER, BOOLEAN, TEXT, INT) TO pg_database_owner  WITH GRANT OPTION;
+
+
+-- Chunker telemetry: chunk_post counts in the session's PL/Python GD the
+-- sentences it had to hard-truncate (no split point found) and the posts it
+-- split with the simple regex instead of pySBD (backtracking guard). The
+-- block processor pops the counters once per range and reports them next to
+-- the chunk totals, so split-failure rates stay visible without the per-post
+-- log noise (that detail is now DEBUG, with the echoed text capped).
+CREATE OR REPLACE FUNCTION pop_chunker_counters()
+RETURNS TABLE(truncated INT, regex_fallback INT)
+LANGUAGE plpython3u
+VOLATILE
+AS $$
+return [(GD.pop('hivesense_truncated_chunks', 0), GD.pop('hivesense_regex_fallbacks', 0))]
+$$;
+
+GRANT EXECUTE ON FUNCTION pop_chunker_counters() TO hivesense_user;
