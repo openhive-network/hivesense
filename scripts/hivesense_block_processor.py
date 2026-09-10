@@ -210,14 +210,26 @@ def process_blocks(conn, first_block, last_block):
         )
     cur.execute("SELECT * FROM hivesense_app.store_post_embeddings()")
     discarded, processed, stored_chunks, total_tokens = cur.fetchone()
+    cur.execute("SELECT * FROM hivesense_app.pop_chunker_counters()")
+    truncated, regex_fallback = cur.fetchone()
     cur.execute("SELECT hivesense_app.publish_visible_sync_seq()")
     cur.execute("DROP TABLE tmp_vectors")
     cur.execute("DROP TABLE tmp_chunks")
     cur.execute("DROP TABLE tmp_pre")
 
+    # truncated = sentences hard-cut with no split point found; regex-split =
+    # posts sentence-split by the simple regex instead of pySBD. Only shown
+    # when nonzero - a rising rate against the chunk count means the splitter
+    # is failing on too much real content (per-post detail is in DEBUG).
+    splitter_notes = ""
+    if truncated:
+        splitter_notes += f", {truncated} truncated"
+    if regex_fallback:
+        splitter_notes += f", {regex_fallback} regex-split"
     log.info(
-        "blocks %s..%s: %s post(s), %s chunk(s), %s discarded, %s tokens; "
+        "blocks %s..%s: %s post(s), %s chunk(s), %s discarded, %s tokens%s; "
         "prep %.2fs, embed %.2fs overlapped (%.1f chunks/s)",
         first_block, last_block, processed, stored_chunks, discarded, total_tokens,
-        prep_secs, embed_secs, (stored_chunks / embed_secs) if embed_secs > 0 else 0.0,
+        splitter_notes, prep_secs, embed_secs,
+        (stored_chunks / embed_secs) if embed_secs > 0 else 0.0,
     )
