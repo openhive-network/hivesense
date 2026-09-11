@@ -108,6 +108,15 @@ if key not in cache:
 
         "cjk_sentence_end": re.compile(r'(?<=[。？！…\.?!])\s*|\r?\n+'),
 
+        # Last-resort sentence terminators across scripts, used when the
+        # primary splitter finds no boundary in an oversized "sentence":
+        # ASCII/ellipsis need a following space (protects decimals and
+        # abbreviations); script-specific marks don't collide with numbers so
+        # they split with or without one: Devanagari/Bengali danda and double
+        # danda, Urdu full stop, Arabic question mark, Armenian full stop,
+        # Ethiopic full stop, Myanmar section mark, Khmer khan.
+        "universal_sentence_end": re.compile(r'(?<=[。？！।॥۔؟։።။។])\s*|(?<=[\.?!…])\s+|\r?\n+'),
+
         # any Hiragana (U+3040–U+309F) or Katakana (U+30A0–U+30FF) code‐point
         "ja_characters": re.compile(r"[\u3040-\u309F\u30A0-\u30FF]"),
         # basic CJK Unified Ideographs (U+4E00–U+9FFF)
@@ -175,7 +184,7 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
         # Detected something like "[111 111 111]"
         # This can trigger the PySBD bug: https://github.com/nipunsadvilkar/pySBD/issues/79
         # do a simple split instead
-        return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
+        return patterns["universal_sentence_end"].split(text)
     else:
         try:
             return sbd.segment(text)
@@ -186,7 +195,7 @@ def split_sentences(text: str, assumed_language: str) -> list[str]:
             # simple splitter and keep going.
             GD['hivesense_regex_fallbacks'] = GD.get('hivesense_regex_fallbacks', 0) + 1
             plpy.warning(f"pySBD failed on this post ({e!r}); using simple regex splitter")
-            return re.split(r'(?<=[\.?!])\s+|\r?\n+', text)
+            return patterns["universal_sentence_end"].split(text)
 
 def normalize_whitespace(text: str) -> str:
     return patterns["normalize_whitespace"].sub(' ', text).strip()
@@ -227,8 +236,11 @@ def split_sentences_to_token_count(text: str,
         if unwrapped:
             continue
 
-        # --- fallback: brute-force split on ASCII . ? ! + space
-        parts = re.split(r'(?<=[\.?!])\s+', s)
+        # --- fallback: brute-force split on sentence terminators from any
+        # script (pySBD only handles 22 languages; Bengali/Hindi/Urdu prose
+        # and similar used to arrive here as one giant "sentence" and get
+        # hard-truncated despite ending every sentence with a danda)
+        parts = patterns["universal_sentence_end"].split(s)
         if len(parts) > 1:
             for sub in parts:
                 sub_clean = normalize_whitespace(sub)
