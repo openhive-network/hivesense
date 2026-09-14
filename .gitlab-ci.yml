@@ -242,8 +242,9 @@ sync:
     # Compose file location for CI tests
     COMPOSE_DIR: "${CI_PROJECT_DIR}/docker/ci"
   # Three embedding configurations are synced and tested (full, pca, slice),
-  # so allow extra time beyond the initial HAF replay + hivemind sync
-  timeout: 90 minutes
+  # plus a fourth regeneration for the sync-chain rebase rehearsal, so allow
+  # extra time beyond the initial HAF replay + hivemind sync
+  timeout: 100 minutes
   before_script:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):login[collapsed=true]\r\e[0KLogging to Docker registry..."
@@ -398,6 +399,15 @@ sync:
     echo "PASS: syncer parks hivesense_app events_id at unreachable_event_id()"
     echo -e "\e[0Ksection_end:$(date +%s):events_id_test\r\e[0K"
   - |
+    echo -e "\e[0Ksection_start:$(date +%s):sync_chains_unit[collapsed=true]\r\e[0KSyncer /sync-chains selection unit checks..."
+    # First-match chain selection, uuid continuity and the config-drift refusal
+    # in scripts/sync_embeddings.py, run from the just-built syncer image (no
+    # database needed). docs/sync_chain_rebase.md describes the protocol.
+    SYNCER_IMG="registry.gitlab.syncad.com/hive/hivesense/syncer:${CI_COMMIT_SHORT_SHA}"
+    docker run --rm -v "${CI_PROJECT_DIR}/tests:/tests:ro" "$SYNCER_IMG" \
+      python /tests/unit/test_sync_chain_selection.py
+    echo -e "\e[0Ksection_end:$(date +%s):sync_chains_unit\r\e[0K"
+  - |
     echo -e "\e[0Ksection_start:$(date +%s):pca_phase[collapsed=true]\r\e[0KReconfigure to PCA-reduced embeddings and re-test..."
     # Reuse the synced HAF/hivemind stack: compute a PCA matrix from the
     # full-mode embeddings, reinstall hivesense in pca mode, resync, and run
@@ -421,6 +431,23 @@ sync:
     tests/integration/api_node/benchmarks/api/benchmark.sh --workers=1 --loops=1
     mv jmeter_results jmeter_results-slice
     echo -e "\e[0Ksection_end:$(date +%s):slice_phase\r\e[0K"
+  - |
+    echo -e "\e[0Ksection_start:$(date +%s):rebase_phase[collapsed=true]\r\e[0KRebase the slice-phase sync chain onto a regeneration with another chunk size..."
+    # Rehearsal of docs/sync_chain_rebase.md: dump the chain the slice phase
+    # produced, regenerate with the same model but a smaller chunk size (a
+    # stand-in for a splitter change), then rebase the old chain onto the new
+    # tables and check what downstreams would receive. The sync/chunk-count
+    # test is not repeated here: the chunk count legitimately changes.
+    tests/integration/api_node/hivesense_rebase_test.sh --phase=dump --dir=/tmp/old_chain
+    scripts/ci-helpers/reconfigure-hivesense.sh --mode=slice \
+      --model="hf.co/mixedbread-ai/mxbai-embed-xsmall-v1:F16" \
+      --query-prefix="Represent this sentence for searching relevant passages: " \
+      --tokens-per-chunk=256
+    tests/integration/api_node/hivesense_rebase_test.sh --phase=rebase --dir=/tmp/old_chain
+    tests/integration/api_node/hivesense_search_test.sh --mode=slice || SEARCH_TEST_RC=1
+    docker compose -f "${CI_PROJECT_DIR}/docker/ci/compose.yml" exec -T haf \
+      psql -U haf_admin -v ON_ERROR_STOP=on -d haf_block_log -f - < tests/test_sync_chains.sql
+    echo -e "\e[0Ksection_end:$(date +%s):rebase_phase\r\e[0K"
   - |
     if [ "${SEARCH_TEST_RC:-0}" -ne 0 ]; then
       echo "FAIL: search tests failed in one or more embedding configurations (see FAIL lines in the sections above)"

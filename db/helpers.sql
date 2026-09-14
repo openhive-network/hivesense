@@ -180,9 +180,13 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE PROCEDURE CREATE_HNSW_INDEX()
-LANGUAGE plpgsql
-AS $$
+-- The CREATE INDEX statement for this configuration's HNSW index on
+-- tgt_table(tgt_col), named idx_name. Shared by CREATE_HNSW_INDEX() and the
+-- chain-rebase tooling (db/legacy_rebase.sql builds the same index on a
+-- staging table before swapping it in).
+CREATE OR REPLACE FUNCTION hivesense_app.hnsw_index_statement(idx_name text, tgt_table text, tgt_col text)
+RETURNS text LANGUAGE plpgsql STABLE AS
+$$
 DECLARE
     use_reduced boolean := hivesense_app.use_reduced_embeddings();
     red_mode    text    := hivesense_app.reduction_mode();
@@ -194,6 +198,44 @@ DECLARE
     store       boolean := hivesense_app.store_halfvec_embeddings();
     m           int     := (SELECT hnsw_m              FROM hivesense_app.hivesense_app_status LIMIT 1);
     efc         int     := (SELECT hnsw_ef_construction FROM hivesense_app.hivesense_app_status LIMIT 1);
+BEGIN
+    IF use_reduced AND red_mode = 'slice' AND store THEN
+        -- Matryoshka on halfvec column: subvector returns halfvec
+        RETURN format(
+          'CREATE INDEX %I ON %s USING hnsw ((public.subvector(%I, 1, %s)::public.halfvec(%s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, dim, m, efc
+        );
+    ELSIF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka on vector column: subvector returns vector
+        RETURN format(
+          'CREATE INDEX %I ON %s USING hnsw ((public.subvector(%I, 1, %s)::public.vector(%s)) public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, dim, m, efc
+        );
+    ELSIF store THEN
+        RETURN format(
+          'CREATE INDEX %I ON %s USING hnsw (%I public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, m, efc
+        );
+    ELSIF half THEN
+        RETURN format(
+          'CREATE INDEX %I ON %s USING hnsw ((%I::public.halfvec(%s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, dim, m, efc
+        );
+    ELSE
+        RETURN format(
+          'CREATE INDEX %I ON %s USING hnsw (%I public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
+          idx_name, tgt_table, tgt_col, m, efc
+        );
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE CREATE_HNSW_INDEX()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    red_mode    text    := hivesense_app.reduction_mode();
     idx_exists  boolean;
     tgt_table   text;
     tgt_col     text;
@@ -230,38 +272,7 @@ BEGIN
         RETURN;
     END IF;
 
-    /* -----------------------------------------------------------
-     * Compose CREATE INDEX statement
-     * ----------------------------------------------------------*/
-
-    IF use_reduced AND red_mode = 'slice' AND store THEN
-        -- Matryoshka on halfvec column: subvector returns halfvec
-        EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw ((public.subvector(%I, 1, %s)::public.halfvec(%s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
-          idx_name, tgt_table, tgt_col, dim, dim, m, efc
-        );
-    ELSIF use_reduced AND red_mode = 'slice' THEN
-        -- Matryoshka on vector column: subvector returns vector
-        EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw ((public.subvector(%I, 1, %s)::public.vector(%s)) public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
-          idx_name, tgt_table, tgt_col, dim, dim, m, efc
-        );
-    ELSIF store THEN
-        EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw (%I public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
-          idx_name, tgt_table, tgt_col, m, efc
-        );
-    ELSIF half THEN
-        EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw ((%I::public.halfvec(%s)) public.halfvec_cosine_ops) WITH (m=%s, ef_construction=%s)',
-          idx_name, tgt_table, tgt_col, dim, m, efc
-        );
-    ELSE
-        EXECUTE format(
-          'CREATE INDEX %I ON %s USING hnsw (%I public.vector_cosine_ops) WITH (m=%s, ef_construction=%s)',
-          idx_name, tgt_table, tgt_col, m, efc
-        );
-    END IF;
+    EXECUTE hivesense_app.hnsw_index_statement(idx_name, tgt_table, tgt_col);
 END;
 $$;
 

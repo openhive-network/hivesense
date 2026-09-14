@@ -330,6 +330,9 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   END
   \$\$;"
 psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};" -f "$SRCPATH/db/helpers.sql"
+# operator tooling for continuing an old sync chain through a regeneration
+# (docs/sync_chain_rebase.md); no effect on normal operation
+psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "SET SEARCH_PATH TO ${HIVESENSE_SCHEMA}, public;" -f "$SRCPATH/db/legacy_rebase.sql"
 
 # #45: record the deployed version so /version can serve it. SET_VERSION() is
 # defined in helpers.sql (loaded just above); the image bakes the git hash into

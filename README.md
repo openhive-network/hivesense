@@ -183,6 +183,13 @@ launches an endpoint on port 11434, which will distribute traffic among several 
 
 ### Database
 
+#### Sync chains and regenerations
+
+Downstream nodes follow this node's embeddings by `sync_uuid`. Regenerating
+embeddings with the same model (e.g. after a splitter change) does not have to
+break them: see [docs/sync_chain_rebase.md](docs/sync_chain_rebase.md) for the
+rebase procedure and the `/sync-chains` endpoint.
+
 #### PostgreSQL roles
 
 - **hivesense_owner** is able to modify the database tables, their content and modify schema. If used to start HiveSense
