@@ -254,4 +254,109 @@ AS $$
   LIMIT 1;
 $$ LANGUAGE sql STABLE;
 
+/** openapi:components
+schemas:
+  syncchain:
+    type: object
+    properties:
+      sync_uuid: { type: string, format: uuid }
+      base_url: { type: string, nullable: true }
+      llm: { type: string }
+      embedding_dimensionality: { type: integer }
+      document_prefix: { type: string }
+      query_prefix: { type: string }
+      tokens_per_chunk: { type: integer }
+      overlap_amount: { type: number }
+      min_token_threshold: { type: integer }
+      max_embeddings_per_post: { type: integer }
+      skipped_op_count: { type: integer }
+*/
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS syncchain CASCADE;
+CREATE TYPE syncchain AS (
+    "sync_uuid" TEXT,
+    "base_url" TEXT,
+    "llm" TEXT,
+    "embedding_dimensionality" INT,
+    "document_prefix" TEXT,
+    "query_prefix" TEXT,
+    "tokens_per_chunk" INT,
+    "overlap_amount" FLOAT,
+    "min_token_threshold" INT,
+    "max_embeddings_per_post" INT,
+    "skipped_op_count" INT
+);
+-- openapi-generated-code-end
+
+/** openapi:paths
+/sync-chains:
+  get:
+    x-internal: true
+    tags:
+      - AI
+    summary: List the embedding chains this server can supply, most preferred first
+    description: |
+      Every chain is an independent sequence of embedding operations identified
+      by its `sync_uuid`. The first row is always this server's own chain (the
+      one `/sync-settings` describes); further rows are chains served on behalf
+      of another model/configuration or another stack, in which case `base_url`
+      is the API base to fetch `/embedding-updates` from (null means this
+      server). A syncer starting from scratch adopts the first chain whose
+      configuration matches its own install; a syncer that already has a
+      `sync_uuid` keeps using that chain as long as it is listed here.
+    operationId: hivesense_endpoints.get_sync_chains
+    responses:
+      '200':
+        description: JSON array of chains, most preferred first.
+        content:
+          application/json:
+            schema:
+              x-sql-datatype: SETOF syncchain
+*/
+-- openapi-generated-code-begin
+DROP FUNCTION IF EXISTS hivesense_endpoints.get_sync_chains;
+CREATE OR REPLACE FUNCTION hivesense_endpoints.get_sync_chains()
+RETURNS SETOF syncchain 
+-- openapi-generated-code-end
+AS $$
+  SELECT
+    sync_uuid, base_url, llm, embedding_dimensionality, document_prefix, query_prefix,
+    tokens_per_chunk, overlap_amount, min_token_threshold, max_embeddings_per_post, skipped_op_count
+  FROM (
+    -- 1) the primary chain: this node's own embeddings
+    SELECT
+      sync_uuid::text,
+      NULL::text AS base_url,
+      llm,
+      embedding_dimensionality,
+      document_prefix,
+      query_prefix,
+      tokens_per_chunk,
+      overlap_amount,
+      min_token_threshold,
+      max_embeddings_per_post,
+      skipped_op_count + upstream_skipped_op_count AS skipped_op_count,
+      -1 AS priority
+    FROM hivesense_app.hivesense_app_status
+    WHERE id = 1
+    UNION ALL
+    -- 2) chains served on behalf of others (see hivesense_app.sync_chains)
+    SELECT
+      sync_uuid::text,
+      base_url,
+      llm,
+      embedding_dimensionality,
+      document_prefix,
+      query_prefix,
+      tokens_per_chunk,
+      overlap_amount,
+      min_token_threshold,
+      max_embeddings_per_post,
+      skipped_op_count,
+      priority
+    FROM hivesense_app.sync_chains
+  ) chains
+  ORDER BY priority, sync_uuid
+$$ LANGUAGE sql STABLE;
+
 RESET ROLE;
