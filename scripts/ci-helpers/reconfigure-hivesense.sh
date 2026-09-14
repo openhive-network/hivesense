@@ -23,6 +23,8 @@ OPTIONS:
     --reduced-dim=NUMBER     Reduced dimensions (defaults: pca=128, slice=256)
     --query-prefix=TEXT      Query prefix required by the model
     --document-prefix=TEXT   Document prefix required by the model
+    --tokens-per-chunk=NUM   Chunk size (default: keep current); a different
+                             value with the same model simulates a splitter change
     --help|-h|-?             Display this help screen and exit
 EOF
 }
@@ -40,6 +42,7 @@ VECTOR_SIZE=""
 REDUCED_DIM=""
 QUERY_PREFIX=""
 DOCUMENT_PREFIX=""
+TOKENS_PER_CHUNK=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,6 +63,9 @@ while [ $# -gt 0 ]; do
         ;;
     --document-prefix=*)
         DOCUMENT_PREFIX="${1#*=}"
+        ;;
+    --tokens-per-chunk=*)
+        TOKENS_PER_CHUNK="${1#*=}"
         ;;
     --help|-h|-\?)
         print_help
@@ -119,6 +125,10 @@ fi
 if [ -n "$DOCUMENT_PREFIX" ]; then
   HIVESENSE_DOCUMENT_PREFIX="$DOCUMENT_PREFIX"
   export HIVESENSE_DOCUMENT_PREFIX
+fi
+if [ -n "$TOKENS_PER_CHUNK" ]; then
+  HIVESENSE_TOKENS_PER_CHUNK="$TOKENS_PER_CHUNK"
+  export HIVESENSE_TOKENS_PER_CHUNK
 fi
 
 compose() {
