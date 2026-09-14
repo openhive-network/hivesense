@@ -269,4 +269,27 @@ CREATE TABLE IF NOT EXISTS hivesense_app.deleted_embeddings (
 
 CREATE INDEX IF NOT EXISTS deleted_embeddings_sync_seq_post_id_idx ON hivesense_app.deleted_embeddings(sync_seq, post_id);
 
+-- Additional embedding chains advertised by the /sync-chains endpoint. The
+-- primary chain (this node's own embeddings, identified by
+-- hivesense_app_status.sync_uuid) is always listed first and is not stored
+-- here. Rows let a single API host direct syncers to embeddings generated
+-- under another model/configuration, or served by another stack (base_url),
+-- e.g. an old chain kept alive through a transition. Clients take the first
+-- chain, in priority order, whose configuration matches their own install.
+CREATE TABLE IF NOT EXISTS hivesense_app.sync_chains (
+    sync_uuid                UUID PRIMARY KEY,
+    priority                 INT  NOT NULL DEFAULT 100, -- lower is preferred; the primary chain is always first
+    base_url                 TEXT,                      -- API base serving this chain; NULL = this server
+    llm                      TEXT NOT NULL,
+    embedding_dimensionality INT  NOT NULL,
+    document_prefix          TEXT NOT NULL DEFAULT '',
+    query_prefix             TEXT NOT NULL DEFAULT '',
+    tokens_per_chunk         INT  NOT NULL,
+    overlap_amount           REAL NOT NULL,
+    min_token_threshold      INT  NOT NULL,
+    max_embeddings_per_post  INT,
+    skipped_op_count         INT  NOT NULL DEFAULT 0,
+    note                     TEXT
+);
+
 RESET ROLE;

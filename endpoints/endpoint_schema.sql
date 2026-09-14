@@ -592,6 +592,46 @@ DO $__$
             "type": "integer"
           }
         }
+      },
+      "syncchain": {
+        "type": "object",
+        "properties": {
+          "sync_uuid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "base_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "llm": {
+            "type": "string"
+          },
+          "embedding_dimensionality": {
+            "type": "integer"
+          },
+          "document_prefix": {
+            "type": "string"
+          },
+          "query_prefix": {
+            "type": "string"
+          },
+          "tokens_per_chunk": {
+            "type": "integer"
+          },
+          "overlap_amount": {
+            "type": "number"
+          },
+          "min_token_threshold": {
+            "type": "integer"
+          },
+          "max_embeddings_per_post": {
+            "type": "integer"
+          },
+          "skipped_op_count": {
+            "type": "integer"
+          }
+        }
       }
     }
   }

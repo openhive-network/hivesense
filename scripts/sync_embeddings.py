@@ -16,6 +16,9 @@ DB_DSN  = os.environ.get("POSTGRES_URI")         # postgres://…  (same schema 
 
 # Endpoints
 STATUS_URL = f"{API_URL}/sync-settings"
+CHAINS_URL = f"{API_URL}/sync-chains"
+# base of the chain we ended up following; /sync-chains may point us at another
+# host (base_url) for chains served on behalf of another stack
 EMBEDS_URL = f"{API_URL}/embedding-updates"
 
 BATCH = 1000
@@ -115,9 +118,115 @@ def fetch_server_status():
     return data
 
 
-def validate_local_state(conn, server):
+# Config keys that must agree between our install and the chain we sync from:
+# embeddings are only interchangeable when produced with the same model, the
+# same prefixes and the same chunking parameters.
+CONFIG_KEYS = [
+    'llm', 'embedding_dimensionality', 'document_prefix', 'query_prefix',
+    'tokens_per_chunk', 'overlap_amount', 'min_token_threshold', 'max_embeddings_per_post'
+]
+
+
+def config_mismatches(local, remote):
+    """Keys in CONFIG_KEYS whose values differ between our status row and a
+    remote chain/settings dict (float tolerance for overlap_amount)."""
+    errors = []
+    for k in CONFIG_KEYS:
+        if k == 'overlap_amount':
+            if abs(float(local[k]) - float(remote[k])) > 1e-6:
+                errors.append(k)
+        elif local[k] != remote[k]:
+            errors.append(k)
+    return errors
+
+
+def fetch_sync_chains():
+    """GET /sync-chains. Returns the list of chains (most preferred first), or
+    None when the upstream predates the endpoint (404), in which case the
+    caller falls back to /sync-settings. Other failures retry like
+    fetch_server_status()."""
+    backoff = RETRY_SLEEP
+    while True:
+        try:
+            resp = requests.get(CHAINS_URL, timeout=30)
+            if resp.status_code == 404:
+                return None
+            if not resp.ok:
+                logging.warning("Sync-chains API returned %s; retrying in %s s", resp.status_code, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF)
+                continue
+            data = resp.json()
+            if not isinstance(data, list):
+                logging.error("Sync-chains endpoint returned a non-list response: %r", data)
+                sys.exit(1)
+            return data
+        except (RequestException, json.JSONDecodeError) as e:
+            logging.warning("Error fetching sync chains: %s; retrying in %s s", e, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, MAX_BACKOFF)
+
+
+def select_chain(chains, local, local_uuid):
+    """Pick the chain to sync from.
+
+    chains: list of dicts from /sync-chains, most preferred first
+    local: our hivesense_app_status row (CONFIG_KEYS present)
+    local_uuid: our stored sync_uuid, or None on a first sync
+
+    Returns the chosen chain dict. Raises SystemExit with a diagnostic when
+    no chain fits: a first sync needs at least one chain with a matching
+    configuration (first match wins); a node that already follows a chain must
+    find that chain listed AND matching -- anything else means the upstream
+    changed under us and our data would silently diverge, so stop."""
+    if not chains:
+        logging.critical("Upstream lists no sync chains")
+        sys.exit(1)
+
+    def describe(c):
+        return "%s (llm=%s dims=%s chunk=%s%s)" % (
+            c.get('sync_uuid'), c.get('llm'), c.get('embedding_dimensionality'),
+            c.get('tokens_per_chunk'),
+            ", base_url=%s" % c['base_url'] if c.get('base_url') else "")
+
+    if local_uuid is None:
+        for c in chains:
+            if not config_mismatches(local, c):
+                logging.info("First sync: adopting chain %s", describe(c))
+                return c
+        logging.critical(
+            "No upstream chain matches our configuration (llm=%s dims=%s chunk=%s). "
+            "Chains offered: %s", local['llm'], local['embedding_dimensionality'],
+            local['tokens_per_chunk'], "; ".join(describe(c) for c in chains))
+        sys.exit(1)
+
+    for c in chains:
+        if str(c.get('sync_uuid')) == str(local_uuid):
+            errors = config_mismatches(local, c)
+            if errors:
+                logging.critical(
+                    "Our chain %s is listed upstream but its configuration differs "
+                    "from ours for keys %s -- refusing to mix incompatible embeddings",
+                    local_uuid, errors)
+                sys.exit(1)
+            logging.info("Continuing chain %s", describe(c))
+            return c
+    logging.critical(
+        "Upstream no longer serves our sync chain %s. Chains offered: %s. "
+        "Either point HIVESENSE_API at a server that still serves it, or wipe the "
+        "local hivesense data to start over on one of the chains above.",
+        local_uuid, "; ".join(describe(c) for c in chains))
+    sys.exit(1)
+
+
+def validate_local_state(conn, server, chains=None):
+    """Reconcile our status row with the upstream. `server` is the
+    /sync-settings dict (always fetched: it is what pre-/sync-chains upstreams
+    offer, and a useful cross-check), `chains` the /sync-chains list or None.
+
+    Returns (sync_uuid, chain) where chain is the dict describing the chain we
+    follow (synthesised from `server` for old upstreams)."""
     with conn.cursor(row_factory=dict_row) as cur:
-        # select all relevant config fields plus sync_uuid and syncing_embeddings
         cur.execute(
             "SELECT llm, embedding_dimensionality, document_prefix, query_prefix, "
             "tokens_per_chunk, overlap_amount, min_token_threshold, max_embeddings_per_post, "
@@ -125,43 +234,39 @@ def validate_local_state(conn, server):
             "FROM hivesense_app.hivesense_app_status WHERE id = 1"
         )
         local = cur.fetchone()
-
-        # Compare config keys (excluding sync_uuid)
-        config_keys = [
-            'llm', 'embedding_dimensionality', 'document_prefix', 'query_prefix',
-            'tokens_per_chunk', 'overlap_amount', 'min_token_threshold', 'max_embeddings_per_post'
-        ]
-        errors = []
-        for k in config_keys:
-            # Special handling for float comparisons
-            if k == 'overlap_amount':
-                # Compare floats with tolerance
-                if abs(float(local[k]) - float(server[k])) > 1e-6:
-                    errors.append(k)
-            else:
-                if local[k] != server[k]:
-                    errors.append(k)
-        if errors:
-            logging.error("Configuration mismatch for keys: %s", errors)
-            sys.exit(1)
-
         local_uuid = local['sync_uuid']
-        server_uuid = server['sync_uuid']
-        # Initialize or validate sync_uuid
+
+        if chains is not None:
+            chain = select_chain(chains, local, local_uuid)
+        else:
+            # Pre-/sync-chains upstream: /sync-settings describes its only chain
+            errors = config_mismatches(local, server)
+            if errors:
+                logging.error("Configuration mismatch for keys: %s", errors)
+                sys.exit(1)
+            server_uuid = server['sync_uuid']
+            if local_uuid is not None and str(local_uuid) != str(server_uuid):
+                logging.error("sync_uuid mismatch (local=%s server=%s)", local_uuid, server_uuid)
+                sys.exit(1)
+            chain = dict(server)
+            chain.setdefault('base_url', None)
+
+        if not chain.get('sync_uuid'):
+            logging.critical(
+                "Upstream advertises no sync_uuid (its block processor has not "
+                "initialised one); refusing to sync until it does")
+            sys.exit(1)
+        chosen_uuid = str(chain['sync_uuid'])
         if local_uuid is None:
             cur.execute(
                 "UPDATE hivesense_app.hivesense_app_status SET sync_uuid = %s WHERE id = 1",
-                (server_uuid,)
+                (chosen_uuid,)
             )
             conn.commit()
-            logging.info("Set initial sync_uuid to %s", server_uuid)
-            return server_uuid
-        elif str(local_uuid) != str(server_uuid):
-            logging.error("sync_uuid mismatch (local=%s server=%s)", local_uuid, server_uuid)
-            sys.exit(1)
+            logging.info("Set initial sync_uuid to %s", chosen_uuid)
         else:
-            logging.info("sync_uuid matches server: %s", local_uuid)
-            return str(local_uuid)
+            logging.info("sync_uuid matches upstream chain: %s", local_uuid)
+        return chosen_uuid, chain
 
 
 def get_last_seq(cur) -> int:
@@ -388,12 +493,22 @@ def main():
     conn = setup_notice_handler(conn)
     acquire_app_locks(conn)
 
-    # fetch server status and validate
+    # fetch server status and validate. /sync-chains (newer upstreams) lists
+    # every chain the server can supply; /sync-settings describes its primary
+    # chain and is all an older upstream offers.
     server_status = fetch_server_status()
-    check_upstream_skip_count(server_status.get("skipped_op_count"))
+    chains = fetch_sync_chains()
+    if chains is None:
+        logging.info("Upstream does not offer /sync-chains (older hivesense); using /sync-settings")
 
     conn = ensure_connection_alive(conn)
-    sync_uuid = validate_local_state(conn, server_status)
+    sync_uuid, chain = validate_local_state(conn, server_status, chains)
+    check_upstream_skip_count(chain.get("skipped_op_count"))
+
+    global EMBEDS_URL
+    if chain.get("base_url"):
+        EMBEDS_URL = chain["base_url"].rstrip("/") + "/embedding-updates"
+        logging.info("Chain %s is served from %s", sync_uuid, chain["base_url"])
 
     ensure_context_detached(conn)
 
