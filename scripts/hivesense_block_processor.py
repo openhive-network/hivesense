@@ -77,6 +77,11 @@ def _load_config(conn):
                FROM hivesense_app.hivesense_app_status WHERE id = 1"""
         )
         llm, host, api_style, batch_size, workers, num_ctx = cur.fetchone()
+        # Mint this node's sync_uuid on the first run (the legacy scheduler did
+        # this in its start-up; the driver path has no other hook). Runs inside
+        # the driver's transaction, so it commits with the first range.
+        cur.execute("SELECT hivesense_app.init_local_sync_identity()")
+        log.info("local sync identity: sync_uuid=%s", cur.fetchone()[0])
     _CONFIG = {
         "model": llm,
         "host": (host or "http://localhost:11434").rstrip("/"),

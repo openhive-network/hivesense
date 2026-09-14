@@ -503,6 +503,40 @@ $$;
 DROP PROCEDURE IF EXISTS hivesense_app.wait_for_advisory_lock(INT, INT, INT);
 
 
+-- Establish this node's identity as an embedding *generator*. On the first run
+-- (empty database), when switching from downloading embeddings from another
+-- server to computing them locally, or when the uuid is missing for any other
+-- reason, mint a fresh sync_uuid. Downstream syncers pass the uuid on every
+-- /embedding-updates call, so a new uuid forces them to resync from scratch
+-- (unless the old chain is rebased onto this node, see docs/sync_chain_rebase.md).
+-- Idempotent. Called at startup by both the legacy scheduler below and the
+-- python block processor (scripts/hivesense_block_processor.py, the
+-- haf_app_driver path), which otherwise never initialised the uuid.
+CREATE OR REPLACE FUNCTION hivesense_app.init_local_sync_identity()
+RETURNS uuid
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    __syncing BOOLEAN;
+    __uuid    UUID;
+BEGIN
+    SELECT syncing_embeddings, sync_uuid INTO __syncing, __uuid
+      FROM hivesense_app.hivesense_app_status WHERE id = 1;
+
+    IF __syncing IS NULL OR __syncing OR __uuid IS NULL THEN
+        __uuid := gen_random_uuid();
+        UPDATE hivesense_app.hivesense_app_status
+           SET sync_uuid = __uuid, syncing_embeddings = FALSE
+         WHERE id = 1;
+        RAISE NOTICE 'Sync init: set sync_uuid=%, syncing_embeddings=FALSE', __uuid;
+    ELSE
+        RAISE NOTICE 'Sync init: existing sync_uuid=% (syncing_embeddings=FALSE)', __uuid;
+    END IF;
+    RETURN __uuid;
+END;
+$$;
+
 /** Application entry point, which starts application main-loop (which iterates infinitely).
   To stop it call `stopProcessing();` from another session and commit its trasaction.
 */
@@ -535,28 +569,13 @@ DECLARE
     __last_todo                     INT;
     __last_progress                 TIMESTAMPTZ;
     __last_warning                  TIMESTAMPTZ;
-
-    __current_syncing               BOOLEAN;
-    __current_uuid                  UUID;
-    __new_uuid                      UUID;
 BEGIN
     -- Block until any active hivemind/hivesense installer releases its
     -- exclusive lock; held by this session until the scheduler returns.
     PERFORM hive.acquire_app_block_processor_locks(ARRAY['hivemind', 'hivesense']);
 
-    -- Check our sync UUID -- if we're just starting out (empty database), or if we were downloading pre-computed embeddings
-    -- from another server but are now switching to computing them locally, generate a new UUID here
-    SELECT syncing_embeddings, sync_uuid INTO __current_syncing, __current_uuid FROM hivesense_app.hivesense_app_status WHERE id = 1;
-
-    IF __current_syncing IS NULL OR __current_syncing THEN
-        -- First run or switching from remote sync to local processing
-        __new_uuid := gen_random_uuid();
-        UPDATE hivesense_app.hivesense_app_status SET sync_uuid = __new_uuid, syncing_embeddings = FALSE WHERE id = 1;
-        RAISE NOTICE 'Sync init: set sync_uuid=%, syncing_embeddings=FALSE', __new_uuid;
-    ELSE
-        -- Already initialized; nothing to do
-        RAISE NOTICE 'Sync init: existing sync_uuid=% (syncing_embeddings=FALSE)', __current_uuid;
-    END IF;
+    -- Establish (or keep) this node's sync identity; see init_local_sync_identity()
+    PERFORM hivesense_app.init_local_sync_identity();
 
     -- read configured start_block
     SELECT start_block INTO __start_block
