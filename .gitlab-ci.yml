@@ -484,8 +484,23 @@ sync:
       tar -cf - ${LOGS_DIR}/*.log | gzip > docker/container-logs.tar.gz
     fi
 
-    # Manually remove the copy of the replay data to preserve disk space on the replay server
-    sudo rm -rf ${POOL_DIR}
+    # Stop the stack BEFORE deleting its data: haf's postgres writes into
+    # ${POOL_DIR}, and nothing above stops it. No sudo: this image runs as root
+    # (haf_api_node/dind is built on docker:26.1.4-dind with no USER) and has no
+    # sudo binary, so the old `sudo rm` failed with "sudo: not found" on every run
+    # that reached it. The copy then sat on disk until a later job reusing this
+    # workspace git-cleaned it (#52).
+    docker compose -f "${COMPOSE_DIR}/compose.yml" down || true
+
+    # Manually remove the copy of the replay data to preserve disk space on the replay server.
+    # `|| true`: the runner stops after_script at the first failing command, which
+    # would skip the report below in exactly the case it exists for.
+    rm -rf "${POOL_DIR}" || true
+    if [ -e "${POOL_DIR}" ]; then
+      echo "WARNING: replay data copy still present: ${POOL_DIR}"
+    else
+      echo "Removed replay data copy: ${POOL_DIR}"
+    fi
 
     echo -e "\e[0Ksection_end:$(date +%s):compose2\r\e[0K"
   artifacts:
