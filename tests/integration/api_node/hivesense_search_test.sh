@@ -64,6 +64,24 @@ is_number() {
   esac
 }
 
+# Runs $1 (setup statements) and then $2 (a SELECT) in ONE transaction that is
+# always rolled back, so a check can squeeze a tunable or mark a post deleted
+# without leaving a trace. Prints only the SELECT's result (-q hides command
+# tags); ON_ERROR_STOP makes a failing setup yield empty output, which every
+# caller treats as a failure.
+query_database_rolled_back() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log -v ON_ERROR_STOP=1 \
+      -c "BEGIN" -c "$1" -c "$2" -c "ROLLBACK" | tr -d '[:space:]'
+}
+
+# Like query_database, but keeps stderr, so a check can assert on the error
+# text itself rather than on an empty result.
+query_database_with_errors() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log -c "$1" 2>&1
+}
+
 echo "=== hivesense search tests (mode: ${MODE}) ==="
 
 # ─── 1. installed configuration matches the expectation ───────────────
@@ -196,6 +214,24 @@ if [ -n "$expected_page2" ] && [ "$page2" = "$expected_page2" ]; then
   pass "paging continuation from post ${start_id} returns [${page2}]"
 else
   fail "paging continuation returned [${page2}], expected [${expected_page2}]"
+fi
+
+# ─── 7. deleted posts are excluded from the unfiltered search ────────────
+# Mark the unfiltered search's own best match deleted (rolled back) and it
+# must drop out; first prove it is returned while live, or the check is empty.
+top_live=$(query_database "SELECT post_id FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10) ORDER BY similarity_order LIMIT 1")
+if ! is_number "$top_live"; then
+  fail "unfiltered search returned no top post to delete ('${top_live}')"
+else
+  got=$(query_database_rolled_back \
+    "UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = ${top_live}" \
+    "SELECT count(*) || '/' || count(*) FILTER (WHERE post_id = ${top_live})
+       FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10)")
+  if [ "${got#*/}" = "0" ] && is_number "${got%/*}" && [ "${got%/*}" -ge 1 ]; then
+    pass "unfiltered search drops a deleted post (post ${top_live})"
+  else
+    fail "unfiltered search with post ${top_live} deleted: count/that-post = '${got}', expected N/0"
+  fi
 fi
 
 # ─── summary ───────────────────────────────────────────────────────────
