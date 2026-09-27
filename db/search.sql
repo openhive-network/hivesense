@@ -48,7 +48,7 @@ BEGIN
         SELECT hp.id INTO lo
           FROM hivemind_app.hive_posts hp
          WHERE hp.block_num_created < first_blk - 10000
-         ORDER BY hp.block_num_created DESC
+         ORDER BY hp.block_num_created
          LIMIT 1;
     END IF;
     IF last_blk < 2147483647 - 10000 THEN
