@@ -300,7 +300,7 @@ BEGIN
      *  so the join cannot be driven from the block index over every comment
      *  in the window.
      * ────────────────────────────────────────────────────────────*/
-    IF has_window THEN
+    IF false THEN
         SELECT b.lo, b.hi INTO window_lo, window_hi
           FROM hivesense_app.window_post_bounds(_first_block, _last_block) b;
 
@@ -405,6 +405,7 @@ BEGIN
               JOIN hivesense_app.post_data      pd ON pd.post_id = b.post_id
              WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
                AND hp.counter_deleted = 0
+               AND hp.block_num_created BETWEEN first_blk AND last_blk
                AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
                AND (_observer_id = 0 OR NOT EXISTS (
                      SELECT 1
@@ -441,7 +442,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 AND hp.block_num_created BETWEEN %s AND %s
                    AND ($3 IS NULL OR pv.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -472,6 +473,7 @@ BEGIN
           dist_red,                     -- %s  ann distance expr (expression on embedding)
           (__min_tokens = 0),           -- %L  token filter off?
           __min_tokens,                 -- %s
+          first_blk, last_blk,
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -488,7 +490,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 AND hp.block_num_created BETWEEN %s AND %s
                    AND ($3 IS NULL OR pr.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -519,6 +521,7 @@ BEGIN
           dist_red,                     -- %s  ann distance expr
           (__min_tokens = 0),           -- %L  token filter off?
           __min_tokens,                 -- %s
+          first_blk, last_blk,
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -534,7 +537,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 AND hp.block_num_created BETWEEN %s AND %s
                    AND ($2 IS NULL OR pv.post_id <> $2)
                    AND ($3 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -560,6 +563,7 @@ BEGIN
           dist_full,                  -- %s
           (__min_tokens = 0),         -- %L
           __min_tokens,               -- %s
+          first_blk, last_blk,
           ann_candidates,             -- %s
           _limit                      -- %s
         )
