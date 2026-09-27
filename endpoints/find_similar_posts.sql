@@ -177,9 +177,7 @@ BEGIN
                    q,
                    result_limit,
                    __observer_id,
-                   __author_id,
-                   __first_block,
-                   __last_block
+                   __author_id
                )
     ),
 
