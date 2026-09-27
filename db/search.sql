@@ -318,7 +318,6 @@ BEGIN
                    AND hp.block_num_created BETWEEN $5 AND $6
                    AND hp.counter_deleted = 0
                    AND (%L OR pd.number_of_tokens >= %s)
-                   AND ($2 IS NULL OR pv.post_id <> $2)
                    AND ($7 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
                           WHERE m.observer_id = $7
