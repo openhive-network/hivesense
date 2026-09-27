@@ -128,6 +128,13 @@ BEGIN
 
     /* ────────────────────────────────────────────────────────────
      *  MAIN one-shot query (three variants)
+     *
+     *  Every variant skips deleted posts (hp.counter_deleted = 0). Their
+     *  embeddings stay in posts_vectors, but hivemind's full-post view
+     *  returns no row for them, so a deleted post ranked into the
+     *  full_posts slots of /posts/search was silently dropped (fewer full
+     *  objects than requested) while one ranked lower came back as a bare
+     *  author/permlink stub.
      * ────────────────────────────────────────────────────────────*/
     IF exhaustive THEN
         -- note: this branch is only used for benchmarking debugging
@@ -182,6 +189,7 @@ BEGIN
               JOIN hivemind_app.hive_posts      hp ON hp.id      = b.post_id
               JOIN hivesense_app.post_data      pd ON pd.post_id = b.post_id
              WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
+               AND hp.counter_deleted = 0
                AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
                AND (_observer_id = 0 OR NOT EXISTS (
                      SELECT 1
@@ -218,6 +226,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND hp.counter_deleted = 0
                    AND ($3 IS NULL OR pv.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -264,6 +273,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND hp.counter_deleted = 0
                    AND ($3 IS NULL OR pr.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -309,6 +319,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
+                   AND hp.counter_deleted = 0
                    AND ($2 IS NULL OR pv.post_id <> $2)
                    AND ($3 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
