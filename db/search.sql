@@ -9,6 +9,69 @@ CREATE TYPE hivesense_app.similar_post_result AS (
 );
 
 /* ────────────────────────────────────────────────────────────────
+ * 1b. Block-range (time window) filter support (#13)
+ *
+ *  post_id cannot stand in for the creation block directly: in 300k-id
+ *  samples from three older eras, ids were up to 999 blocks out of
+ *  creation order (all hive_posts rows; likely hivemind's massive-sync
+ *  batches), while a recent sample was in order. A row created more than
+ *  that many blocks before the window therefore has a smaller id than
+ *  every post in it, and one created that far after has a larger id.
+ *  These bounds take one such row on each side, with a 10,000-block
+ *  margin; callers re-check block_num_created exactly, so the margin only
+ *  costs a few hours of extra candidates and never changes the result.
+ *
+ *  The window's size is capped (max_window_chunks): exact ranking cost
+ *  grows with the chunk count, and older eras are far denser (the busiest
+ *  6 months, Jan-Jun 2018, hold ~4.6M chunks against ~0.2M for the latest
+ *  6). The count covers the padded id range and stops at the cap. The
+ *  endpoint calls this before embedding the query, so an oversized window
+ *  is refused without touching the embedding server.
+ * ────────────────────────────────────────────────────────────────*/
+CREATE OR REPLACE FUNCTION hivesense_app.window_post_bounds(
+    _first_block int,           -- NULL = from genesis
+    _last_block  int,           -- NULL = up to the newest post
+    OUT lo int,                 -- exclusive post_id bounds that surely
+    OUT hi int                  --   enclose every post created in the window
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    first_blk int := COALESCE(_first_block, 0);
+    last_blk  int := COALESCE(_last_block, 2147483647);
+    max_chunks bigint := GREATEST(COALESCE(
+        (SELECT max_window_chunks FROM hivesense_app.hivesense_app_status WHERE id = 1), 300000), 1);
+    n bigint;
+BEGIN
+    IF first_blk > 10000 THEN
+        SELECT hp.id INTO lo
+          FROM hivemind_app.hive_posts hp
+         WHERE hp.block_num_created < first_blk - 10000
+         ORDER BY hp.block_num_created DESC
+         LIMIT 1;
+    END IF;
+    IF last_blk < 2147483647 - 10000 THEN
+        SELECT hp.id INTO hi
+          FROM hivemind_app.hive_posts hp
+         WHERE hp.block_num_created > last_blk + 10000
+         ORDER BY hp.block_num_created
+         LIMIT 1;
+    END IF;
+    lo := COALESCE(lo, 0);
+    hi := COALESCE(hi, 2147483647);
+
+    SELECT count(*) INTO n
+      FROM (SELECT 1 FROM hivesense_app.posts_vectors pv
+             WHERE pv.post_id > lo AND pv.post_id < hi
+             LIMIT max_chunks + 1) c;
+    IF n > max_chunks THEN
+        RAISE EXCEPTION 'The requested block range holds more than % embedded post chunks; narrow from-block/to-block', max_chunks;
+    END IF;
+END;
+$$;
+
+/* ────────────────────────────────────────────────────────────────
  * 2.  One-shot nearest-posts function
  * ────────────────────────────────────────────────────────────────*/
 CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(
@@ -16,7 +79,9 @@ CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_s
     _limit           int     DEFAULT 1000,
     _exclude_post_id int     DEFAULT NULL,
     _observer_id     int     DEFAULT 0,
-    _author_id       int     DEFAULT NULL -- restrict to one author's posts (#47)
+    _author_id       int     DEFAULT NULL, -- restrict to one author's posts (#47)
+    _first_block     int     DEFAULT NULL, -- restrict to posts created in blocks
+    _last_block      int     DEFAULT NULL  --   [_first_block, _last_block] (#13); NULL = open end
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -51,6 +116,13 @@ DECLARE
     /* ───────── misc ───────── */
     __min_tokens int;
     author_post_ids int[];  -- author filter: that author's live root posts
+
+    /* ------ block-range (time window) filter ------ */
+    has_window    boolean := _first_block IS NOT NULL OR _last_block IS NOT NULL;
+    first_blk     int     := COALESCE(_first_block, 0);
+    last_blk      int     := COALESCE(_last_block, 2147483647);
+    window_lo     int;      -- exclusive post_id bounds, see window_post_bounds
+    window_hi     int;
 
     /* ------ for exhaustive ------ */
     post_ids      int[];    -- candidate post_ids
@@ -157,13 +229,26 @@ BEGIN
         -- Only root posts are embedded, and these literal predicates match
         -- hivemind's partial index (author_id, id DESC) WHERE depth = 0 AND
         -- counter_deleted = 0 -- so an account with millions of comments
-        -- costs nothing extra. Deleted posts are excluded, as below.
-        SELECT array_agg(hp.id)
-          INTO author_post_ids
-          FROM hivemind_app.hive_posts hp
-         WHERE hp.author_id = _author_id
-           AND hp.depth = 0
-           AND hp.counter_deleted = 0;
+        -- costs nothing extra. Deleted posts are excluded, as below. A
+        -- block range (#13) narrows the same list, so author + window stays
+        -- exact too; it is a separate statement so the author-only lookup
+        -- keeps its index-only scan (block_num_created is not in that index).
+        IF has_window THEN
+            SELECT array_agg(hp.id)
+              INTO author_post_ids
+              FROM hivemind_app.hive_posts hp
+             WHERE hp.author_id = _author_id
+               AND hp.depth = 0
+               AND hp.counter_deleted = 0
+               AND hp.block_num_created BETWEEN first_blk AND last_blk;
+        ELSE
+            SELECT array_agg(hp.id)
+              INTO author_post_ids
+              FROM hivemind_app.hive_posts hp
+             WHERE hp.author_id = _author_id
+               AND hp.depth = 0
+               AND hp.counter_deleted = 0;
+        END IF;
 
         IF author_post_ids IS NULL THEN
             RETURN;
@@ -199,6 +284,60 @@ BEGIN
           _limit                        -- %s
         )
         USING _embedding, _exclude_post_id, author_post_ids;
+        RETURN;
+    END IF;
+
+    /* ────────────────────────────────────────────────────────────
+     *  BLOCK-RANGE filter (#13): rank ALL posts created in the window
+     *  exactly, for the same reason as the author filter. Every useful
+     *  window is a sliver of the corpus (6 months = ~1.2% of chunks on a
+     *  full node), so "ANN + WHERE block" returns almost nothing: measured
+     *  106, 4 and 0 posts out of 1,000 asked for a 6-month window.
+     *
+     *  window_post_bounds gives post_id bounds that surely enclose the
+     *  window (and refuses an oversized one); the query re-checks the
+     *  creation block exactly. The id bounds are applied to hive_posts too,
+     *  so the join cannot be driven from the block index over every comment
+     *  in the window.
+     * ────────────────────────────────────────────────────────────*/
+    IF has_window THEN
+        SELECT b.lo, b.hi INTO window_lo, window_hi
+          FROM hivesense_app.window_post_bounds(_first_block, _last_block) b;
+
+        RETURN QUERY EXECUTE format($q$
+            WITH best_chunk AS (
+                SELECT DISTINCT ON (pv.post_id)
+                       pv.post_id,
+                       pv.chunk_number,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE pv.post_id > $3 AND pv.post_id < $4
+                   AND hp.id > $3 AND hp.id < $4
+                   AND hp.block_num_created BETWEEN $5 AND $6
+                   AND hp.counter_deleted = 0
+                   AND (%L OR pd.number_of_tokens >= %s)
+                   AND ($2 IS NULL OR pv.post_id <> $2)
+                   AND ($7 = 0 OR NOT EXISTS (
+                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                          WHERE m.observer_id = $7
+                            AND m.muted_id    = hp.author_id))
+                 ORDER BY pv.post_id, sim
+            )
+            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+                   sim::real AS similarity,
+                   post_id,
+                   chunk_number
+              FROM best_chunk
+             ORDER BY sim, post_id
+             LIMIT %s
+        $q$,
+          (__min_tokens = 0),           -- %L  token filter off?
+          __min_tokens,                 -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, _exclude_post_id, window_lo, window_hi, first_blk, last_blk, _observer_id;
         RETURN;
     END IF;
 
@@ -736,7 +875,9 @@ CREATE FUNCTION hivesense_app.find_nearest_posts(
     _query        text,
     _limit        int   DEFAULT 1000,
     _observer_id  int   DEFAULT 0,
-    _author_id    int   DEFAULT NULL
+    _author_id    int   DEFAULT NULL,
+    _first_block  int   DEFAULT NULL,
+    _last_block   int   DEFAULT NULL
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -758,7 +899,9 @@ BEGIN
                hivesense_app.hivesense_embed(__query_prefix || _query),
                _limit,
                _observer_id => _observer_id,
-               _author_id   => _author_id
+               _author_id   => _author_id,
+               _first_block => _first_block,
+               _last_block  => _last_block
            );
 END;
 $$;

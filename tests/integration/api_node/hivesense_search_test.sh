@@ -84,6 +84,22 @@ query_database_with_errors() {
     psql -U haf_admin -q -A -t -d haf_block_log -c "$1" 2>&1
 }
 
+# query_database_rolled_back, keeping stderr (for asserting on an error that
+# only a rolled-back setup can provoke).
+query_database_rolled_back_with_errors() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log \
+      -c "BEGIN" -c "SET LOCAL lock_timeout = '15s'" -c "$1" -c "$2" -c "ROLLBACK" 2>&1
+}
+
+# HTTP status line of a request through the rewriter (http_get prints
+# nothing for a non-2xx response, so errors are asserted on the status).
+http_status() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
+    wget -S -q -O /dev/null "http://hivesense-postgrest-rewriter${1}" 2>&1 \
+    | grep -o 'HTTP/1\.[01] [0-9][0-9][0-9]' | tail -1
+}
+
 echo "=== hivesense search tests (mode: ${MODE}) ==="
 
 # ─── 1. installed configuration matches the expectation ───────────────
@@ -472,6 +488,368 @@ else
   else
     fail "unfiltered search with post ${top_live} deleted: count/that-post = '${got}', expected N/0"
   fi
+fi
+
+# ─── 8. block-range filter on /posts/search (#13) ─────────────────────
+# from-block/to-block restrict the search to posts CREATED in that block
+# range, ranked exactly. As with the author filter, "ANN + WHERE block" would
+# lose posts, so every check compares against an oracle computed straight
+# from the tables. The window is the middle third of the embedded posts by
+# creation block, so it is neither empty nor the whole corpus (either would
+# let a broken filter pass).
+win_posts="
+  SELECT hp.id, hp.block_num_created, hp.author_id
+    FROM hivemind_app.hive_posts hp
+    JOIN hivesense_app.post_data pd ON pd.post_id = hp.id
+   WHERE hp.depth = 0 AND hp.counter_deleted = 0
+     AND EXISTS (SELECT 1 FROM hivesense_app.posts_vectors pv WHERE pv.post_id = hp.id)
+     AND pd.number_of_tokens >= (SELECT min_token_search_threshold
+                                   FROM hivesense_app.hivesense_app_status WHERE id = 1)"
+all_posts=$(query_database "SELECT count(*) FROM (${win_posts}) p")
+win_first=$(query_database "SELECT block_num_created FROM (${win_posts}) p ORDER BY block_num_created, id OFFSET (${all_posts:-0} / 3) LIMIT 1")
+win_last=$(query_database "SELECT block_num_created FROM (${win_posts}) p ORDER BY block_num_created, id OFFSET (2 * ${all_posts:-0} / 3) LIMIT 1")
+win_oracle=$(query_database "SELECT count(*) FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first:-0} AND ${win_last:-0}")
+
+if ! is_number "$all_posts" || ! is_number "$win_first" || ! is_number "$win_last" || ! is_number "$win_oracle" \
+   || [ "$win_oracle" -lt 3 ] || [ "$win_oracle" -ge "$all_posts" ]; then
+  fail "block-range filter: could not pick a window (posts '${all_posts}', blocks '${win_first}'..'${win_last}', in window '${win_oracle}'; need 3..all-1) -- the checks below could not run"
+else
+  # count / distinct posts / rows created outside the window
+  win_rows="SELECT count(*) || '/' || count(DISTINCT r.post_id) || '/' || count(*) FILTER (WHERE hp.block_num_created NOT BETWEEN ${win_first} AND ${win_last})
+              FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_last}) r
+              JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id"
+  win_expected="${win_oracle}/${win_oracle}/0"
+
+  got=$(query_database "$win_rows")
+  if [ "$got" = "$win_expected" ]; then
+    pass "block-range filter returns exactly the ${win_oracle} posts created in blocks ${win_first}..${win_last}, once each"
+  else
+    fail "block-range filter ${win_first}..${win_last}: count/distinct/outside = '${got}', expected '${win_expected}'"
+  fi
+
+  # Forced onto a 1-candidate vector index, as for the author filter: every
+  # hive_posts index containing block_num_created is dropped (rolled back) so
+  # a filter bolted onto the ANN stage cannot fall back to an exact walk of
+  # that index on this small corpus.
+  force_window="UPDATE hivesense_app.hivesense_app_status SET default_ef_search = 1, minimum_ann_candidates = 1 WHERE id = 1;
+    DO \$\$
+    DECLARE r record;
+    BEGIN
+      FOR r IN SELECT DISTINCT i.indexrelid::regclass::text AS idx, c.conname
+                 FROM pg_index i
+                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+                 LEFT JOIN pg_constraint c ON c.conindid = i.indexrelid AND c.conrelid = i.indrelid
+                WHERE i.indrelid = 'hivemind_app.hive_posts'::regclass AND a.attname = 'block_num_created'
+      LOOP
+        IF r.conname IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE hivemind_app.hive_posts DROP CONSTRAINT %I', r.conname);
+        ELSE
+          EXECUTE 'DROP INDEX ' || r.idx;
+        END IF;
+      END LOOP;
+    END \$\$;
+    SET LOCAL enable_seqscan = off;
+    SET LOCAL enable_sort = off;
+    SET LOCAL hnsw.max_scan_tuples = 1"
+  forced=$(query_database_rolled_back "$force_window" \
+    "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 5)")
+  if ! is_number "$forced" || [ "$forced" -gt 1 ]; then
+    fail "could not force the vector index for the block-range budget check (unfiltered search returned '${forced}', expected <= 1)"
+  else
+    got=$(query_database_rolled_back "$force_window" "$win_rows")
+    if [ "$got" = "$win_expected" ]; then
+      pass "block-range filter stays exact with the planner forced onto a 1-candidate vector index"
+    else
+      fail "block-range filter with the planner forced onto a 1-candidate vector index: '${got}', expected '${win_expected}' -- it is going through the vector index"
+    fi
+  fi
+
+  # Exact ranking: top 3 equal a brute-force ranking by best chunk.
+  top3=$(query_database "SELECT string_agg(post_id::text, ',' ORDER BY similarity_order)
+                           FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 3, NULL, 0, NULL, ${win_first}, ${win_last})")
+  expected_top=$(query_database "
+    SELECT string_agg(post_id::text, ',' ORDER BY d, post_id) FROM (
+      SELECT pv.post_id, min((pv.embedding <=> ${ref_embedding})::float4) AS d
+        FROM (${win_posts}) p
+        JOIN hivesense_app.posts_vectors pv ON pv.post_id = p.id
+       WHERE p.block_num_created BETWEEN ${win_first} AND ${win_last}
+       GROUP BY pv.post_id ORDER BY d, pv.post_id LIMIT 3) x")
+  if [ -n "$expected_top" ] && [ "$top3" = "$expected_top" ]; then
+    pass "block-range filter ranks exactly (top 3: ${top3})"
+  else
+    fail "block-range filter top 3 = '${top3}', brute force says '${expected_top}'"
+  fi
+
+  # Both bounds are inclusive: a one-block range holding a post returns it,
+  # and moving either bound one block past it drops it.
+  edge_post=$(query_database "SELECT id FROM (${win_posts}) p WHERE block_num_created = ${win_first} ORDER BY id LIMIT 1")
+  edge_hits=$(query_database "
+    SELECT (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_first}) WHERE post_id = ${edge_post:-0})
+    || '/' || (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first} + 1, ${win_last}) WHERE post_id = ${edge_post:-0})
+    || '/' || (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, 1, ${win_first} - 1) WHERE post_id = ${edge_post:-0})")
+  if is_number "$edge_post" && [ "$edge_hits" = "1/0/0" ]; then
+    pass "block-range bounds are inclusive (post ${edge_post} at block ${win_first})"
+  else
+    fail "block-range bounds for post '${edge_post}' at block ${win_first}: in-range/after/before = '${edge_hits}', expected 1/0/0"
+  fi
+
+  # Mutes apply per row: the window spans many authors, so muting one of them
+  # must remove exactly that author's posts and keep everyone else's.
+  mute_author=$(query_database "SELECT author_id FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first} AND ${win_last} GROUP BY author_id ORDER BY count(*) DESC, author_id LIMIT 1")
+  mute_author_posts=$(query_database "SELECT count(*) FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first} AND ${win_last} AND author_id = ${mute_author:-0}")
+  mute_observer=$(query_database "SELECT id FROM hivemind_app.hive_accounts WHERE id > 0 AND id <> ${mute_author:-0} ORDER BY id LIMIT 1")
+  if ! is_number "$mute_author" || ! is_number "$mute_author_posts" || ! is_number "$mute_observer" \
+     || [ "$mute_author_posts" -lt 1 ] || [ "$mute_author_posts" -ge "$win_oracle" ]; then
+    fail "block-range mute check could not be set up (author '${mute_author}' with '${mute_author_posts}' of ${win_oracle} window posts, observer '${mute_observer}')"
+  else
+    got=$(query_database_rolled_back \
+      "INSERT INTO hivemind_app.muted (follower, following, block_num) VALUES (${mute_observer}, ${mute_author}, 1)" \
+      "SELECT count(*) || '/' || count(*) FILTER (WHERE hp.author_id = ${mute_author})
+         FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, ${mute_observer}, NULL, ${win_first}, ${win_last}) r
+         JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id")
+    if [ "$got" = "$((win_oracle - mute_author_posts))/0" ]; then
+      pass "block-range filter drops only the muted author (${mute_author_posts} of ${win_oracle} posts)"
+    else
+      fail "block-range filter with author ${mute_author} muted: count/by-that-author = '${got}', expected '$((win_oracle - mute_author_posts))/0'"
+    fi
+  fi
+
+  # A deleted post disappears (rolled back, as the corpus has none).
+  top_post=$(echo "$top3" | cut -d, -f1)
+  if is_number "$top_post"; then
+    got=$(query_database_rolled_back \
+      "UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = ${top_post}" \
+      "SELECT count(*) || '/' || count(*) FILTER (WHERE post_id = ${top_post})
+         FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_last})")
+    if [ "$got" = "$((win_oracle - 1))/0" ]; then
+      pass "block-range filter drops a deleted post"
+    else
+      fail "block-range filter with post ${top_post} deleted: count/that-post = '${got}', expected '$((win_oracle - 1))/0'"
+    fi
+  else
+    fail "block-range filter: no top post to delete ('${top3}')"
+  fi
+
+  # The token threshold applies (raised, rolled back, to the largest token
+  # count in the window, which must keep some posts and drop others).
+  win_token_max=$(query_database "
+    SELECT max(pd.number_of_tokens) FROM (${win_posts}) p JOIN hivesense_app.post_data pd ON pd.post_id = p.id
+     WHERE p.block_num_created BETWEEN ${win_first} AND ${win_last}")
+  win_token_oracle=$(query_database "
+    SELECT count(*) FROM (${win_posts}) p JOIN hivesense_app.post_data pd ON pd.post_id = p.id
+     WHERE p.block_num_created BETWEEN ${win_first} AND ${win_last} AND pd.number_of_tokens >= ${win_token_max:-0}")
+  if ! is_number "$win_token_max" || ! is_number "$win_token_oracle" || [ "$win_token_oracle" -lt 1 ] || [ "$win_token_oracle" -ge "$win_oracle" ]; then
+    fail "block-range token check could not be set up (threshold '${win_token_max}' keeps '${win_token_oracle}' of ${win_oracle})"
+  else
+    got=$(query_database_rolled_back \
+      "UPDATE hivesense_app.hivesense_app_status SET min_token_search_threshold = ${win_token_max} WHERE id = 1" \
+      "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_last})")
+    if [ "$got" = "$win_token_oracle" ]; then
+      pass "block-range filter applies the token threshold (${win_token_oracle} of ${win_oracle} posts at ${win_token_max} tokens)"
+    else
+      fail "block-range filter at a ${win_token_max}-token threshold returned '${got}', expected ${win_token_oracle}"
+    fi
+  fi
+
+  # Author + range: only that author's posts created in the range. The
+  # author is one with posts both inside and outside the window.
+  both_author=$(query_database "
+    SELECT author_id FROM (${win_posts}) p GROUP BY author_id
+    HAVING count(*) FILTER (WHERE block_num_created BETWEEN ${win_first} AND ${win_last}) >= 1
+       AND count(*) FILTER (WHERE block_num_created NOT BETWEEN ${win_first} AND ${win_last}) >= 1
+     ORDER BY count(*) DESC, author_id LIMIT 1")
+  both_oracle=$(query_database "SELECT count(*) FROM (${win_posts}) p WHERE author_id = ${both_author:-0} AND block_num_created BETWEEN ${win_first} AND ${win_last}")
+  if ! is_number "$both_author" || ! is_number "$both_oracle" || [ "$both_oracle" -lt 1 ]; then
+    fail "author + block-range check could not be set up (author '${both_author}', posts in window '${both_oracle}')"
+  else
+    got=$(query_database "
+      SELECT count(*) || '/' || count(*) FILTER (WHERE hp.author_id <> ${both_author} OR hp.block_num_created NOT BETWEEN ${win_first} AND ${win_last})
+        FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, ${both_author}, ${win_first}, ${win_last}) r
+        JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id")
+    if [ "$got" = "${both_oracle}/0" ]; then
+      pass "author + block-range returns only that author's ${both_oracle} posts in the range"
+    else
+      fail "author ${both_author} + block-range: count/wrong = '${got}', expected '${both_oracle}/0'"
+    fi
+  fi
+
+  # The size cap: a window holding more chunks than max_window_chunks is an
+  # error naming the cap (cap squeezed to 1, rolled back).
+  err=$(query_database_rolled_back_with_errors \
+    "UPDATE hivesense_app.hivesense_app_status SET max_window_chunks = 1 WHERE id = 1" \
+    "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10, NULL, 0, NULL, ${win_first}, ${win_last})")
+  if echo "$err" | grep -q "holds more than 1 embedded post chunks"; then
+    pass "block-range filter refuses a window above max_window_chunks"
+  else
+    fail "block-range filter above max_window_chunks: $(echo "$err" | head -c 300)"
+  fi
+
+  # Through the rewriter: block numbers and the equivalent timestamps give the
+  # same posts, and exactly the oracle's count. HAF converts a from timestamp
+  # to the first block at or after it, but a to timestamp to the last block
+  # strictly BEFORE it, so the equivalent of to-block=N is block N+1's time.
+  # (the space is URL-encoded in SQL, because query_database strips whitespace)
+  ts_first=$(query_database "SELECT replace(to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'), ' ', '%20') FROM hafd.blocks WHERE num = ${win_first}")
+  ts_last=$(query_database "SELECT replace(to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'), ' ', '%20') FROM hafd.blocks WHERE num = ${win_last} + 1")
+  by_block=$(http_get "/posts/search?q=introduce%20yourself&from-block=${win_first}&to-block=${win_last}&result_limit=1000&full_posts=0")
+  by_time=$(http_get "/posts/search?q=introduce%20yourself&from-block=${ts_first}&to-block=${ts_last}&result_limit=1000&full_posts=0")
+  n_block=$(printf '%s' "$by_block" | grep -o '"permlink"' | wc -l | tr -d '[:space:]')
+  if [ -n "$ts_first" ] && [ -n "$ts_last" ] && [ "$n_block" = "$win_oracle" ] && [ "$by_block" = "$by_time" ]; then
+    pass "/posts/search from-block/to-block: block numbers and timestamps return the same ${n_block} posts"
+  else
+    fail "/posts/search from-block/to-block: ${n_block} posts by block (expected ${win_oracle}), same by timestamp ('${ts_first}'..'${ts_last}'): $([ "$by_block" = "$by_time" ] && echo yes || echo no)"
+  fi
+
+  # One-sided ranges ("posts since X", "posts until Y"), in SQL and through
+  # the rewriter. Both fit the six-month limit on this 2016 corpus.
+  since_oracle=$(query_database "SELECT count(*) FROM (${win_posts}) p WHERE block_num_created >= ${win_first}")
+  until_oracle=$(query_database "SELECT count(*) FROM (${win_posts}) p WHERE block_num_created <= ${win_last}")
+  got=$(query_database "
+    SELECT (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, NULL))
+    || '/' || (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, NULL, ${win_last}))")
+  n_since=$(http_get "/posts/search?q=introduce%20yourself&from-block=${win_first}&result_limit=1000&full_posts=0" | grep -o '"permlink"' | wc -l | tr -d '[:space:]')
+  n_until=$(http_get "/posts/search?q=introduce%20yourself&to-block=${win_last}&result_limit=1000&full_posts=0" | grep -o '"permlink"' | wc -l | tr -d '[:space:]')
+  if is_number "$since_oracle" && is_number "$until_oracle" && [ "$since_oracle" -lt "$all_posts" ] && [ "$until_oracle" -lt "$all_posts" ] \
+     && [ "$got" = "${since_oracle}/${until_oracle}" ] && [ "$n_since" = "$since_oracle" ] && [ "$n_until" = "$until_oracle" ]; then
+    pass "one-sided ranges: from-block alone returns ${since_oracle} posts, to-block alone ${until_oracle} (SQL and HTTP)"
+  else
+    fail "one-sided ranges: SQL since/until '${got}', HTTP '${n_since}/${n_until}', expected '${since_oracle}/${until_oracle}' (of ${all_posts})"
+  fi
+
+  # The excluded post (as /similar would pass) is honoured by the window branch.
+  if is_number "$top_post"; then
+    got=$(query_database "SELECT count(*) || '/' || count(*) FILTER (WHERE post_id = ${top_post})
+      FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, ${top_post}, 0, NULL, ${win_first}, ${win_last})")
+    if [ "$got" = "$((win_oracle - 1))/0" ]; then
+      pass "block-range filter honours the excluded post"
+    else
+      fail "block-range filter excluding post ${top_post}: count/that-post = '${got}', expected '$((win_oracle - 1))/0'"
+    fi
+  fi
+
+  # The author branch's range is inclusive too: the edge post's author, asked
+  # for the one block holding it, gets it; asked from the next block, does not.
+  edge_author=$(query_database "SELECT author_id FROM hivemind_app.hive_posts WHERE id = ${edge_post:-0}")
+  got=$(query_database "
+    SELECT (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, ${edge_author:-0}, ${win_first}, ${win_first}) WHERE post_id = ${edge_post:-0})
+    || '/' || (SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, ${edge_author:-0}, ${win_first} + 1, ${win_last}) WHERE post_id = ${edge_post:-0})")
+  if is_number "$edge_author" && [ "$got" = "1/0" ]; then
+    pass "author + block-range bounds are inclusive"
+  else
+    fail "author ${edge_author} + block-range bounds for post ${edge_post}: in/after = '${got}', expected 1/0"
+  fi
+
+  # The id bounds really bound: every row created well before the window has
+  # a smaller id than the lower bound and every row created well after a
+  # larger id than the upper one (so the chunk count below is of the window,
+  # not of the corpus), and every window post lies between them.
+  bounds=$(query_database "SELECT lo || '/' || hi FROM hivesense_app.window_post_bounds(${win_first}, ${win_last})")
+  b_lo=${bounds%/*}; b_hi=${bounds#*/}
+  got=$(query_database "
+    SELECT (SELECT coalesce(max(id), -1) < ${b_lo:-0} FROM hivemind_app.hive_posts WHERE block_num_created < ${win_first} - 20000)
+    || '/' || (SELECT coalesce(min(id), 2147483647) > ${b_hi:-0} FROM hivemind_app.hive_posts WHERE block_num_created > ${win_last} + 20000)
+    || '/' || (SELECT bool_and(id > ${b_lo:-0} AND id < ${b_hi:-0}) FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first} AND ${win_last})
+    || '/' || (${b_lo:-0} > 0 AND ${b_hi:-0} < 2147483647)")
+  if is_number "$b_lo" && is_number "$b_hi" && [ "$got" = "true/true/true/true" ]; then
+    pass "window id bounds (${b_lo}, ${b_hi}) are tight on both sides and enclose the window"
+  else
+    fail "window id bounds '${bounds}': before-below/after-above/encloses/both-set = '${got}', expected true/true/true/true"
+  fi
+
+  # The chunk cap counts that bounded range and nothing else, with no
+  # off-by-one: a cap equal to the count passes, one less refuses.
+  bounded_chunks=$(query_database "SELECT count(*) FROM hivesense_app.posts_vectors WHERE post_id > ${b_lo:-0} AND post_id < ${b_hi:-0}")
+  total_chunks=$(query_database "SELECT count(*) FROM hivesense_app.posts_vectors")
+  at_cap=$(query_database_rolled_back_with_errors \
+    "UPDATE hivesense_app.hivesense_app_status SET max_window_chunks = ${bounded_chunks:-0} WHERE id = 1" \
+    "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_last})" | tr -d '[:space:]')
+  below_cap=$(query_database_rolled_back_with_errors \
+    "UPDATE hivesense_app.hivesense_app_status SET max_window_chunks = ${bounded_chunks:-0} - 1 WHERE id = 1" \
+    "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, NULL, 0, NULL, ${win_first}, ${win_last})")
+  if is_number "$bounded_chunks" && [ "$bounded_chunks" -lt "$total_chunks" ] && [ "$at_cap" = "$win_oracle" ] \
+     && echo "$below_cap" | grep -q "holds more than $((bounded_chunks - 1)) embedded post chunks"; then
+    pass "chunk cap counts the bounded range (${bounded_chunks} of ${total_chunks} chunks): at the cap it runs, one below it refuses"
+  else
+    fail "chunk cap at ${bounded_chunks} (of ${total_chunks}): at cap '${at_cap}' (expected ${win_oracle}), below cap: $(echo "$below_cap" | head -c 200)"
+  fi
+
+  # Ids out of creation order near the window's edges (as massive sync left
+  # them on a full node) must not lose posts: two comments just inside the
+  # window's id span are moved (rolled back) to just outside its blocks, so
+  # bounds without the out-of-order margin would land on them and cut off
+  # edge posts.
+  win_min_id=$(query_database "SELECT min(id) FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first} AND ${win_last}")
+  win_max_id=$(query_database "SELECT max(id) FROM (${win_posts}) p WHERE block_num_created BETWEEN ${win_first} AND ${win_last}")
+  late_row=$(query_database "SELECT min(id) FROM hivemind_app.hive_posts WHERE id > ${win_min_id:-0} AND id < ${win_max_id:-0} AND NOT EXISTS (SELECT 1 FROM hivesense_app.posts_vectors pv WHERE pv.post_id = hive_posts.id)")
+  early_row=$(query_database "SELECT max(id) FROM hivemind_app.hive_posts WHERE id > ${win_min_id:-0} AND id < ${win_max_id:-0} AND NOT EXISTS (SELECT 1 FROM hivesense_app.posts_vectors pv WHERE pv.post_id = hive_posts.id)")
+  if ! is_number "$late_row" || ! is_number "$early_row" || [ "$late_row" = "$early_row" ]; then
+    fail "out-of-order check could not be set up (rows '${late_row}', '${early_row}' between ids ${win_min_id}..${win_max_id})"
+  else
+    got=$(query_database_rolled_back \
+      "UPDATE hivemind_app.hive_posts SET block_num_created = ${win_first} - 1 WHERE id = ${late_row};
+       UPDATE hivemind_app.hive_posts SET block_num_created = ${win_last} + 1 WHERE id = ${early_row}" \
+      "$win_rows")
+    if [ "$got" = "$win_expected" ]; then
+      pass "block-range filter keeps every post when ids are out of creation order at the edges"
+    else
+      fail "block-range filter with out-of-order ids at the edges: '${got}', expected '${win_expected}'"
+    fi
+  fi
+
+  # A range with no posts in it is an empty array, not an error.
+  body=$(http_get "/posts/search?q=introduce%20yourself&from-block=1&to-block=2" | tr -d '[:space:]')
+  if [ "$body" = "[]" ]; then
+    pass "/posts/search with a block range holding no posts returns []"
+  else
+    fail "/posts/search?from-block=1&to-block=2 returned '$(printf '%s' "$body" | head -c 300)', expected []"
+  fi
+fi
+
+# Bad ranges are client errors: reversed, malformed, and wider than six months.
+for bad in "from-block=${win_last:-200}&to-block=${win_first:-100}" "from-block=abc" "from-block=1&to-block=6000000"; do
+  status=$(http_status "/posts/search?q=x&${bad}")
+  case "$status" in
+    HTTP/1.[01]\ 4[0-9][0-9]) pass "/posts/search?${bad} returns ${status#* }" ;;
+    *) fail "/posts/search?${bad} returned status '${status}', expected 4xx" ;;
+  esac
+done
+# ... and for the reason given: the error text, from the SQL call.
+span_call() {
+  query_database_with_errors "SELECT count(*) FROM json_array_elements(hivesense_endpoints.posts_search(q => 'introduce yourself', result_limit => 5, full_posts => 0, \"from-block\" => '${1}', \"to-block\" => '${2}'${3}))"
+}
+while IFS='|' read -r from_b to_b want; do
+  err=$(span_call "$from_b" "$to_b" "" < /dev/null)  # docker exec would read the loop's stdin
+  if echo "$err" | grep -q "$want"; then
+    pass "from-block='${from_b}' to-block='${to_b}' is refused: ${want}"
+  else
+    fail "from-block='${from_b}' to-block='${to_b}': expected '${want}', got: $(echo "$err" | head -c 300)"
+  fi
+done <<EOF
+${win_last:-200}|${win_first:-100}|must be less than or equal
+abc||Invalid format
+1|5270401|may span at most 5270400 blocks
+EOF
+# An open end is measured to the current block. This corpus ends at block
+# 1M, so no real open range can exceed six months here; the check moves
+# hivesense's current block to 9M (rolled back) and "from-block=1" must then
+# be refused -- before the query is embedded.
+err=$(query_database_rolled_back_with_errors \
+  "UPDATE hafd.contexts SET current_block_num = 9000000 WHERE name = 'hivesense_app'" \
+  "SELECT hivesense_endpoints.posts_search(q => 'introduce yourself', \"from-block\" => '1')")
+if echo "$err" | grep -q "may span at most 5270400 blocks (about six months); this range spans 9000000 blocks"; then
+  pass "an open-ended range is measured to the current block and refused past six months"
+else
+  fail "open-ended range with the current block at 9000000: $(echo "$err" | head -c 300)"
+fi
+
+# The span limit is inclusive (exactly 5270400 blocks is fine), and with an
+# author it does not apply, since only that author's posts are ranked.
+err=$(span_call 1 5270400 "")
+err_author=$(span_call 1 6000000 ", author => '${test_author:-x}'")
+if is_number "$(echo "$err" | tr -d '[:space:]')" && is_number "$(echo "$err_author" | tr -d '[:space:]')"; then
+  pass "a 5270400-block range is accepted, and any span is accepted with author"
+else
+  fail "span at the limit: '$(echo "$err" | head -c 200)'; with author over the limit: '$(echo "$err_author" | head -c 200)'"
 fi
 
 # ─── summary ───────────────────────────────────────────────────────────

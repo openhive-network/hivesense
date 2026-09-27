@@ -163,6 +163,8 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS upstream_skipped_op_count INT NOT NULL DEFAULT 0;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS num_ctx INT NOT NULL DEFAULT 0; -- 0 = server default; read by the python block processor
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS max_window_chunks INT NOT NULL DEFAULT 300000; -- /posts/search from-block/to-block: largest window ranked (exactly), in chunks
 
 INSERT INTO hivesense_app_status
 (
