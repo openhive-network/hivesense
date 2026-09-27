@@ -96,6 +96,24 @@ is_number() {
   esac
 }
 
+# Runs $1 (setup statements) and then $2 (a SELECT) in ONE transaction that is
+# always rolled back, so a check can squeeze a tunable or mark a post deleted
+# without leaving a trace. Prints only the SELECT's result (-q hides command
+# tags); ON_ERROR_STOP makes a failing setup yield empty output, which every
+# caller treats as a failure.
+query_database_rolled_back() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log -v ON_ERROR_STOP=1 \
+      -c "BEGIN" -c "$1" -c "$2" -c "ROLLBACK" | tr -d '[:space:]'
+}
+
+# Like query_database, but keeps stderr, so a check can assert on the error
+# text itself rather than on an empty result.
+query_database_with_errors() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+    psql -U haf_admin -q -A -t -d haf_block_log -c "$1" 2>&1
+}
+
 echo "=== hivesense search tests (mode: ${MODE}) ==="
 
 # ─── 1. installed configuration matches the expectation ───────────────
@@ -236,13 +254,16 @@ for pair in 3:60 100:500; do
 done
 
 # ─── 8. candidate filters are only built when they can remove a row ────
+# Deleted posts are always filtered (one hive_posts probe per candidate); the
+# token and mute lookups are added only when they can remove a row.
+deleted_filter=" AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp WHERE hp.id = pv.post_id AND hp.counter_deleted = 0)"
 token_threshold=$(query_database "SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1")
 if [ "$token_threshold" = "0" ]; then
   filter=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0)")
-  if [ -z "$filter" ]; then
-    pass "anonymous search without a token threshold filters nothing"
+  if [ "$filter" = "$deleted_filter" ]; then
+    pass "anonymous search without a token threshold filters only deleted posts"
   else
-    fail "anonymous search without a token threshold filters '${filter}'"
+    fail "anonymous search without a token threshold filters '${filter}', expected '${deleted_filter}'"
   fi
 fi
 
@@ -272,6 +293,24 @@ if [ -n "$muted_pair" ]; then
   fi
 else
   echo "skip: no observer mutes an author of an embedded post"
+fi
+
+# ─── 9. deleted posts are excluded from the unfiltered search ────────────
+# Mark the unfiltered search's own best match deleted (rolled back) and it
+# must drop out; first prove it is returned while live, or the check is empty.
+top_live=$(query_database "SELECT post_id FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10) ORDER BY similarity_order LIMIT 1")
+if ! is_number "$top_live"; then
+  fail "unfiltered search returned no top post to delete ('${top_live}')"
+else
+  got=$(query_database_rolled_back \
+    "UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = ${top_live}" \
+    "SELECT count(*) || '/' || count(*) FILTER (WHERE post_id = ${top_live})
+       FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10)")
+  if [ "${got#*/}" = "0" ] && is_number "${got%/*}" && [ "${got%/*}" -ge 1 ]; then
+    pass "unfiltered search drops a deleted post (post ${top_live})"
+  else
+    fail "unfiltered search with post ${top_live} deleted: count/that-post = '${got}', expected N/0"
+  fi
 fi
 
 # ─── summary ───────────────────────────────────────────────────────────

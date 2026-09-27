@@ -73,10 +73,14 @@ BEGIN
 END;
 $$;
 
-/* WHERE-clause fragment (empty or starting with AND) restricting the ANN
- * candidates of table alias _alias. The post_data and hive_posts lookups are
- * only added when they can remove a row, so in the common case (no search
- * token threshold, observer mutes nobody) the ANN is the index scan alone. */
+/* WHERE-clause fragment (starting with AND) restricting the ANN candidates
+ * of table alias _alias. Every search probes hive_posts once per candidate to
+ * skip deleted posts: a deleted post keeps its embeddings, but hivemind's
+ * full-post view returns no row for it, so one ranked into /posts/search's
+ * full_posts slots was silently dropped (fewer full objects than requested)
+ * while one ranked lower came back as a bare author/permlink stub. The
+ * observer's mute check rides on that same probe, and the post_data lookup is
+ * only added when a token threshold can remove a row. */
 CREATE OR REPLACE FUNCTION hivesense_app.ann_candidate_filter(
     _alias           text,
     _exclude_post_id int,
@@ -110,10 +114,16 @@ BEGIN
            SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
             WHERE m.observer_id = _observer_id) THEN
         __filter := __filter || format(
-          ' AND NOT EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
-          ' JOIN hivemind_app.muted_accounts_by_id_view m ON m.muted_id = hp.author_id'
-          ' WHERE hp.id = %1$I.post_id AND m.observer_id = %2$s)',
+          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
+          ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0'
+          ' AND NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m'
+          ' WHERE m.observer_id = %2$s AND m.muted_id = hp.author_id))',
           _alias, _observer_id);
+    ELSE
+        __filter := __filter || format(
+          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
+          ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0)',
+          _alias);
     END IF;
 
     RETURN __filter;
@@ -229,6 +239,9 @@ BEGIN
 
     /* ────────────────────────────────────────────────────────────
      *  MAIN one-shot query (three variants)
+     *
+     *  Every variant skips deleted posts: the ANN variants through
+     *  ann_candidate_filter, the exhaustive one explicitly.
      * ────────────────────────────────────────────────────────────*/
     IF exhaustive THEN
         -- note: this branch is only used for benchmarking debugging
@@ -283,6 +296,7 @@ BEGIN
               JOIN hivemind_app.hive_posts      hp ON hp.id      = b.post_id
               JOIN hivesense_app.post_data      pd ON pd.post_id = b.post_id
              WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
+               AND hp.counter_deleted = 0
                AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
                AND (_observer_id = 0 OR NOT EXISTS (
                      SELECT 1
