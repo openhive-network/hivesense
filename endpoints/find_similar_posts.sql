@@ -105,8 +105,7 @@ BEGIN
           FROM hivesense_app.find_nearest_posts(
                    q,
                    result_limit,
-                   __observer_id,
-                   __author_id
+                   __observer_id
                )
     ),
 
