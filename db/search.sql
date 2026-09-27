@@ -182,7 +182,7 @@ BEGIN
                   FROM hivesense_app.posts_vectors pv
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE pv.post_id = ANY($3)
-                   AND (%L OR pd.number_of_tokens >= %s)
+                   AND (%L OR true OR %s IS NULL)
                    AND ($2 IS NULL OR pv.post_id <> $2)
                  ORDER BY pv.post_id, sim
             )
