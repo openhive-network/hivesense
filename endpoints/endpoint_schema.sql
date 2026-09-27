@@ -75,7 +75,7 @@ DO $__$
           "AI"
         ],
         "summary": "Full semantic search results in a single call",
-        "description": "Returns an ordered list of posts most similar to a given query.\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*.  Paging is now done entirely on the client side.\n",
+        "description": "Returns an ordered list of posts most similar to a given query.\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*.  Paging is now done entirely on the client side.\nDeleted posts are never returned.\n",
         "operationId": "hivesense_endpoints.posts_search",
         "parameters": [
           {
@@ -130,6 +130,16 @@ DO $__$
               "default": ""
             },
             "description": "Hive account whose mute lists etc. will be respected"
+          },
+          {
+            "in": "query",
+            "name": "author",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": ""
+            },
+            "description": "Only return posts by this Hive account (a bare account name, without `@`).\nThe ranking is exact across all embedded posts of that author rather than\napproximate. An unknown account is an error; an author with no embedded\nposts, or one muted by `observer`, returns an empty array.\n"
           }
         ],
         "responses": {
