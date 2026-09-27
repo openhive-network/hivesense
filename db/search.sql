@@ -240,7 +240,7 @@ BEGIN
              WHERE hp.author_id = _author_id
                AND hp.depth = 0
                AND hp.counter_deleted = 0
-               AND hp.block_num_created BETWEEN first_blk AND last_blk;
+               AND hp.block_num_created > first_blk AND hp.block_num_created <= last_blk;
         ELSE
             SELECT array_agg(hp.id)
               INTO author_post_ids
