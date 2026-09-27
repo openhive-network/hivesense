@@ -118,7 +118,7 @@ DECLARE
     author_post_ids int[];  -- author filter: that author's live root posts
 
     /* ------ block-range (time window) filter ------ */
-    has_window    boolean := _first_block IS NOT NULL OR _last_block IS NOT NULL;
+    has_window    boolean := _first_block IS NOT NULL AND _last_block IS NOT NULL;
     first_blk     int     := COALESCE(_first_block, 0);
     last_blk      int     := COALESCE(_last_block, 2147483647);
     window_lo     int;      -- exclusive post_id bounds, see window_post_bounds
