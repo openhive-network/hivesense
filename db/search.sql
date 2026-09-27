@@ -147,7 +147,7 @@ BEGIN
      * ────────────────────────────────────────────────────────────*/
     IF _author_id IS NOT NULL THEN
         -- A muted author yields nothing, as in the unfiltered search.
-        IF _observer_id <> 0 AND EXISTS (
+        IF _observer_id <> 0 AND NOT EXISTS (
                SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
                 WHERE m.observer_id = _observer_id
                   AND m.muted_id    = _author_id) THEN
