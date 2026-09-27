@@ -179,6 +179,8 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS embedding_timeout_per_text REAL NOT NULL DEFAULT 1;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS embedding_timeout_max REAL NOT NULL DEFAULT 600;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS max_window_chunks INT NOT NULL DEFAULT 300000; -- /posts/search from-block/to-block: largest window ranked (exactly), in chunks
 
 INSERT INTO hivesense_app_status
 (
