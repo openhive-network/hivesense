@@ -302,7 +302,6 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
                    AND ($3 IS NULL OR pv.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
