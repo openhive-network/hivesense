@@ -175,7 +175,7 @@ BEGIN
         -- seq-scanned all of posts_vectors (seconds instead of milliseconds).
         RETURN QUERY EXECUTE format($q$
             WITH best_chunk AS (
-                SELECT DISTINCT ON (pv.post_id)
+                SELECT
                        pv.post_id,
                        pv.chunk_number,
                        (pv.embedding <=> $1)::float4 AS sim
