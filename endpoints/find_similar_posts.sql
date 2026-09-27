@@ -9,6 +9,7 @@
       bridge-post JSON objects; the remaining results (up to **posts_limit**,
       default 100, max 1000) are stub entries containing only *author* and
       *permlink*.  Paging is now done entirely on the client side.
+      Deleted posts are never returned.
     operationId: hivesense_endpoints.posts_search
     parameters:
       - in: query
@@ -36,6 +37,15 @@
         required: false
         schema: {type: string, default: ''}
         description: Hive account whose mute lists etc. will be respected
+      - in: query
+        name: author
+        required: false
+        schema: {type: string, default: ''}
+        description: |
+          Only return posts by this Hive account (a bare account name, without `@`).
+          The ranking is exact across all embedded posts of that author rather than
+          approximate. An unknown account is an error; an author with no embedded
+          posts, or one muted by `observer`, returns an empty array.
     responses:
       '200':
         description: JSON array of result objects
@@ -51,7 +61,8 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_search(
     "truncate" INT = 0,
     "result_limit" INT = 100,
     "full_posts" INT = 10,
-    "observer" TEXT = ''
+    "observer" TEXT = '',
+    "author" TEXT = ''
 )
 RETURNS JSON 
 -- openapi-generated-code-end
@@ -59,6 +70,7 @@ LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
     __observer_id INT := 0;
+    __author_id   INT := NULL;
     __result      JSON;
 BEGIN
     /* ─── validate parameters ───────────────────────────── */
@@ -80,13 +92,21 @@ BEGIN
                            TRUE);
     END IF;
 
+    /* ─── author filter ⇒ id (#47) ──────────────────────── */
+    IF author <> '' THEN
+        __author_id := hivemind_postgrest_utilities.find_account_id(
+                         hivemind_postgrest_utilities.valid_account(author),
+                         TRUE);
+    END IF;
+
     /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
     WITH ranked AS (
         SELECT *
           FROM hivesense_app.find_nearest_posts(
                    q,
                    result_limit,
-                   __observer_id
+                   __observer_id,
+                   __author_id
                )
     ),
 

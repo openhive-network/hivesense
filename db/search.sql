@@ -15,7 +15,8 @@ CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_s
     _embedding       public.vector,      -- full-size query embedding (768-d)
     _limit           int     DEFAULT 1000,
     _exclude_post_id int     DEFAULT NULL,
-    _observer_id     int     DEFAULT 0
+    _observer_id     int     DEFAULT 0,
+    _author_id       int     DEFAULT NULL -- restrict to one author's posts (#47)
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -49,6 +50,7 @@ DECLARE
 
     /* ───────── misc ───────── */
     __min_tokens int;
+    author_post_ids int[];  -- author filter: that author's live root posts
 
     /* ------ for exhaustive ------ */
     post_ids      int[];    -- candidate post_ids
@@ -124,6 +126,80 @@ BEGIN
         ELSE
             dist_red := 'reduced_embedding <=> $2';
         END IF;
+    END IF;
+
+    /* ────────────────────────────────────────────────────────────
+     *  AUTHOR filter (#47): rank ALL of one author's chunks exactly
+     *
+     *  Never goes through the vector index. An HNSW scan returns only
+     *  its nearest few hundred candidates and the author predicate would
+     *  be applied afterwards, so a filtered author who is not among them
+     *  gets few or no results -- measured: 0 rows for an account with
+     *  179 embedded chunks, and still 0 rows with iterative scan, which
+     *  gave up after 12-14 s at its 20,000-tuple cap.
+     *  Instead: collect the author's post ids, then compute the distance
+     *  for every one of their chunks. The query orders chunks by post_id
+     *  first (for DISTINCT ON) and by distance only after that, so no plan
+     *  can serve it from an index-ordered vector scan.
+     *
+     *  It sits ahead of the exhaustive debug branch so that header can
+     *  never silently drop the filter; this branch is already exact.
+     * ────────────────────────────────────────────────────────────*/
+    IF _author_id IS NOT NULL THEN
+        -- A muted author yields nothing, as in the unfiltered search.
+        IF _observer_id <> 0 AND EXISTS (
+               SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                WHERE m.observer_id = _observer_id
+                  AND m.muted_id    = _author_id) THEN
+            RETURN;
+        END IF;
+
+        -- Only root posts are embedded, and these literal predicates match
+        -- hivemind's partial index (author_id, id DESC) WHERE depth = 0 AND
+        -- counter_deleted = 0 -- so an account with millions of comments
+        -- costs nothing extra. Deleted posts are excluded, as below.
+        SELECT array_agg(hp.id)
+          INTO author_post_ids
+          FROM hivemind_app.hive_posts hp
+         WHERE hp.author_id = _author_id
+           AND hp.depth = 0
+           AND hp.counter_deleted = 0;
+
+        IF author_post_ids IS NULL THEN
+            RETURN;
+        END IF;
+
+        -- The ids go in as a bound array, not a join: EXECUTE plans with the
+        -- real value, so the planner sees the true row count. Behind a CTE,
+        -- prolific commenters were misestimated at ~500k rows and the plan
+        -- seq-scanned all of posts_vectors (seconds instead of milliseconds).
+        RETURN QUERY EXECUTE format($q$
+            WITH best_chunk AS (
+                SELECT DISTINCT ON (pv.post_id)
+                       pv.post_id,
+                       pv.chunk_number,
+                       (pv.embedding <=> $1)::float4 AS sim
+                  FROM hivesense_app.posts_vectors pv
+                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+                 WHERE pv.post_id = ANY($3)
+                   AND (%L OR pd.number_of_tokens >= %s)
+                   AND ($2 IS NULL OR pv.post_id <> $2)
+                 ORDER BY pv.post_id, sim
+            )
+            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+                   sim::real AS similarity,
+                   post_id,
+                   chunk_number
+              FROM best_chunk
+             ORDER BY sim, post_id
+             LIMIT %s
+        $q$,
+          (__min_tokens = 0),           -- %L  token filter off?
+          __min_tokens,                 -- %s
+          _limit                        -- %s
+        )
+        USING _embedding, _exclude_post_id, author_post_ids;
+        RETURN;
     END IF;
 
     /* ────────────────────────────────────────────────────────────
@@ -659,7 +735,8 @@ DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts;
 CREATE FUNCTION hivesense_app.find_nearest_posts(
     _query        text,
     _limit        int   DEFAULT 1000,
-    _observer_id  int   DEFAULT 0
+    _observer_id  int   DEFAULT 0,
+    _author_id    int   DEFAULT NULL
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -680,7 +757,8 @@ BEGIN
         FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(
                hivesense_app.hivesense_embed(__query_prefix || _query),
                _limit,
-               _observer_id => _observer_id
+               _observer_id => _observer_id,
+               _author_id   => _author_id
            );
 END;
 $$;
