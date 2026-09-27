@@ -94,9 +94,9 @@ BEGIN
 
     /* ─── author filter ⇒ id (#47) ──────────────────────── */
     IF author <> '' THEN
-        __author_id := hivemind_postgrest_utilities.find_account_id(
+        __author_id := COALESCE(hivemind_postgrest_utilities.find_account_id(
                          hivemind_postgrest_utilities.valid_account(author),
-                         TRUE);
+                         FALSE), 0);
     END IF;
 
     /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
