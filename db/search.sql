@@ -47,6 +47,7 @@ DECLARE
     exploratory_factor int := default_ef;
     ann_candidates     int;             -- computed below
     exhaustive boolean := false;
+    author_clause text := '';
 
     /* ───────── misc ───────── */
     __min_tokens int;
@@ -82,6 +83,7 @@ BEGIN
         exhaustive := lower(coalesce(req_headers->>'x-exhaustive-search','false')) = 'true';
     END IF;
 
+    IF _author_id IS NOT NULL THEN author_clause := format(' AND hp.author_id = %s', _author_id); END IF;
     ann_candidates := LEAST(_limit * batch_multiplier, 50000);
     IF allow_dbg THEN
         ann_candidates := COALESCE((req_headers->>'x-ann-candidates')::int,
@@ -93,6 +95,7 @@ BEGIN
     /* — apply tunables — */
     PERFORM set_config('ivfflat.probes', '4', true);
     PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
+    PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
 
     /* — token threshold — */
     SELECT min_token_search_threshold
@@ -145,7 +148,7 @@ BEGIN
      *  It sits ahead of the exhaustive debug branch so that header can
      *  never silently drop the filter; this branch is already exact.
      * ────────────────────────────────────────────────────────────*/
-    IF _author_id IS NOT NULL THEN
+    IF false THEN
         -- A muted author yields nothing, as in the unfiltered search.
         IF _observer_id <> 0 AND EXISTS (
                SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -266,6 +269,7 @@ BEGIN
               JOIN hivesense_app.post_data      pd ON pd.post_id = b.post_id
              WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
                AND hp.counter_deleted = 0
+               AND (_author_id IS NULL OR hp.author_id = _author_id)
                AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
                AND (_observer_id = 0 OR NOT EXISTS (
                      SELECT 1
@@ -302,7 +306,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 %s
                    AND ($3 IS NULL OR pv.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -333,6 +337,7 @@ BEGIN
           dist_red,                     -- %s  ann distance expr (expression on embedding)
           (__min_tokens = 0),           -- %L  token filter off?
           __min_tokens,                 -- %s
+          author_clause,
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -349,7 +354,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 %s
                    AND ($3 IS NULL OR pr.post_id <> $3)
                    AND ($4 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -380,6 +385,7 @@ BEGIN
           dist_red,                     -- %s  ann distance expr
           (__min_tokens = 0),           -- %L  token filter off?
           __min_tokens,                 -- %s
+          author_clause,
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -395,7 +401,7 @@ BEGIN
                   JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
                   JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
                  WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND hp.counter_deleted = 0
+                   AND hp.counter_deleted = 0 %s
                    AND ($2 IS NULL OR pv.post_id <> $2)
                    AND ($3 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
@@ -421,6 +427,7 @@ BEGIN
           dist_full,                  -- %s
           (__min_tokens = 0),         -- %L
           __min_tokens,               -- %s
+          author_clause,
           ann_candidates,             -- %s
           _limit                      -- %s
         )
