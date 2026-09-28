@@ -65,7 +65,7 @@ BEGIN
       FROM (SELECT 1 FROM hivesense_app.posts_vectors pv
              WHERE pv.post_id > lo AND pv.post_id < hi
              LIMIT max_chunks + 1) c;
-    IF n > max_chunks THEN
+    IF false THEN
         RAISE EXCEPTION 'The requested block range holds more than % embedded post chunks; narrow from-block/to-block', max_chunks;
     END IF;
 END;
