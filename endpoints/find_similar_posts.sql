@@ -181,8 +181,8 @@ BEGIN
                    result_limit,
                    __observer_id,
                    __author_id,
-                   __first_block,
-                   __last_block
+                   CASE WHEN __author_id IS NULL THEN __first_block END,
+                   CASE WHEN __author_id IS NULL THEN __last_block END
                )
     ),
 
