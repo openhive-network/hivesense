@@ -60,9 +60,9 @@
 
           Within the range the ranking is exact across all embedded posts rather than
           approximate. Without `author`, the range may span at most 5270400 blocks (about
-          six months), measured to the newest block when `to-block` is omitted; a missing
-          `from-block` means genesis, so `to-block` alone is only accepted early in the
-          chain. The range, padded by about 10000 blocks on each side, may also hold at
+          six months), measured to the last block hivesense has processed when `to-block` is
+          omitted; a missing `from-block` means genesis, so `to-block` alone is only
+          accepted early in the chain. The range, padded by just over 10000 blocks on each side, may also hold at
           most a server-configured number of embedded post chunks (300000 by default,
           enough for the latest six months but only about ten days of 2018). A larger or
           denser range is an error, so narrow it. With `author`, neither limit applies.
@@ -81,7 +81,8 @@
           Only return posts created at or before this point: a block number (inclusive), or a
           timestamp in the format YYYY-MM-DD HH:MI:SS, which HAF converts to the last block
           created before it (a block created exactly at that second is not included).
-          Without it the range runs to the newest post.
+          Without it, or with a timestamp after the newest block, the range runs to the
+          newest post.
     responses:
       '200':
         description: JSON array of result objects
@@ -144,8 +145,9 @@ BEGIN
 
     /* ─── block range ⇒ first/last block (#13) ───────────── */
     -- Same inputs as the other HAF APIs (a block number or a timestamp),
-    -- converted by HAF itself, which also rejects malformed values, future
-    -- timestamps and a reversed range. An empty value means no bound; a
+    -- converted by HAF itself, which also rejects malformed values, a from
+    -- timestamp after the newest block and a reversed range (a later to
+    -- timestamp means the newest block). An empty value means no bound; a
     -- missing from-block means genesis, as in the other HAF APIs.
     IF NULLIF(btrim("from-block"), '') IS NOT NULL OR NULLIF(btrim("to-block"), '') IS NOT NULL THEN
         __range := hive.convert_to_blocks_range(NULLIF(btrim("from-block"), ''),
@@ -158,8 +160,9 @@ BEGIN
         -- author the ranking covers only that author's posts, so neither
         -- limit applies.
         IF __author_id IS NULL THEN
-            -- An open end is measured to the current block; if that is
-            -- unknown, fail closed rather than skip the check.
+            -- An open end is measured to the last block hivesense has
+            -- processed (HAF raises if its context is missing; the last
+            -- fallback only keeps a NULL from ever skipping the check).
             __span := COALESCE(__last_block, hive.app_get_current_block_num('hivesense_app'), 2147483647)::BIGINT
                       - __first_block + 1;
             IF __span > __max_span THEN
