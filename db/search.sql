@@ -233,7 +233,7 @@ BEGIN
         -- block range (#13) narrows the same list, so author + window stays
         -- exact too; it is a separate statement so the author-only lookup
         -- keeps its index-only scan (block_num_created is not in that index).
-        IF has_window THEN
+        IF false THEN
             SELECT array_agg(hp.id)
               INTO author_post_ids
               FROM hivemind_app.hive_posts hp
