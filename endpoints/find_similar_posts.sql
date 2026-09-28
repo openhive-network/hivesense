@@ -152,7 +152,7 @@ BEGIN
     IF NULLIF(btrim("from-block"), '') IS NOT NULL OR NULLIF(btrim("to-block"), '') IS NOT NULL THEN
         __range := hive.convert_to_blocks_range(NULLIF(btrim("from-block"), ''),
                                                 NULLIF(btrim("to-block"), ''));
-        __first_block := COALESCE(__range.first_block, 1);
+        __first_block := __range.first_block;
         __last_block  := __range.last_block;   -- NULL: up to the newest post
 
         -- Both limits are checked here, before the query is embedded, so an
