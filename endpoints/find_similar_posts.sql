@@ -160,7 +160,7 @@ BEGIN
         IF __author_id IS NULL THEN
             -- An open end is measured to the current block; if that is
             -- unknown, fail closed rather than skip the check.
-            __span := COALESCE(__last_block, hive.app_get_current_block_num('hivesense_app'), 2147483647)::BIGINT
+            __span := COALESCE(__last_block, __first_block)::BIGINT
                       - __first_block + 1;
             IF __span > __max_span THEN
                 RAISE EXCEPTION 'from-block/to-block may span at most % blocks (about six months); this range spans % blocks',
