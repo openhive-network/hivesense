@@ -684,6 +684,43 @@ else
     fail "block-range filter above max_window_chunks: $(echo "$err" | head -c 300)"
   fi
 
+  # The endpoint refuses an oversized range BEFORE embedding the query: with
+  # the embedding function replaced by one that raises (rolled back), both
+  # refusals must still name their limit. A valid range must reach it, which
+  # proves the stub is in place.
+  stub_embed="CREATE OR REPLACE FUNCTION hivesense_app.hivesense_embed(_post TEXT) RETURNS public.vector
+                LANGUAGE plpgsql AS \$\$ BEGIN RAISE EXCEPTION 'EMBED CALLED'; END \$\$"
+  search_call="SELECT count(*) FROM json_array_elements(hivesense_endpoints.posts_search(q => 'introduce yourself', result_limit => 5, full_posts => 0"
+  err_ok=$(query_database_rolled_back_with_errors "$stub_embed" \
+    "${search_call}, \"from-block\" => '${win_first}', \"to-block\" => '${win_last}'))")
+  err_span=$(query_database_rolled_back_with_errors "$stub_embed" \
+    "${search_call}, \"from-block\" => '1', \"to-block\" => '5270401'))")
+  err_cap=$(query_database_rolled_back_with_errors "$stub_embed;
+      UPDATE hivesense_app.hivesense_app_status SET max_window_chunks = 1 WHERE id = 1" \
+    "${search_call}, \"from-block\" => '${win_first}', \"to-block\" => '${win_last}'))")
+  if echo "$err_ok" | grep -q "EMBED CALLED" \
+     && echo "$err_span" | grep -q "may span at most 5270400 blocks" \
+     && echo "$err_cap" | grep -q "holds more than 1 embedded post chunks"; then
+    pass "/posts/search refuses an oversized span and an oversized window before embedding the query"
+  else
+    fail "refusals before embedding: valid range '$(echo "$err_ok" | head -c 150)' (expected EMBED CALLED), span '$(echo "$err_span" | head -c 150)', chunk cap '$(echo "$err_cap" | head -c 150)'"
+  fi
+
+  # With author, the chunk cap does not apply and the endpoint still passes
+  # the range on: squeezed to a 1-chunk cap (rolled back), author + range
+  # through the endpoint returns exactly that author's posts in the range
+  # (the author also has posts outside it).
+  both_author_name=$(query_database "SELECT name FROM hivemind_app.hive_accounts WHERE id = ${both_author:-0}")
+  got=$(query_database_rolled_back \
+    "UPDATE hivesense_app.hivesense_app_status SET max_window_chunks = 1 WHERE id = 1" \
+    "SELECT count(*) FROM json_array_elements(hivesense_endpoints.posts_search(q => 'introduce yourself', result_limit => 1000, full_posts => 0,
+       author => '${both_author_name}', \"from-block\" => '${win_first}', \"to-block\" => '${win_last}'))")
+  if [ -n "$both_author_name" ] && is_number "$both_oracle" && [ "$got" = "$both_oracle" ]; then
+    pass "/posts/search author + range ignores the chunk cap and returns that author's ${both_oracle} posts in the range"
+  else
+    fail "/posts/search author '${both_author_name}' + range with a 1-chunk cap returned '${got}', expected ${both_oracle}"
+  fi
+
   # Through the rewriter: block numbers and the equivalent timestamps give the
   # same posts, and exactly the oracle's count. HAF converts a from timestamp
   # to the first block at or after it, but a to timestamp to the last block
@@ -754,6 +791,21 @@ else
     pass "window id bounds (${b_lo}, ${b_hi}) are tight on both sides and enclose the window"
   else
     fail "window id bounds '${bounds}': before-below/after-above/encloses/both-set = '${got}', expected true/true/true/true"
+  fi
+
+  # The margin itself: ids run up to 999 blocks out of creation order on a
+  # full node, but this corpus is in order near the window, so a narrower
+  # margin would pass every check above. Pin it: each bound comes from the
+  # nearest row created more than 10,000 blocks outside the window.
+  got=$(query_database "
+    SELECT ((SELECT block_num_created FROM hivemind_app.hive_posts WHERE id = ${b_lo:-0})
+            = (SELECT max(block_num_created) FROM hivemind_app.hive_posts WHERE block_num_created < ${win_first} - 10000))::text
+    || '/' || ((SELECT block_num_created FROM hivemind_app.hive_posts WHERE id = ${b_hi:-0})
+            = (SELECT min(block_num_created) FROM hivemind_app.hive_posts WHERE block_num_created > ${win_last} + 10000))::text")
+  if [ "$got" = "true/true" ]; then
+    pass "window id bounds come from rows just over 10,000 blocks outside the window"
+  else
+    fail "window id bounds (${b_lo}, ${b_hi}) vs the nearest rows over 10,000 blocks outside: lower/upper = '${got}', expected true/true"
   fi
 
   # The chunk cap counts that bounded range and nothing else, with no
@@ -828,6 +880,7 @@ done <<EOF
 ${win_last:-200}|${win_first:-100}|must be less than or equal
 abc||Invalid format
 1|5270401|may span at most 5270400 blocks
+|5270401|may span at most 5270400 blocks
 EOF
 # An open end is measured to the current block. This corpus ends at block
 # 1M, so no real open range can exceed six months here; the check moves
