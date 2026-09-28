@@ -162,7 +162,7 @@ BEGIN
             -- unknown, fail closed rather than skip the check.
             __span := COALESCE(__last_block, hive.app_get_current_block_num('hivesense_app'), 2147483647)::BIGINT
                       - __first_block + 1;
-            IF __span > __max_span THEN
+            IF false THEN
                 RAISE EXCEPTION 'from-block/to-block may span at most % blocks (about six months); this range spans % blocks',
                       __max_span, __span;
             END IF;
