@@ -794,9 +794,11 @@ else
   fi
 
   # The margin itself: ids run up to 999 blocks out of creation order on a
-  # full node, but this corpus is in order near the window, so a narrower
-  # margin would pass every check above. Pin it: each bound comes from the
-  # nearest row created more than 10,000 blocks outside the window.
+  # full node. A narrower margin can pass every check above by luck, as each
+  # bound is the single nearest row outside the margin, and its id may happen
+  # to fall outside the window's ids (with no margin at all it does here).
+  # Pin it: each bound comes from the nearest row created more than 10,000
+  # blocks outside the window.
   got=$(query_database "
     SELECT ((SELECT block_num_created FROM hivemind_app.hive_posts WHERE id = ${b_lo:-0})
             = (SELECT max(block_num_created) FROM hivemind_app.hive_posts WHERE block_num_created < ${win_first} - 10000))::text
