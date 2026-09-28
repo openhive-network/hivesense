@@ -316,7 +316,6 @@ BEGIN
                  WHERE pv.post_id > $3 AND pv.post_id < $4
                    AND hp.id > $3 AND hp.id < $4
                    AND hp.block_num_created BETWEEN $5 AND $6
-                   AND hp.counter_deleted = 0
                    AND (%L OR pd.number_of_tokens >= %s)
                    AND ($2 IS NULL OR pv.post_id <> $2)
                    AND ($7 = 0 OR NOT EXISTS (
