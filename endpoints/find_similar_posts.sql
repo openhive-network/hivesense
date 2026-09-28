@@ -169,8 +169,8 @@ BEGIN
                 RAISE EXCEPTION 'from-block/to-block may span at most % blocks (about six months); this range spans % blocks',
                       __max_span, __span;
             END IF;
-            PERFORM hivesense_app.window_post_bounds(__first_block, __last_block);
         END IF;
+        PERFORM hivesense_app.window_post_bounds(__first_block, __last_block);
     END IF;
 
     /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
