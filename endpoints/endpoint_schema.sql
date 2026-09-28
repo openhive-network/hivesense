@@ -149,7 +149,7 @@ DO $__$
               "type": "string",
               "default": null
             },
-            "description": "Only return posts created at or after this point, given as in the other HAF APIs:\na block number, or a timestamp in the format YYYY-MM-DD HH:MI:SS, which is converted\nto the first block created at or after it. It is the block that created the post,\nnot the block of its last edit.\n\nWithin the range the ranking is exact across all embedded posts rather than\napproximate. Without `author`, the range may span at most 5270400 blocks (about\nsix months), measured to the newest block when `to-block` is omitted; a missing\n`from-block` means genesis, so `to-block` alone is only accepted early in the\nchain. The range, padded by about 10000 blocks on each side, may also hold at\nmost a server-configured number of embedded post chunks (300000 by default,\nenough for the latest six months but only about ten days of 2018). A larger or\ndenser range is an error, so narrow it. With `author`, neither limit applies.\nCombines with `observer`.\n\n* `2026-09-01 00:00:00`\n\n* `109000000`\n"
+            "description": "Only return posts created at or after this point, given as in the other HAF APIs:\na block number, or a timestamp in the format YYYY-MM-DD HH:MI:SS, which is converted\nto the first block created at or after it. It is the block that created the post,\nnot the block of its last edit.\n\nWithin the range the ranking is exact across all embedded posts rather than\napproximate. Without `author`, the range may span at most 5270400 blocks (about\nsix months), measured to the last block hivesense has processed when `to-block` is\nomitted; a missing `from-block` means genesis, so `to-block` alone is only\naccepted early in the chain. The range, padded by just over 10000 blocks on each side, may also hold at\nmost a server-configured number of embedded post chunks (300000 by default,\nenough for the latest six months but only about ten days of 2018). A larger or\ndenser range is an error, so narrow it. With `author`, neither limit applies.\nCombines with `observer`.\n\n* `2026-09-01 00:00:00`\n\n* `109000000`\n"
           },
           {
             "in": "query",
@@ -159,7 +159,7 @@ DO $__$
               "type": "string",
               "default": null
             },
-            "description": "Only return posts created at or before this point: a block number (inclusive), or a\ntimestamp in the format YYYY-MM-DD HH:MI:SS, which HAF converts to the last block\ncreated before it (a block created exactly at that second is not included).\nWithout it the range runs to the newest post.\n"
+            "description": "Only return posts created at or before this point: a block number (inclusive), or a\ntimestamp in the format YYYY-MM-DD HH:MI:SS, which HAF converts to the last block\ncreated before it (a block created exactly at that second is not included).\nWithout it, or with a timestamp after the newest block, the range runs to the\nnewest post.\n"
           }
         ],
         "responses": {
