@@ -17,6 +17,8 @@ if [ "$1" = "install_app" ]; then
   exec /app/scripts/install_app.sh --host="${POSTGRES_HOST:-haf}" "$@"
 elif [ "$1" = "process_blocks" ]; then
   shift
+  # read by /app/block-processing-healthcheck.sh
+  date -u -Iseconds > /tmp/block_processing_startup_time.txt
   exec /app/scripts/process_blocks.sh --host="${POSTGRES_HOST:-haf}" "$@"
 elif [ "$1" = "uninstall_app" ]; then
   shift

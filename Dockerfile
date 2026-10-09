@@ -68,5 +68,6 @@ COPY --chown=hived:users scripts/matrix_handler.sh /app/scripts/matrix_handler.s
 COPY --chown=hived:users db /app/db
 COPY --chown=hived:users --from=version-injection /tmp/src/endpoints /app/endpoints
 COPY docker/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY docker/scripts/block-processing-healthcheck.sh /app/block-processing-healthcheck.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
