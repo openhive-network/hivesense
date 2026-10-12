@@ -1,33 +1,58 @@
 #!/usr/bin/env bash
-# Build (and with --push, publish) the test runtime image of .aidev/runtime/Dockerfile
-# and print the digest-pinned reference to put in .aidev/project.yaml's
-# `environment.image`. See .aidev/README.md.
+# Build (and with --push, publish) one of the AIDEV images of .aidev/runtime/ and
+# print the digest-pinned reference to put where it is used. See .aidev/README.md.
 #
-# The tag is `aidev-<hash>`, the hash of the image input (the Dockerfile; every
-# FROM is digest-pinned); the registry cleanup policy keeps `aidev-*` tags. When
-# <repository>:aidev-<hash> is already in the registry nothing is built: the script
-# prints that image's digest.
+#   --image=tests   (default) .aidev/runtime/Dockerfile -> hive/hivesense/aidev-tests,
+#                   the test runtime: .aidev/project.yaml's `environment.image`
+#   --image=ollama  .aidev/runtime/ollama.Dockerfile -> hive/hivesense/aidev-ollama,
+#                   the embedding server: .aidev/test-stack.compose.yml's `ollama`
 #
-#   .aidev/runtime/build.sh           # registry digest, or build locally and print the local tag
-#   .aidev/runtime/build.sh --push    # registry digest, or build + push and print repo@sha256:<digest>
-#   .aidev/runtime/build.sh --tag     # print the input-hash tag only
+# The tag is `aidev-<hash>`, the hash of the image input (its Dockerfile; every
+# FROM and ADD is digest- or checksum-pinned); the registry cleanup policy keeps
+# `aidev-*` tags. When <repository>:aidev-<hash> is already in the registry nothing
+# is built: the script prints that image's digest.
+#
+#   .aidev/runtime/build.sh [--image=NAME]          # registry digest, or build locally and print the local tag
+#   .aidev/runtime/build.sh [--image=NAME] --push   # registry digest, or build + push and print repo@sha256:<digest>
+#   .aidev/runtime/build.sh [--image=NAME] --tag    # print the input-hash tag only
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-REPOSITORY="${AIDEV_RUNTIME_REPOSITORY:-registry.gitlab.syncad.com/hive/hivesense/aidev-tests}"
+usage() {
+    echo "usage: $0 [--image=tests|--image=ollama] [--push|--tag]" >&2
+    exit 2
+}
+
+image=tests mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --image=*) image="${arg#*=}" ;;
+        --push|--tag) mode="$arg" ;;
+        *) usage ;;
+    esac
+done
+
+case "$image" in
+    tests)
+        DOCKERFILE=.aidev/runtime/Dockerfile
+        REPOSITORY="${AIDEV_RUNTIME_REPOSITORY:-registry.gitlab.syncad.com/hive/hivesense/aidev-tests}" ;;
+    ollama)
+        DOCKERFILE=.aidev/runtime/ollama.Dockerfile
+        REPOSITORY="${AIDEV_OLLAMA_REPOSITORY:-registry.gitlab.syncad.com/hive/hivesense/aidev-ollama}" ;;
+    *) usage ;;
+esac
 
 # The Dockerfile copies nothing from the tree: it is the only input.
 input_hash() {
-    sha256sum .aidev/runtime/Dockerfile | sha256sum | cut -c1-16
+    sha256sum "$DOCKERFILE" | sha256sum | cut -c1-16
 }
 TAG="aidev-$(input_hash)"
 
-case "${1:-}" in
-    --tag) echo "$TAG"; exit 0 ;;
-    ""|--push) ;;
-    *) echo "usage: $0 [--push|--tag]" >&2; exit 2 ;;
-esac
+if [ "$mode" = "--tag" ]; then
+    echo "$TAG"
+    exit 0
+fi
 
 # Digest of <repository>:<tag> in the registry, empty when the tag doesn't exist.
 registry_digest() {
@@ -83,8 +108,8 @@ builder="$(region_builder)"
 
 # The FROM is digest-pinned, so no --pull. No provenance, so the pushed digest is a
 # plain image manifest.
-build=(docker buildx build ${builder:+--builder "$builder"} --provenance=false -f .aidev/runtime/Dockerfile -t "$REPOSITORY:$TAG")
-if [ "${1:-}" != "--push" ]; then
+build=(docker buildx build ${builder:+--builder "$builder"} --provenance=false -f "$DOCKERFILE" -t "$REPOSITORY:$TAG")
+if [ "$mode" != "--push" ]; then
     "${build[@]}" --load "$context" >&2
     echo "$REPOSITORY:$TAG"
     exit 0

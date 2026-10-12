@@ -3,17 +3,26 @@
 # as hive/HAfAH's and hive/hivemind's AIDEV stacks run it, with hivesense's
 # dependencies installed into it by one-shot services in the order the CI stack
 # (docker/ci/compose.yml) installs them: HAfAH and reputation_tracker, then
-# hivemind's schema. Nothing is replayed or synced; hivemind's tables are empty.
+# hivemind's schema. Nothing is replayed or synced; hivemind's tables are empty
+# until the `embed-search` check seeds a few posts (.aidev/seed_posts.sql).
+#
+# `ollama` is the embedding server, CI's CPU Ollama (docker/ci/compose.yml
+# `hivesense-ollama`) with CI's model all-minilm:l6-v2 baked in, so nothing is
+# pulled at run time. `tokenizer-copy` copies that model's tokenizer.json from the
+# same image into the `tokenizer-files` volume, which `haf` mounts where hivesense's
+# chunker reads it (db/posts_preprocessing.sql).
 #
 # The checks run in the runtime image (.aidev/runtime/), join this stack's
 # network, reach the database as `haf`, and install the candidate's own SQL, so no
 # hivesense image is built per change. `ready` turns healthy once hivemind's
-# install has completed, which is what `docker compose up --wait` waits for.
+# install has completed and `ollama` serves the model, which is what
+# `docker compose up --wait` waits for.
 #
 # Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH 1.28.8-rc3
 # (hive/haf/testnet:8de693b2); hafah, reputation_tracker and hivemind are their
 # 1.28.8-rc3 release images. Re-pin them together when UPSTREAM_BRANCH moves
-# (.aidev/README.md).
+# (.aidev/README.md). The ollama image is built from .aidev/runtime/ollama.Dockerfile
+# by .aidev/runtime/build.sh --image=ollama.
 x-haf-client: &haf-client
   depends_on:
     haf:
@@ -23,6 +32,11 @@ services:
   haf:
     image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
     command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
+    volumes:
+      - tokenizer-files:/home/hived/tokenizer-files:ro
+    depends_on:
+      tokenizer-copy:
+        condition: service_completed_successfully
     environment:
       PGCTLTIMEOUT: "600"
       # Every role from anywhere on the stack network. Test-grade: the database
@@ -35,6 +49,21 @@ services:
       timeout: 5s
       retries: 60
       start_period: 30s
+
+  ollama:
+    image: &ollama-image registry.gitlab.syncad.com/hive/hivesense/aidev-ollama@sha256:302263124a292b12ce79224a4136ce60e12ef23f7e3b7c0f748cf5a25ca0d693
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q all-minilm:l6-v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  tokenizer-copy:
+    image: *ollama-image
+    entrypoint: ["cp", "-a", "/tokenizer-files/.", "/out/"]
+    volumes:
+      - tokenizer-files:/out
 
   # An empty HAF that hived never connected to has no hafd.hive_state row, and
   # reputation_tracker's install then fails on a missing hive_rowid (hive/haf#354);
@@ -82,3 +111,8 @@ services:
     depends_on:
       hivemind-install:
         condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+
+volumes:
+  tokenizer-files:
