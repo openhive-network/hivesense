@@ -708,10 +708,10 @@ BEGIN
      ORDER BY chunk_number
      LIMIT 1;
 
+    -- Short and not-yet-processed posts have no embedding; that is a normal
+    -- state, so answer with no similar posts rather than an error.
     IF __post_embedding IS NULL THEN
-        RAISE EXCEPTION
-          'Post @%/% has no stored embedding (too short or not yet processed)',
-          _author, _permlink;
+        RETURN;
     END IF;
 
     RETURN QUERY
