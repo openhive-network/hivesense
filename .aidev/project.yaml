@@ -1,0 +1,94 @@
+# Profile for hive/hivesense, written by `aidev project scaffold` (#13561).
+#
+# Schema reference: docs/architecture/project-profile.md
+# Onboarding procedure: the `onboard-external-project` skill.
+# Guide: docs/operations/onboarding-an-external-project.md
+#
+# The generator writes a starting point, not a governed answer: every
+# binding below is the command a maintainer said this project runs, and it
+# is reviewed and edited like any other declaration.
+version: 2
+project: hivesense
+
+gitlab:
+  host: "gitlab.syncad.com"
+  path: "hive/hivesense"
+  id: 506
+
+# AIDEV integrates into its own branch; people merge it into develop through
+# merge requests (as in hive/HAfAH, hive/haf and hive/hivemind), so `stable` is
+# omitted and `aidev release` never moves develop or master.
+branches:
+  integration: "aidev/integration"
+
+# How this project's suites execute (#13892): one kind, stated once.
+environment:
+  kind: "container"
+  # Built by .aidev/runtime/build.sh from .aidev/runtime/Dockerfile (its only input).
+  image: "registry.gitlab.syncad.com/hive/hivesense/aidev-tests@sha256:666b19bd46c05aad9ca6c8e74b584b167e0c8f82564943f242a98716072ec5c9"
+  inputs: [".aidev/runtime/Dockerfile"]
+
+issues:
+  intake_label: todo
+  taxonomy: ".aidev/labels.yaml"
+  decompose:
+    # `never` is where an external project starts: nothing marks work
+    # approved on this project's behalf until there is a track record.
+    auto_todo: never
+  # Reports about this project's work are filed against this project.
+  watcher_reports: self
+
+# The service stack the slots that install hivesense start (aidev#9890): one empty
+# HAF testnet database with HAfAH, reputation_tracker and hivemind installed by
+# one-shot services, as docker/ci/compose.yml installs them, and nothing synced.
+# The runtime container joins its network and reaches it as `haf`; the candidate's
+# own SQL is installed into it by .aidev/run-checks.sh, so no hivesense image is
+# built. Slots that only lint say `stack: false`. See .aidev/README.md.
+sandbox:
+  compose: .aidev/test-stack.compose.yml
+  # One idle PostgreSQL 18 plus the install one-shots; nothing replayed.
+  resource_class: light
+  services: [haf, haf-init, hafah-install, reputation-tracker-install, hivemind-install, ready]
+  readiness_timeout: 600
+  env:
+    HIVESENSE_TEST_DB_HOST: haf
+
+# Verification slots. Each binding is what this project genuinely runs for
+# that slot — never one selection repeated under seven names, which makes
+# seven gates report on the same evidence while claiming to check seven
+# different things.
+#
+# Lightweight first: lint (CI's shellcheck and sqlfluff), the python unit tests,
+# then install / reinstall of the candidate's SQL into the stack and a PostgREST
+# smoke test. CI's `sync` job (a 1M-block HAF replay, hivemind sync and Ollama
+# embeddings in three configurations), the benchmarks and the AI effectiveness
+# tests are not bound; see .aidev/README.md.
+verification:
+  quick:
+    adapter: command
+    args: [".aidev/run-checks.sh", "quick", "shellcheck", "sqlfluff", "unit", "sql-registered"]
+    stack: false
+    artifacts: ["test-results/quick/"]
+  full:
+    adapter: command
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "api-smoke"]
+    artifacts: ["test-results/full/"]
+  baseline:
+    adapter: command
+    args: [".aidev/run-checks.sh", "baseline", "install", "reinstall", "api-smoke"]
+    artifacts: ["test-results/baseline/"]
+  canary:
+    adapter: command
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "api-smoke"]
+    artifacts: ["test-results/canary/"]
+  # There is no coverage measurement for SQL; `coverage` runs the stackless checks
+  # (AIDEV runs it in the post-implementation scan only). `static` and `system`
+  # are left unbound: AIDEV runs neither for a project.
+  coverage:
+    adapter: command
+    args: [".aidev/run-checks.sh", "coverage", "unit", "sql-registered"]
+    stack: false
+    artifacts: ["test-results/coverage/"]
+
+# Capability grants for target-side code. Empty until this project needs one.
+capabilities: []

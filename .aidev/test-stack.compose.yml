@@ -1,0 +1,84 @@
+# The service stack AIDEV starts for the slots that install hivesense (every suite
+# in .aidev/project.yaml without `stack: false`): one empty HAF testnet database,
+# as hive/HAfAH's and hive/hivemind's AIDEV stacks run it, with hivesense's
+# dependencies installed into it by one-shot services in the order the CI stack
+# (docker/ci/compose.yml) installs them: HAfAH and reputation_tracker, then
+# hivemind's schema. Nothing is replayed or synced; hivemind's tables are empty.
+#
+# The checks run in the runtime image (.aidev/runtime/), join this stack's
+# network, reach the database as `haf`, and install the candidate's own SQL, so no
+# hivesense image is built per change. `ready` turns healthy once hivemind's
+# install has completed, which is what `docker compose up --wait` waits for.
+#
+# Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH 1.28.8-rc3
+# (hive/haf/testnet:8de693b2); hafah, reputation_tracker and hivemind are their
+# 1.28.8-rc3 release images. Re-pin them together when UPSTREAM_BRANCH moves
+# (.aidev/README.md).
+x-haf-client: &haf-client
+  depends_on:
+    haf:
+      condition: service_healthy
+
+services:
+  haf:
+    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
+    environment:
+      PGCTLTIMEOUT: "600"
+      # Every role from anywhere on the stack network. Test-grade: the database
+      # is throwaway and reachable only on the stack's own network.
+      PG_ACCESS: |
+        "host    all              all              0.0.0.0/0    trust"
+    healthcheck:
+      test: ["CMD-SHELL", "psql -h 127.0.0.1 -U haf_admin -d haf_block_log -Atc \"select 1 from pg_extension where extname = 'hive_fork_manager'\" | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # An empty HAF that hived never connected to has no hafd.hive_state row, and
+  # reputation_tracker's install then fails on a missing hive_rowid (hive/haf#354);
+  # this is what hived does when it connects.
+  haf-init:
+    <<: *haf-client
+    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    entrypoint: ["/usr/lib/postgresql/18/bin/psql", "postgresql://haf_admin@haf/haf_block_log", "-v", "ON_ERROR_STOP=on", "-c", "select hive.initialize_extension_data()"]
+
+  hafah-install:
+    image: registry.gitlab.syncad.com/hive/hafah@sha256:6c180ce9cb37671f1639776c9fb1829c33c34bae31f31884f3b14c5af9105997
+    environment:
+      POSTGRES_URL: postgresql://haf_admin@haf/haf_block_log
+    command: ["install_app", "--swagger-url=localhost"]
+    depends_on:
+      haf-init:
+        condition: service_completed_successfully
+
+  reputation-tracker-install:
+    image: registry.gitlab.syncad.com/hive/reputation_tracker@sha256:ccfaf79a072bece9eb036f83be012f6fa7129280197f2c81880a3b3e108b6d58
+    environment:
+      POSTGRES_HOST: haf
+    command: ["install_app", "--swagger-url=localhost", "--is_forking=TRUE"]
+    depends_on:
+      haf-init:
+        condition: service_completed_successfully
+
+  hivemind-install:
+    image: registry.gitlab.syncad.com/hive/hivemind@sha256:4b05d408775e8c38b6b86b4dacc7f5acac1bb8972545c83980cf5efa3bfcfd64
+    command: ["setup", "--database-admin-url=postgresql://haf_admin@haf/haf_block_log", "--statement-timeout=5000", "--swagger-url=localhost"]
+    depends_on:
+      hafah-install:
+        condition: service_completed_successfully
+      reputation-tracker-install:
+        condition: service_completed_successfully
+
+  ready:
+    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    entrypoint: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/lib/postgresql/18/bin/psql postgresql://haf_admin@haf/haf_block_log -Atc \"select 1 from pg_namespace where nspname = 'hivemind_endpoints'\" | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+    depends_on:
+      hivemind-install:
+        condition: service_completed_successfully
