@@ -40,15 +40,18 @@ issues:
 
 # The service stack the slots that install hivesense start (aidev#9890): one empty
 # HAF testnet database with HAfAH, reputation_tracker and hivemind installed by
-# one-shot services, as docker/ci/compose.yml installs them, and nothing synced.
+# one-shot services, as docker/ci/compose.yml installs them, and nothing synced;
+# plus CI's CPU Ollama with CI's model baked in (`ollama`) and the one-shot that
+# puts that model's tokenizer into the HAF container (`tokenizer-copy`).
 # The runtime container joins its network and reaches it as `haf`; the candidate's
 # own SQL is installed into it by .aidev/run-checks.sh, so no hivesense image is
 # built. Slots that only lint say `stack: false`. See .aidev/README.md.
 sandbox:
   compose: .aidev/test-stack.compose.yml
-  # One idle PostgreSQL 18 plus the install one-shots; nothing replayed.
+  # One idle PostgreSQL 18, the install one-shots and a small CPU embedding model;
+  # nothing replayed.
   resource_class: light
-  services: [haf, haf-init, hafah-install, reputation-tracker-install, hivemind-install, ready]
+  services: [haf, haf-init, hafah-install, reputation-tracker-install, hivemind-install, ollama, tokenizer-copy, ready]
   readiness_timeout: 600
   env:
     HIVESENSE_TEST_DB_HOST: haf
@@ -59,10 +62,11 @@ sandbox:
 # different things.
 #
 # Lightweight first: lint (CI's shellcheck and sqlfluff), the python unit tests,
-# then install / reinstall of the candidate's SQL into the stack and a PostgREST
-# smoke test. CI's `sync` job (a 1M-block HAF replay, hivemind sync and Ollama
-# embeddings in three configurations), the benchmarks and the AI effectiveness
-# tests are not bound; see .aidev/README.md.
+# then install / reinstall of the candidate's SQL into the stack, embedding a few
+# seeded posts with CI's model and checking the search endpoints on them, and a
+# PostgREST smoke test. CI's `sync` job (a 1M-block HAF replay, hivemind sync and
+# Ollama embeddings in three configurations), the benchmarks and the AI
+# effectiveness tests are not bound; see .aidev/README.md.
 verification:
   quick:
     adapter: command
@@ -71,15 +75,15 @@ verification:
     artifacts: ["test-results/quick/"]
   full:
     adapter: command
-    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "api-smoke"]
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "embed-search", "api-smoke"]
     artifacts: ["test-results/full/"]
   baseline:
     adapter: command
-    args: [".aidev/run-checks.sh", "baseline", "install", "reinstall", "api-smoke"]
+    args: [".aidev/run-checks.sh", "baseline", "install", "reinstall", "embed-search", "api-smoke"]
     artifacts: ["test-results/baseline/"]
   canary:
     adapter: command
-    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "api-smoke"]
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "embed-search", "api-smoke"]
     artifacts: ["test-results/canary/"]
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # (AIDEV runs it in the post-implementation scan only). `static` and `system`
