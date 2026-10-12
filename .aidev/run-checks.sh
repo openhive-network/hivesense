@@ -129,25 +129,52 @@ reinstall() {
 # the token threshold.
 SEEDED_POSTS="{900101,900102,900103,900104,900105}"
 EMBEDDED_POSTS="900101,900102,900103,900105"
+OLLAMA_URL="http://ollama:11434"
+EMBEDDING_MODEL="all-minilm:l6-v2"
+
+# The runtime image has no curl. Without this, a dead server only shows as the
+# sync path's unbounded retries in generate_embeddings_for_posts.
+probe_embedding_server() {
+    python3 - "$OLLAMA_URL" "$EMBEDDING_MODEL" <<'PY'
+import json, sys, urllib.error, urllib.request
+url, model = sys.argv[1:]
+try:
+    with urllib.request.urlopen(url + "/api/tags", timeout=10) as resp:
+        names = [m.get("name") for m in json.load(resp).get("models", [])]
+except (urllib.error.URLError, OSError, ValueError) as e:
+    sys.exit(f"embedding server {url} did not answer: {e}")
+if model not in names:
+    sys.exit(f"embedding server {url} did not answer with {model}: it serves {names}")
+print(f"embedding server {url} serves {model}")
+PY
+}
 
 embed_seeded_posts() {
     local ids got
+    probe_embedding_server || return 1
     # CI's embedding configuration (docker/ci/compose.yml hivesense-install-schema)
     # except the token threshold. all-MiniLM-L6-v2's tokenizer.json pads every
     # encode to 128 tokens and chunk_post counts per sentence, so no post counts
     # below CI's 75. 200 lies above a one-sentence post (128 padded, ~13 unpadded)
     # and below the long seeded posts (>= 2048 padded, >= 253 unpadded).
-    reinstall --llm=all-minilm:l6-v2 --vector_size=384 --tokenizer-model=all-MiniLM-L6-v2 \
-        --ollama=http://ollama:11434 --document-prefix= --query-prefix= --min-token-threshold=200 || return 1
+    reinstall --llm="$EMBEDDING_MODEL" --vector_size=384 --tokenizer-model=all-MiniLM-L6-v2 \
+        --ollama="$OLLAMA_URL" --document-prefix= --query-prefix= --min-token-threshold=200 || return 1
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f .aidev/seed_posts.sql || return 1
     ids="$(psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atc "select hivesense_app.posts_in_range(101, 105)")" || return 1
     if [ "$ids" != "$SEEDED_POSTS" ]; then
         echo "posts_in_range(101, 105) = $ids, expected the seeded posts $SEEDED_POSTS"
         return 1
     fi
+    # The sync path retries a dead embedding server forever (ollama_embed with
+    # max_retries => NULL). PL/Python only sees the cancel at its next retry
+    # notice, so the step can end up to one retry cycle after the timeout.
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on \
+        -c "set statement_timeout = '120s'" \
         -c "select * from hivesense_app.generate_embeddings_for_posts('$ids'::int[], false, 0)" \
-        -c "select hivesense_app.publish_visible_sync_seq()" || return 1
+        -c "select hivesense_app.publish_visible_sync_seq()" || {
+        echo "embedding the seeded posts failed or hit the 120s statement_timeout: is the embedding server $OLLAMA_URL answering?"
+        return 1
+    }
     # Posts with a non-zero 384-dim embedding: every long seeded post, not the short one.
     got="$(psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atc "
         select string_agg(post_id::text, ',' order by post_id) from (
