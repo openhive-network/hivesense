@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Serve the installed hivesense schema with PostgREST and check its API answers.
 
-    hivesense_smoke.py OUT_DIR
+    hivesense_smoke.py OUT_DIR [api-smoke|embed-search]
 
 Starts `postgrest` the way docker/ci/compose.yml's hivesense-postgrest service does
 (schema hivesense_endpoints, anonymous role hivesense_user, root spec `root`, extra
 search path hivesense_app) on a free loopback port, against HIVESENSE_TEST_USER_URL,
-then makes the calls in CHECKS. The database is an empty HAF testnet one with an
-empty hivemind and no embeddings, and the stack has no Ollama, so every check
-asserts the shape that state answers with; the text-search endpoints, which embed
-the query through Ollama, are not called.
+then makes the calls of one check set:
 
-Writes OUT_DIR/api-smoke.xml (one junit case per call) and exits non-zero when
-any call fails. To check another endpoint, add it to CHECKS.
+  - api-smoke (default): CHECKS, against a fresh installation with no embeddings;
+    every check asserts the shape that state answers with.
+  - embed-search: EMBEDDED_CHECKS, after .aidev/run-checks.sh has embedded the posts
+    of .aidev/seed_posts.sql through the stack's Ollama; the checks assert rank
+    order (never a similarity value) of the search endpoints, which embed the query.
+
+Writes OUT_DIR/<check set>.xml (one junit case per call) and exits non-zero when
+any call fails. To check another endpoint, add it to the check set.
 """
 import json
 import os
@@ -77,6 +80,77 @@ CHECKS = [
 ]
 
 
+# The posts of .aidev/seed_posts.sql, as (author, permlink).
+WITNESS = ("aidev-witness", "why-your-witness-votes-matter")
+HIKING = ("aidev-hiker", "three-days-on-the-alpine-ridge")
+SAUCE = ("aidev-chef", "slow-simmered-tomato-sauce-for-pasta")
+SHORT = ("aidev-shorty", "back-from-the-market")  # below the token threshold
+PASTA = ("aidev-cook", "fresh-egg-pasta-with-tomato-basil-sauce")
+EMBEDDED = {WITNESS, HIKING, SAUCE, PASTA}
+EMBEDDING_DIMS = 384
+
+
+def search(endpoint, **params):
+    # full_posts=0: every result is an {author, permlink} stub
+    return get(f"/rpc/{endpoint}?" + urllib.parse.urlencode(dict(params, full_posts=0, result_limit=10)))
+
+
+def similar_to(post):
+    return search("posts_similar", author=post[0], permlink=post[1])
+
+
+def ranked(first, rest):
+    """The results are exactly `first` (in any order) followed by exactly `rest`."""
+    def check(status, body) -> None:
+        assert status == 200, f"HTTP {status}"
+        assert isinstance(body, list), f"expected a list, got {body!r}"
+        posts = [(row.get("author"), row.get("permlink")) for row in body]
+        assert len(posts) == len(set(posts)), f"duplicate results: {posts}"
+        assert set(posts[:len(first)]) == set(first), f"expected {sorted(first)} first, got {posts}"
+        assert set(posts[len(first):]) == set(rest), f"expected {sorted(rest)} after them, got {posts}"
+    return check
+
+
+def authors_first(author):
+    def check(status, body) -> None:
+        assert status == 200, f"HTTP {status}"
+        assert isinstance(body, list) and body, f"expected a non-empty list, got {body!r}"
+        assert body[0] == author, f"expected {author} first, got {body}"
+    return check
+
+
+def one_upsert_per_embedded_post(status, body) -> None:
+    assert status == 200, f"HTTP {status}"
+    assert isinstance(body, list), f"expected a list, got {body!r}"
+    upserts = [op for op in body if op.get("op") in ("insert", "update")]
+    posts = sorted((op["author"], op["permlink"]) for op in upserts)
+    assert posts == sorted(EMBEDDED), f"expected one insert/update for each of {sorted(EMBEDDED)}, got {posts}"
+    for op in upserts:
+        dims = [len(embedding) for embedding in op.get("embeddings") or []]
+        assert dims and set(dims) == {EMBEDDING_DIMS}, f"{op['author']}/{op['permlink']}: embedding sizes {dims}"
+    others = [op for op in body if op not in upserts]
+    assert all(op.get("op") == "delete" and not op.get("embeddings") for op in others), f"unexpected operations: {others}"
+
+
+EMBEDDED_CHECKS = [
+    ("posts_search.pasta", search("posts_search", q="a recipe for cooking pasta with homemade tomato sauce"),
+     ranked([SAUCE, PASTA], [WITNESS, HIKING])),
+    ("posts_search.hiking", search("posts_search", q="hiking a mountain trail to the summit"),
+     ranked([HIKING], [WITNESS, SAUCE, PASTA])),
+    ("posts_search.witness", search("posts_search", q="voting for witnesses who produce blocks on the blockchain"),
+     ranked([WITNESS], [HIKING, SAUCE, PASTA])),
+    ("posts_similar.sauce", similar_to(SAUCE), ranked([PASTA], [WITNESS, HIKING])),
+    # A post with no embedding (below the token threshold) has no similar posts (#60).
+    ("posts_similar.unembedded", similar_to(SHORT), http_is([])),
+    ("authors_search.hiking", get("/rpc/authors_search?" + urllib.parse.urlencode({"topic": "mountain hiking and trekking"})),
+     authors_first(HIKING[0])),
+    ("embedding_updates", get("/rpc/embedding_updates?after_seq=0&page_size=100&sync_uuid={sync_uuid}"),
+     one_upsert_per_embedded_post),
+]
+
+CHECK_SETS = {"api-smoke": CHECKS, "embed-search": EMBEDDED_CHECKS}
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -113,7 +187,8 @@ def wait_until_serving(base, proc, log_path):
     raise RuntimeError(f"postgrest not serving after {STARTUP_TIMEOUT_S}s; see {log_path}")
 
 
-def main(out):
+def main(out, check_set):
+    checks = CHECK_SETS[check_set]
     os.makedirs(out, exist_ok=True)
     port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -126,7 +201,7 @@ def main(out):
                PGRST_DB_EXTRA_SEARCH_PATH="hivesense_app",
                PGRST_SERVER_HOST="127.0.0.1",
                PGRST_SERVER_PORT=str(port))
-    cases = os.path.join(out, "api-smoke.tsv")
+    cases = os.path.join(out, f"{check_set}.tsv")
     failed = 0
     with open(log_path, "w") as log, open(cases, "w") as tsv:
         proc = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -134,7 +209,7 @@ def main(out):
             wait_until_serving(base, proc, log_path)
             settings = call(base, get("/rpc/get_sync_settings"))[1]
             sync_uuid = settings.get("sync_uuid") if isinstance(settings, dict) else None
-            for name, (method, path, payload), check in CHECKS:
+            for name, (method, path, payload), check in checks:
                 request = (method, path.replace("{sync_uuid}", str(sync_uuid)), payload)
                 t0 = time.monotonic()
                 status, body, text = call(base, request)
@@ -153,12 +228,13 @@ def main(out):
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-    subprocess.run([sys.executable, os.path.join(HERE, "junit_cases.py"), os.path.join(out, "api-smoke.xml"), "api-smoke", cases], check=True)
-    print(f"{len(CHECKS) - failed}/{len(CHECKS)} calls answered as expected")
+    subprocess.run([sys.executable, os.path.join(HERE, "junit_cases.py"), os.path.join(out, f"{check_set}.xml"), check_set, cases],
+                   check=True)
+    print(f"{len(checks) - failed}/{len(checks)} calls answered as expected")
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(f"usage: {sys.argv[0]} OUT_DIR")
-    sys.exit(main(sys.argv[1]))
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in CHECK_SETS):
+        sys.exit(f"usage: {sys.argv[0]} OUT_DIR [{'|'.join(CHECK_SETS)}]")
+    sys.exit(main(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else "api-smoke"))
