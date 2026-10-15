@@ -7,9 +7,10 @@
 # until the `embed-search` check seeds a few posts (.aidev/seed_posts.sql).
 #
 # `ollama` is the embedding server, CI's CPU Ollama (docker/ci/compose.yml
-# `hivesense-ollama`) with CI's model all-minilm:l6-v2 baked in, so nothing is
-# pulled at run time. `tokenizer-copy` copies that model's tokenizer.json from the
-# same image into the `tokenizer-files` volume, which `haf` mounts where hivesense's
+# `hivesense-ollama`) with CI's models baked in (all-minilm:l6-v2, and
+# mxbai-embed-xsmall-v1 for slice mode), so nothing is pulled at run time.
+# `tokenizer-copy` copies the MiniLM tokenizer.json both models use from the same
+# image into the `tokenizer-files` volume, which `haf` mounts where hivesense's
 # chunker reads it (db/posts_preprocessing.sql).
 #
 # The checks run in the runtime image (.aidev/runtime/), join this stack's
@@ -20,9 +21,14 @@
 #
 # Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH 1.28.8-rc3
 # (hive/haf/testnet:8de693b2); hafah, reputation_tracker and hivemind are their
-# 1.28.8-rc3 release images. Re-pin them together when UPSTREAM_BRANCH moves
+# 1.28.8-rc3 release images. Each is pinned as repo:tag@sha256:<digest> (docker uses
+# the digest; the tag is what the `stack-pins` check of .aidev/run-checks.sh reads),
+# and x-haf-upstream-branch records the HAF branch the HAF commit tag was resolved
+# for. Re-pin them together when .gitlab-ci.yml's UPSTREAM_BRANCH moves
 # (.aidev/README.md). The ollama image is built from .aidev/runtime/ollama.Dockerfile
 # by .aidev/runtime/build.sh --image=ollama.
+x-haf-upstream-branch: "1.28.8-rc3"
+
 x-haf-client: &haf-client
   depends_on:
     haf:
@@ -30,7 +36,7 @@ x-haf-client: &haf-client
 
 services:
   haf:
-    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:8de693b2@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
     command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
     volumes:
       - tokenizer-files:/home/hived/tokenizer-files:ro
@@ -51,7 +57,7 @@ services:
       start_period: 30s
 
   ollama:
-    image: &ollama-image registry.gitlab.syncad.com/hive/hivesense/aidev-ollama@sha256:302263124a292b12ce79224a4136ce60e12ef23f7e3b7c0f748cf5a25ca0d693
+    image: &ollama-image registry.gitlab.syncad.com/hive/hivesense/aidev-ollama@sha256:933e772d48d20452951670b45903b4ba782deadd55256bcdab98d12458590d88
     healthcheck:
       test: ["CMD-SHELL", "ollama list | grep -q all-minilm:l6-v2"]
       interval: 5s
@@ -70,11 +76,11 @@ services:
   # this is what hived does when it connects.
   haf-init:
     <<: *haf-client
-    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    image: *haf-image
     entrypoint: ["/usr/lib/postgresql/18/bin/psql", "postgresql://haf_admin@haf/haf_block_log", "-v", "ON_ERROR_STOP=on", "-c", "select hive.initialize_extension_data()"]
 
   hafah-install:
-    image: registry.gitlab.syncad.com/hive/hafah@sha256:6c180ce9cb37671f1639776c9fb1829c33c34bae31f31884f3b14c5af9105997
+    image: registry.gitlab.syncad.com/hive/hafah:1.28.8-rc3@sha256:6c180ce9cb37671f1639776c9fb1829c33c34bae31f31884f3b14c5af9105997
     environment:
       POSTGRES_URL: postgresql://haf_admin@haf/haf_block_log
     command: ["install_app", "--swagger-url=localhost"]
@@ -83,7 +89,7 @@ services:
         condition: service_completed_successfully
 
   reputation-tracker-install:
-    image: registry.gitlab.syncad.com/hive/reputation_tracker@sha256:ccfaf79a072bece9eb036f83be012f6fa7129280197f2c81880a3b3e108b6d58
+    image: registry.gitlab.syncad.com/hive/reputation_tracker:1.28.8-rc3@sha256:ccfaf79a072bece9eb036f83be012f6fa7129280197f2c81880a3b3e108b6d58
     environment:
       POSTGRES_HOST: haf
     command: ["install_app", "--swagger-url=localhost", "--is_forking=TRUE"]
@@ -92,7 +98,7 @@ services:
         condition: service_completed_successfully
 
   hivemind-install:
-    image: registry.gitlab.syncad.com/hive/hivemind@sha256:4b05d408775e8c38b6b86b4dacc7f5acac1bb8972545c83980cf5efa3bfcfd64
+    image: registry.gitlab.syncad.com/hive/hivemind:1.28.8-rc3@sha256:4b05d408775e8c38b6b86b4dacc7f5acac1bb8972545c83980cf5efa3bfcfd64
     command: ["setup", "--database-admin-url=postgresql://haf_admin@haf/haf_block_log", "--statement-timeout=5000", "--swagger-url=localhost"]
     depends_on:
       hafah-install:
@@ -101,7 +107,7 @@ services:
         condition: service_completed_successfully
 
   ready:
-    image: registry.gitlab.syncad.com/hive/haf/testnet@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    image: *haf-image
     entrypoint: ["sleep", "infinity"]
     healthcheck:
       test: ["CMD-SHELL", "/usr/lib/postgresql/18/bin/psql postgresql://haf_admin@haf/haf_block_log -Atc \"select 1 from pg_namespace where nspname = 'hivemind_endpoints'\" | grep -qx 1"]
