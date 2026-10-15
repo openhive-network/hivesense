@@ -25,7 +25,7 @@ branches:
 environment:
   kind: "container"
   # Built by .aidev/runtime/build.sh from .aidev/runtime/Dockerfile (its only input).
-  image: "registry.gitlab.syncad.com/hive/hivesense/aidev-tests@sha256:666b19bd46c05aad9ca6c8e74b584b167e0c8f82564943f242a98716072ec5c9"
+  image: "registry.gitlab.syncad.com/hive/hivesense/aidev-tests@sha256:087a3f859f6bd4e05e96b4017d7d8235f13d09806e4f09d8acacafad7bf2cfcb"
   inputs: [".aidev/runtime/Dockerfile"]
 
 issues:
@@ -62,20 +62,23 @@ sandbox:
 # different things.
 #
 # Lightweight first: lint (CI's shellcheck and sqlfluff), the python unit tests,
-# then install / reinstall of the candidate's SQL into the stack, embedding a few
-# seeded posts with CI's model and checking the search endpoints on them, and a
-# PostgREST smoke test. CI's `sync` job (a 1M-block HAF replay, hivemind sync and
-# Ollama embeddings in three configurations), the benchmarks and the AI
-# effectiveness tests are not bound; see .aidev/README.md.
+# the stack pins against CI's UPSTREAM_BRANCH, then install / reinstall of the
+# candidate's SQL into the stack (through the install-lock wrapper, plus CI's #54
+# events_id and lock-skip checks), embedding a few seeded posts with CI's models in
+# full, slice and PCA configurations and checking the HNSW index and the search
+# functions and endpoints on them, and a PostgREST smoke test. CI's `sync` job (a
+# 1M-block HAF replay, hivemind sync and block processing), the image builds, the
+# rebase rehearsal, the benchmarks and the AI effectiveness tests are not bound:
+# GitLab CI gates them before a merge into develop; see .aidev/README.md.
 verification:
   quick:
     adapter: command
-    args: [".aidev/run-checks.sh", "quick", "shellcheck", "sqlfluff", "unit", "sql-registered"]
+    args: [".aidev/run-checks.sh", "quick", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins"]
     stack: false
     artifacts: ["test-results/quick/"]
   full:
     adapter: command
-    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "embed-search", "api-smoke"]
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/full/"]
   baseline:
     adapter: command
@@ -83,7 +86,7 @@ verification:
     artifacts: ["test-results/baseline/"]
   canary:
     adapter: command
-    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "install", "reinstall", "embed-search", "api-smoke"]
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/canary/"]
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # (AIDEV runs it in the post-implementation scan only). `static` and `system`

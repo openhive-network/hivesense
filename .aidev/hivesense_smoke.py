@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Serve the installed hivesense schema with PostgREST and check its API answers.
 
-    hivesense_smoke.py OUT_DIR [api-smoke|embed-search]
+    hivesense_smoke.py OUT_DIR [api-smoke|embed-search|embed-slice|embed-pca]
 
 Starts `postgrest` the way docker/ci/compose.yml's hivesense-postgrest service does
 (schema hivesense_endpoints, anonymous role hivesense_user, root spec `root`, extra
@@ -13,6 +13,8 @@ then makes the calls of one check set:
   - embed-search: EMBEDDED_CHECKS, after .aidev/run-checks.sh has embedded the posts
     of .aidev/seed_posts.sql through the stack's Ollama; the checks assert rank
     order (never a similarity value) of the search endpoints, which embed the query.
+  - embed-slice, embed-pca: the same calls after the posts were embedded in slice
+    mode (CI's mxbai-embed-xsmall-v1) or PCA mode.
 
 Writes OUT_DIR/<check set>.xml (one junit case per call) and exits non-zero when
 any call fails. To check another endpoint, add it to the check set.
@@ -148,7 +150,11 @@ EMBEDDED_CHECKS = [
      one_upsert_per_embedded_post),
 ]
 
-CHECK_SETS = {"api-smoke": CHECKS, "embed-search": EMBEDDED_CHECKS}
+# embed-pca's ANN step runs on the reduced vectors and embed-slice's on the first
+# reduced_dims of the embedding, but both rerank by the full embedding and the
+# seeded corpus is far below the ANN candidate count: the full-mode ranks apply.
+CHECK_SETS = {"api-smoke": CHECKS, "embed-search": EMBEDDED_CHECKS,
+              "embed-slice": EMBEDDED_CHECKS, "embed-pca": EMBEDDED_CHECKS}
 
 
 def free_port():
