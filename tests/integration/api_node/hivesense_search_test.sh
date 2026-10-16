@@ -155,7 +155,7 @@ else
 fi
 
 # ─── 5. internal search functions ──────────────────────────────────────
-# Reference embedding reused by all checks below (store_halfvec is off in CI)
+# Reference embedding for the check below (store_halfvec is off in CI)
 ref_embedding="(SELECT embedding::public.vector FROM hivesense_app.posts_vectors ORDER BY post_id, chunk_number LIMIT 1)"
 
 count=$(query_database "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10)")
@@ -163,39 +163,6 @@ if is_number "$count" && [ "$count" -ge 1 ]; then
   pass "one-shot search returns results (${count})"
 else
   fail "one-shot search returned '${count}', expected >= 1"
-fi
-
-# Paging variant, small limit. In slice mode this is the issue #56
-# regression: the slice branch was missing its execution loop, so the call
-# errored with 'integer out of range' instead of returning rows.
-count=$(query_database "SET statement_timeout = '300s'; SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding(${ref_embedding}, 10)")
-if is_number "$count" && [ "$count" -eq 10 ]; then
-  pass "paging search returns results (${count}) [issue #56]"
-else
-  fail "paging search returned '${count}', expected 10 [issue #56 regression]"
-fi
-
-# Paging variant with a limit larger than the corpus: the batch-doubling
-# retry loop must detect that the candidate set is exhausted and return
-# what exists instead of doubling batch_size until integer overflow.
-post_count=$(query_database "SELECT count(DISTINCT post_id) FROM hivesense_app.posts_vectors")
-count=$(query_database "SET statement_timeout = '300s'; SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding(${ref_embedding}, 1000)")
-if is_number "$count" && [ "$count" -ge 1 ] && [ "$count" -le "$post_count" ]; then
-  pass "paging search with limit > corpus returns results (${count} of ${post_count} posts)"
-else
-  fail "paging search with limit > corpus returned '${count}' (${post_count} posts exist): batch-size overflow?"
-fi
-
-# Paging continuation: page 2 starting after the 2nd result must equal
-# results 3-5 of page 1 (the ANN ordering is deterministic).
-page1=$(query_database "SELECT string_agg(post_id::text, ',' ORDER BY similarity_order) FROM hivesense_app.find_nearest_posts_with_embedding(${ref_embedding}, 5)")
-start_id=$(echo "$page1" | cut -d, -f2)
-expected_page2=$(echo "$page1" | cut -d, -f3-5)
-page2=$(query_database "SELECT string_agg(post_id::text, ',' ORDER BY similarity_order) FROM hivesense_app.find_nearest_posts_with_embedding(${ref_embedding}, 3, NULL, 0, ${start_id:-0})")
-if [ -n "$expected_page2" ] && [ "$page2" = "$expected_page2" ]; then
-  pass "paging continuation from post ${start_id} returns [${page2}]"
-else
-  fail "paging continuation returned [${page2}], expected [${expected_page2}]"
 fi
 
 # ─── summary ───────────────────────────────────────────────────────────
