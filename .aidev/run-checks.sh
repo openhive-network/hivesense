@@ -567,8 +567,7 @@ embed_pca() {
     else
         echo "ok: posts with non-zero $PCA_DIM-dim reduced vectors: $got"
     fi
-    check_hnsw_index || rc=1
-    python3 .aidev/hivesense_smoke.py "$out" embed-pca || rc=1
+    search_checks embed-pca || rc=1
     return "$rc"
 }
 
