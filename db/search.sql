@@ -489,6 +489,8 @@ BEGIN
                       FROM ann
                       JOIN hivesense_app.posts_vectors pv
                         ON pv.post_id = ann.post_id
+                       AND pv.chunk_number = ann.chunk_number
+                     ORDER BY similarity, ann.post_id
                 $q$, dist_red, batch_size);
             ELSE
                 -- PCA: ANN on posts_vectors_reduced
@@ -513,6 +515,8 @@ BEGIN
                       FROM ann
                       JOIN hivesense_app.posts_vectors pv
                         ON pv.post_id = ann.post_id
+                       AND pv.chunk_number = ann.chunk_number
+                     ORDER BY similarity, ann.post_id
                 $q$, dist_red, batch_size);
             END IF;
 
