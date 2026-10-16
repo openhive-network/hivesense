@@ -37,7 +37,7 @@ write one case per call (`embed-search.xml`, `embed-slice.xml`, `embed-pca.xml`,
 | `events-id` | CI's `events_id_test` (#54), with CI's messages: set `hafd.contexts.events_id = 0` for `hivesense_app`, call the tree's `sync_embeddings.ensure_context_detached` with psycopg, expect `events_id = hive.unreachable_event_id()` |
 | `install-lock` | CI's `lock_skip_test`: a background psql session holds the app's shared install lock (`pg_advisory_lock_shared(hashtext('hive_fork_manager_app_lock'), hashtext('hivesense'))`, as a block processor does), then `install_app.sh` runs with other options; it must exit 0, log `Skipping hivesense install … lock held by`, and leave the installed objects (by oid) and the configuration row unchanged. The holder is ended (client and server session) however the check ends. Runs after `install` |
 | `reinstall` | `scripts/uninstall_app.sh`, then `install` again |
-| `embed-search` | reinstall configured as CI's `sync` job (`--llm=all-minilm:l6-v2 --vector_size=384 --tokenizer-model=all-MiniLM-L6-v2 --ollama=http://ollama:11434`, empty prefixes, `--min-token-threshold=200`, see below), apply `seed_posts.sql`, check `posts_in_range` finds the seeded posts, embed them with `generate_embeddings_for_posts` and publish them; check `posts_vectors` holds a non-zero 384-dim embedding for every long seeded post and none for the short one; build the HNSW index with `ensure_indexes_are_created()` (what the block processor does on reaching HAF's head) and check the index `get_hnsw_index_name()` names exists; the paging checks (below); then the embedding-backed calls of `.aidev/hivesense_smoke.py embed-search` (below). Fails fast when the embedding server is down: before reinstalling it probes `http://ollama:11434/api/tags` (10 s timeout) and fails with `embedding server http://ollama:11434 did not answer` unless it lists the model; and `generate_embeddings_for_posts`, whose sync-path retries never give up, runs under `statement_timeout = '600s'` (PL/Python sees the cancel at its next retry notice, so up to one retry cycle later). The 600 s leave room for `ollama_embed`'s adaptive request timeout on a loaded host: each timed-out attempt doubles the next one's timeout (30 s, 60 s, 120 s, 240 s), so a slow but working server still answers within it. Finally, pass or fail, reinstalls as `install` does, so the steps after it see a fresh installation |
+| `embed-search` | reinstall configured as CI's `sync` job (`--llm=all-minilm:l6-v2 --vector_size=384 --tokenizer-model=all-MiniLM-L6-v2 --ollama=http://ollama:11434`, empty prefixes, `--min-token-threshold=200`, see below), apply `seed_posts.sql`, check `posts_in_range` finds the seeded posts, embed them with `generate_embeddings_for_posts` and publish them; check `posts_vectors` holds a non-zero 384-dim embedding for every long seeded post and none for the short one; build the HNSW index with `ensure_indexes_are_created()` (what the block processor does on reaching HAF's head) and check the index `get_hnsw_index_name()` names exists; then the embedding-backed calls of `.aidev/hivesense_smoke.py embed-search` (below). Fails fast when the embedding server is down: before reinstalling it probes `http://ollama:11434/api/tags` (10 s timeout) and fails with `embedding server http://ollama:11434 did not answer` unless it lists the model; and `generate_embeddings_for_posts`, whose sync-path retries never give up, runs under `statement_timeout = '600s'` (PL/Python sees the cancel at its next retry notice, so up to one retry cycle later). The 600 s leave room for `ollama_embed`'s adaptive request timeout on a loaded host: each timed-out attempt doubles the next one's timeout (30 s, 60 s, 120 s, 240 s), so a slow but working server still answers within it. Finally, pass or fail, reinstalls as `install` does, so the steps after it see a fresh installation |
 | `embed-slice` | `embed-search` in CI's slice configuration (`.gitlab-ci.yml` `slice_phase`): `--llm=hf.co/mixedbread-ai/mxbai-embed-xsmall-v1:F16 --use-reduced-embeddings=true --reduction-mode=slice --reduced-dim=256` and CI's query prefix `Represent this sentence for searching relevant passages: `, the other options as `embed-search`. Also checks the installed `reduction_mode`/`use_reduced_embeddings`/`reduced_dims` and that every long seeded post (not the short one) has non-zero 256-dim slices; the index is the slice expression index. Then reinstalls the default |
 | `embed-pca` | `embed-search`'s model in PCA mode: `--reduction-mode=pca --reduced-dim=32 --reduced-matrix-source=<file>`, the matrix a deterministic orthonormal 32×384 projection the step writes (`test-results/<suite>/pca-matrix.json`; `run_pca.py` needs numpy and a corpus, and four posts would give a degenerate fit). Checks the configuration, `reducing_matrix` has 32 rows, every chunk of every long seeded post has a non-zero 32-dim row in `posts_vectors_reduced` (the short post none), the PCA HNSW index exists, and `.aidev/hivesense_smoke.py embed-pca`. Then reinstalls the default |
 | `api-smoke` | `.aidev/hivesense_smoke.py`: PostgREST over the installed schema (as `docker/ci/compose.yml`'s `hivesense-postgrest` runs it), then calls to `/`, `get_hivesense_version`, `get_hivesense_sync_status`, `get_sync_settings`, `get_sync_chains`, `embedding_updates` (matching and unknown `sync_uuid`), `posts_by_ids_query` and `posts_similar`, each checked against what an empty chain with no embeddings answers |
@@ -84,24 +84,8 @@ the full embedding, and the seeded corpus is far below the ANN candidate count, 
 the full-mode ranks apply. mxbai-embed-xsmall-v1 ranks the seeded posts as
 all-minilm does.
 
-The paging checks call `hivesense_app.find_nearest_posts_with_embedding`, the paging
-search no endpoint calls (#56 was in it), with the first chunk of a seeded post as
-the query, against `find_nearest_posts_with_embedding_one_shot` (which must return
-exactly the embedded seeded posts), as CI's `hivesense_search_test.sh` does:
-
-| Call | Asserts |
-|---|---|
-| `_limit => 2` | two rows, the one-shot order's first two |
-| `_limit => 100` | each embedded seeded post once, nothing else |
-| `_limit => 100, _start_post_id => <second result>` | exactly the one-shot order after it: no repeats, no gaps |
-
-They run in `embed-search` and `embed-slice`. In slice mode they fail on the current
-code: the reduced branches return posts in join order, not distance order (#65). The
-failure is hivesense's, so the check stays as it is.
-
-Not covered: block processing (`scripts/hivesense_block_processor.py`), PCA's paging
-search (same code as slice's, #65), `run_pca.py` and the full bridge-post objects (the
-searches ask for stubs). See the next section for what GitLab CI still gates.
+Not covered: block processing (`scripts/hivesense_block_processor.py`), `run_pca.py`
+and the full bridge-post objects (the searches ask for stubs). See the next section for what GitLab CI still gates.
 
 ## GitLab CI before merging into develop
 

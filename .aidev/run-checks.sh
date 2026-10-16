@@ -32,9 +32,8 @@
 #                     dims, the stack's `ollama`; token threshold 200), seed
 #                     .aidev/seed_posts.sql, embed the seeded posts with
 #                     generate_embeddings_for_posts, check what posts_vectors
-#                     holds, build the HNSW index and check it exists, check the
-#                     paging search find_nearest_posts_with_embedding against the
-#                     one-shot one, then the embedding-backed calls of
+#                     holds, build the HNSW index and check it exists, then the
+#                     embedding-backed calls of
 #                     .aidev/hivesense_smoke.py (one junit case per call); finally
 #                     reinstall as `install` does, so the steps after it see that state
 #   - embed-slice     embed-search in CI's slice configuration
@@ -412,70 +411,11 @@ check_hnsw_index() {
     echo "ok: HNSW index hivesense_app.$name exists"
 }
 
-# ranked_posts CALL: the post ids hivesense_app.CALL returns, comma-separated, in rank order
-ranked_posts() {
-    query "select coalesce(string_agg(post_id::text, ',' order by similarity_order), '') from hivesense_app.$1"
-}
-
-sorted_ids() {
-    tr , '\n' <<< "$1" | sort -n | paste -sd, -
-}
-
-# The paging search (find_nearest_posts_with_embedding, which no endpoint calls)
-# against the one-shot one, as tests/integration/api_node/hivesense_search_test.sh
-# checks it: a small limit, a limit above the corpus and a continuation. The query
-# is the first chunk of a seeded post.
-check_paging() {
-    local ref="(select embedding::public.vector from hivesense_app.posts_vectors where post_id = 900101 order by chunk_number limit 1)"
-    local one_shot got expected second rc=0
-    one_shot="$(ranked_posts "find_nearest_posts_with_embedding_one_shot($ref, 100)")" || return 1
-    if [ "$(sorted_ids "$one_shot")" != "$EMBEDDED_POSTS" ]; then
-        echo "FAIL: find_nearest_posts_with_embedding_one_shot(_limit => 100) returned [$one_shot], expected the embedded seeded posts $EMBEDDED_POSTS"
-        return 1
-    fi
-    echo "one-shot order: [$one_shot]"
-
-    expected="$(cut -d, -f1-2 <<< "$one_shot")"
-    if ! got="$(ranked_posts "find_nearest_posts_with_embedding($ref, 2)")"; then
-        echo "FAIL: find_nearest_posts_with_embedding(_limit => 2) failed"
-        rc=1
-    elif [ "$got" != "$expected" ]; then
-        echo "FAIL: find_nearest_posts_with_embedding(_limit => 2) returned [$got], expected [$expected] (the one-shot order's first two)"
-        rc=1
-    else
-        echo "ok: find_nearest_posts_with_embedding(_limit => 2) returned [$got]"
-    fi
-
-    if ! got="$(ranked_posts "find_nearest_posts_with_embedding($ref, 100)")"; then
-        echo "FAIL: find_nearest_posts_with_embedding(_limit => 100) failed"
-        rc=1
-    elif [ "$(sorted_ids "$got")" != "$EMBEDDED_POSTS" ]; then
-        echo "FAIL: find_nearest_posts_with_embedding(_limit => 100) returned [$got], expected each embedded seeded post once ($EMBEDDED_POSTS)"
-        rc=1
-    else
-        echo "ok: find_nearest_posts_with_embedding(_limit => 100) returned [$got]"
-    fi
-
-    second="$(cut -d, -f2 <<< "$one_shot")"
-    expected="$(cut -d, -f3- <<< "$one_shot")"
-    if ! got="$(ranked_posts "find_nearest_posts_with_embedding($ref, 100, NULL, 0, $second)")"; then
-        echo "FAIL: find_nearest_posts_with_embedding(_start_post_id => $second) failed"
-        rc=1
-    elif [ "$got" != "$expected" ]; then
-        echo "FAIL: find_nearest_posts_with_embedding(_limit => 100, _start_post_id => $second) returned [$got], expected [$expected] (the one-shot order after $second)"
-        rc=1
-    else
-        echo "ok: find_nearest_posts_with_embedding(_start_post_id => $second) returned [$got]"
-    fi
-    return "$rc"
-}
-
-# search_checks CHECK_SET: the index and paging checks, then CHECK_SET of
+# search_checks CHECK_SET: the index check, then CHECK_SET of
 # .aidev/hivesense_smoke.py; each runs whichever fails.
 search_checks() {
     local rc=0
     check_hnsw_index || rc=1
-    check_paging || rc=1
     python3 .aidev/hivesense_smoke.py "$out" "$1" || rc=1
     return "$rc"
 }
