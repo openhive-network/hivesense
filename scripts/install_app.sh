@@ -49,6 +49,9 @@ print_help () {
     echo "  --start_block=NUMBER                  Choose start block to sync (default: 1)"
     echo "  --parallel_workers=NUMBER             Choose number of parallel contexts that ask OLLAMA"
     echo "  --embedding_batch_size=NUMBER         The number of texts we ask OLLAMA to generate embeddings for in a single API call"
+    echo "  --embedding-timeout=SECONDS           Starting timeout of an embedding request (default 30)"
+    echo "  --embedding-timeout-per-text=SECONDS  Raises a batch's starting timeout to this many seconds per text (default 1)"
+    echo "  --embedding-timeout-max=SECONDS       Each timed-out retry doubles the request timeout up to this (default 600; search requests stop at 60)"
     echo "  --tokenizer-model=MODEL_NAME          The tokenizer model, must be compatible with 'llm'"
     echo "  --tokens_per_chunk=NUMBER             The maximum number of tokens to break long posts into"
     echo "  --overlap_amount=NUMBER               The percentage of tokens_per_chunk that will be overlapped with the previous chunk (range 0-1, default 0.15)"
@@ -89,6 +92,9 @@ EMBEDDING_API='ollama'  # 'ollama' (native /api/embed) or 'openai' (/v1/embeddin
 VECTOR_SIZE=768
 PARALLEL_WORKERS=16
 EMBEDDING_BATCH_SIZE=100
+EMBEDDING_TIMEOUT_BASE=30
+EMBEDDING_TIMEOUT_PER_TEXT=1
+EMBEDDING_TIMEOUT_MAX=600
 START_BLOCK=1
 TOKENIZER_MODEL='e5-base' # shipped in haf docker image, compatible with yxchia/multilingual-e5-base:F16
 TOKENS_PER_CHUNK=512
@@ -148,6 +154,15 @@ while [ $# -gt 0 ]; do
         ;;
     --embedding_batch_size=*)
             EMBEDDING_BATCH_SIZE="${1#*=}"
+        ;;
+    --embedding-timeout=*)
+        EMBEDDING_TIMEOUT_BASE="${1#*=}"
+        ;;
+    --embedding-timeout-per-text=*)
+        EMBEDDING_TIMEOUT_PER_TEXT="${1#*=}"
+        ;;
+    --embedding-timeout-max=*)
+        EMBEDDING_TIMEOUT_MAX="${1#*=}"
         ;;
     --tokenizer-model=*)
 	    TOKENIZER_MODEL="${1#*=}"
@@ -293,6 +308,9 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.EMBEDDING_API TO '${EMBEDDING_API}';
   SET pg_temp.PARALLEL_WORKERS TO ${PARALLEL_WORKERS};
   SET pg_temp.EMBEDDING_BATCH_SIZE TO ${EMBEDDING_BATCH_SIZE};
+  SET pg_temp.EMBEDDING_TIMEOUT_BASE TO ${EMBEDDING_TIMEOUT_BASE};
+  SET pg_temp.EMBEDDING_TIMEOUT_PER_TEXT TO ${EMBEDDING_TIMEOUT_PER_TEXT};
+  SET pg_temp.EMBEDDING_TIMEOUT_MAX TO ${EMBEDDING_TIMEOUT_MAX};
   SET pg_temp.TOKENIZER_MODEL TO '${TOKENIZER_MODEL}';
   SET pg_temp.TOKENS_PER_CHUNK TO ${TOKENS_PER_CHUNK};
   SET pg_temp.OVERLAP_AMOUNT TO ${OVERLAP_AMOUNT};

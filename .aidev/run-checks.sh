@@ -369,14 +369,17 @@ embed_seeded_posts() {
         echo "posts_in_range(101, 105) = $ids, expected the seeded posts $SEEDED_POSTS"
         return 1
     fi
-    # The sync path retries a dead embedding server forever (ollama_embed with
-    # max_retries => NULL). PL/Python only sees the cancel at its next retry
-    # notice, so the step can end up to one retry cycle after the timeout.
+    # The sync path retries forever (ollama_embed with max_retries => NULL),
+    # doubling the request timeout after each timed-out attempt (30s, 60s, 120s
+    # ...), so a CPU-starved server gets a few grown attempts before this gives
+    # up; a dead server already failed probe_embedding_server above. PL/Python
+    # only sees the cancel at its next retry notice, so the step can end up to
+    # one retry cycle after the timeout.
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on \
-        -c "set statement_timeout = '120s'" \
+        -c "set statement_timeout = '600s'" \
         -c "select * from hivesense_app.generate_embeddings_for_posts('$ids'::int[], false, 0)" \
         -c "select hivesense_app.publish_visible_sync_seq()" || {
-        echo "embedding the seeded posts failed or hit the 120s statement_timeout: is the embedding server $OLLAMA_URL answering?"
+        echo "embedding the seeded posts failed or hit the 600s statement_timeout: is the embedding server $OLLAMA_URL answering?"
         return 1
     }
     # Posts with a non-zero 384-dim embedding: every long seeded post, not the short one.
