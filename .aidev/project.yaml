@@ -15,11 +15,14 @@ gitlab:
   path: "hive/hivesense"
   id: 506
 
-# AIDEV integrates into its own branch; people merge it into develop through
-# merge requests (as in hive/HAfAH, hive/haf and hive/hivemind), so `stable` is
-# omitted and `aidev release` never moves develop or master.
+# AIDEV integrates into its own branch and hands it off to develop by merge
+# request (`aidev handoff hivesense`: it opens the MR, starts the GitLab pipeline
+# on aidev/integration and arms auto-merge), as in hive/HAfAH, hive/haf and
+# hive/hivemind. `stable` is omitted, so `aidev release` never moves develop or
+# master; develop -> master stays the project's own process.
 branches:
   integration: "aidev/integration"
+  handoff: "develop"
 
 # How this project's suites execute (#13892): one kind, stated once.
 environment:

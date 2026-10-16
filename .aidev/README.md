@@ -1,8 +1,11 @@
 # hivesense under AIDEV
 
 AIDEV verifies changes to this repository through the slots in `project.yaml`,
-integrates them into `aidev/integration`, and people merge that into `develop`
-through merge requests (as in hive/HAfAH, hive/haf and hive/hivemind). Merge them
+integrates them into `aidev/integration`, and hands that off to `develop` through a
+merge request (as in hive/HAfAH, hive/haf and hive/hivemind): `aidev handoff hivesense
+--session <name>` opens or updates the merge request, starts the GitLab pipeline on
+`aidev/integration` and sets auto-merge (`branches.handoff` in `project.yaml`;
+`aidev handoff status hivesense` follows it). Merge them
 **keeping the source branch**: this project deletes source branches on merge by
 default, and `aidev/integration` must survive (it is protected for that reason).
 GitLab CI doesn't run for AIDEV branches (`ai/*`, `session/*`, pushes to
@@ -117,7 +120,10 @@ gate for:
 **Before each merge of `aidev/integration` into `develop`, run a web- or API-triggered
 pipeline on `aidev/integration`** (Build → Pipelines → Run pipeline, branch
 `aidev/integration`; the `workflow:` rules of `.gitlab-ci.yml` run exactly those for
-that branch) **and merge only when it is green.**
+that branch) **and merge only when it is green.** `aidev handoff hivesense` does both:
+it starts that pipeline (an API-sourced one) and arms merge-when-pipeline-succeeds on
+the hand-off merge request. A promote into `aidev/integration` while that auto-merge is
+pending waits for it, since moving the source branch would cancel it.
 
 ## The HAF test stack (`test-stack.compose.yml`)
 
