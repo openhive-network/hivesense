@@ -4,7 +4,8 @@
 #
 #   python:3.14-slim-bookworm (the syncer image's python) + postgresql-client, git
 #   + the postgrest binary of common-ci-configuration/postgrest, for `api-smoke`
-#   + shellcheck 0.10.0 (static binary), for `shellcheck`
+#   + shellcheck 0.11.0 (static binary, the release .gitlab-ci.yml's lint_bash_scripts
+#     pins too), for `shellcheck`
 #   + sqlfluff 2.1.4 (the version CI's lint_sql_scripts job runs), for `sqlfluff`
 #   + requests, psycopg and psycopg2, which scripts/sync_embeddings.py and
 #     scripts/hivesense_block_processor.py import, for `unit`
@@ -17,7 +18,7 @@
 # .aidev/runtime/build.sh; see .aidev/README.md.
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/postgrest@sha256:ad2d14b8699accf5d1fccf8314b25d835e6aaddadaec35597a5dac1f002eb457 AS postgrest
 FROM registry.gitlab.syncad.com/hive/common-ci-configuration/psql:3839feb0c30846aa3ae262143f216a3c1a0fa20b@sha256:6a3794d9fdc4e0590789fc01e48539bcd73273715e3b69dd1f45d3ecde8b1cde AS psql
-FROM koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb AS shellcheck
+FROM koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d AS shellcheck
 
 FROM python:3.14-slim-bookworm@sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83
 
