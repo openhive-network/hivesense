@@ -28,7 +28,7 @@ write one case per call (`embed-search.xml`, `embed-slice.xml`, `embed-pca.xml`,
 
 | Step | What |
 |---|---|
-| `shellcheck` | ShellCheck (pinned 0.10.0) at warning severity on every `*.sh` — the files CI's `lint_bash_scripts` checks — and at default severity on `.aidev/`'s own scripts |
+| `shellcheck` | ShellCheck (pinned 0.11.0, the release CI's `lint_bash_scripts` pins too) at warning severity on every `*.sh` — the files CI's `lint_bash_scripts` checks — and at default severity on `.aidev/`'s own scripts |
 | `sqlfluff` | `sqlfluff lint` 2.1.4 with `.sqlfluff`, as CI's `lint_sql_scripts`; any violation fails |
 | `unit` | `tests/unit` with python's `unittest` (no database, no network) |
 | `sql-registered` | every `.sql` under `db/` and `endpoints/` is applied by `scripts/install_app.sh` |
@@ -189,12 +189,17 @@ A new model also means new install options in `run-checks.sh` (`EMBEDDING_MODEL`
 
 The checks run in a container with your uid: `python:3.14-slim-bookworm` (the syncer's
 python) with `postgresql-client`, the `postgrest` binary of
-`common-ci-configuration/postgrest`, ShellCheck 0.10.0, sqlfluff 2.1.4 (with click
+`common-ci-configuration/postgrest`, ShellCheck 0.11.0, sqlfluff 2.1.4 (with click
 8.1.6, which 2.1.4 needs), `requests`, `psycopg`, `psycopg2` for the unit tests, and
 `/usr/local/bin/install_with_app_lock.py` from the `common-ci-configuration/psql` image
 hivesense's `Dockerfile` names in `PSQL_CLIENT_VERSION` (it needs only python3 and
 psycopg2), so `install_app.sh` takes its advisory-lock path; all bases pinned by
 digest.
+
+CI's `lint_bash_scripts` image (`koalaman/shellcheck-alpine`) and this image pin the
+same ShellCheck release, each by digest, so the `shellcheck` step and CI reach the
+same verdict. Bump them together: change the release in `.gitlab-ci.yml` and in
+`runtime/Dockerfile` in one commit, then rebuild and re-pin as below.
 
 When `runtime/Dockerfile` changes, rebuild and re-pin **in the same commit**:
 

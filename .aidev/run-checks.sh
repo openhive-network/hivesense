@@ -135,7 +135,7 @@ stack_pins() {
     for repo in haf/testnet $STACK_IMAGES_BY_RELEASE; do
         pins="$(stack_pins_of "$repo")"
         if [ "$(printf '%s\n' "$pins" | grep -c .)" -ne 1 ] \
-            || ! printf '%s\n' "$pins" | grep -qE ":[^@/]+@sha256:[0-9a-f]{64}$"; then
+            || ! grep -qE ":[^@/]+@sha256:[0-9a-f]{64}$" <<<"$pins"; then
             echo "STALE: $STACK_COMPOSE must pin registry.gitlab.syncad.com/hive/$repo once, as repo:tag@sha256:<digest>; found: ${pins:-nothing}"
             stale=1
             continue
@@ -160,9 +160,10 @@ stack_pins() {
 }
 
 wait_for_db() {
-    local i
+    local i found
     for i in $(seq 60); do
-        psql "$ADMIN_URL" -Atc "select 1 from pg_namespace where nspname = 'hivemind_endpoints'" 2>/dev/null | grep -qx 1 && return 0
+        found="$(psql "$ADMIN_URL" -Atc "select 1 from pg_namespace where nspname = 'hivemind_endpoints'" 2>/dev/null)" || true
+        [ "$found" = 1 ] && return 0
         echo "waiting for hivemind in $ADMIN_URL ($i)"
         sleep 5
     done
