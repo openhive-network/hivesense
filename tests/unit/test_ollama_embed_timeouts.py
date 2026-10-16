@@ -15,7 +15,7 @@ import types
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, Self
 from unittest import mock
 
 OLLAMA_SQL = os.path.join(os.path.dirname(__file__), "..", "..", "db", "ollama.sql")
@@ -53,14 +53,14 @@ def load_ollama_embed(config: dict[str, Any]) -> tuple[Embed, list[str]]:
 class SlowEmbedServer:
     """Answers /api/embed with one 2-dim vector per input text after `delay` seconds."""
 
-    def __init__(self, delay: float) -> None:
+    def __init__(self: Self, delay: float) -> None:
         self.delay = delay
         self.requests = 0
         stop = self.stop = threading.Event()
         server = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
+            def do_POST(self: Self) -> None:
                 server.requests += 1
                 texts = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["input"]
                 if stop.wait(server.delay):
@@ -75,7 +75,7 @@ class SlowEmbedServer:
                 except OSError:
                     pass  # the client gave up on this attempt
 
-            def log_message(self, format: str, *args: Any) -> None:
+            def log_message(self: Self, format: str, *args: Any) -> None:
                 pass
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -83,7 +83,7 @@ class SlowEmbedServer:
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
-    def close(self) -> None:
+    def close(self: Self) -> None:
         self.stop.set()
         self.httpd.shutdown()
         self.httpd.server_close()
@@ -112,12 +112,12 @@ def refused_url() -> str:
 
 @mock.patch("time.sleep", lambda secs: None)
 class OllamaEmbedTimeouts(unittest.TestCase):
-    def serve(self, delay: float) -> SlowEmbedServer:
+    def serve(self: Self, delay: float) -> SlowEmbedServer:
         server = SlowEmbedServer(delay)
         self.addCleanup(server.close)
         return server
 
-    def test_slow_server_answers_once_the_timeout_has_grown(self) -> None:
+    def test_slow_server_answers_once_the_timeout_has_grown(self: Self) -> None:
         server = self.serve(0.6)
         embed, notices = load_ollama_embed(config(base=0.2, cap=2.0))
         out = embed("m", posts(2), server.url, None, None)
@@ -125,7 +125,7 @@ class OllamaEmbedTimeouts(unittest.TestCase):
         self.assertEqual(timeouts(notices), [0.2, 0.4])
         self.assertEqual(server.requests, 3)
 
-    def test_fixed_timeout_never_reaches_a_slow_server(self) -> None:
+    def test_fixed_timeout_never_reaches_a_slow_server(self: Self) -> None:
         # A cap equal to the base is the old fixed timeout: every attempt fails alike.
         server = self.serve(0.35)
         embed, notices = load_ollama_embed(config(base=0.1, cap=0.1))
@@ -133,14 +133,14 @@ class OllamaEmbedTimeouts(unittest.TestCase):
             embed("m", posts(1), server.url, None, 4)
         self.assertEqual(timeouts(notices), [0.1, 0.1, 0.1])
 
-    def test_growth_stops_at_the_cap(self) -> None:
+    def test_growth_stops_at_the_cap(self: Self) -> None:
         server = self.serve(5)
         embed, notices = load_ollama_embed(config(base=0.05, cap=0.2))
         with self.assertRaises(PlpyError):
             embed("m", posts(1), server.url, None, 5)
         self.assertEqual(timeouts(notices), [0.05, 0.1, 0.2, 0.2])
 
-    def test_refused_connection_keeps_the_timeout_and_backoff(self) -> None:
+    def test_refused_connection_keeps_the_timeout_and_backoff(self: Self) -> None:
         embed, notices = load_ollama_embed(config(base=0.1, cap=1.0))
         with mock.patch("urllib.request.urlopen", wraps=urllib.request.urlopen) as urlopen, \
                 mock.patch("time.sleep") as sleep:
@@ -150,14 +150,14 @@ class OllamaEmbedTimeouts(unittest.TestCase):
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 10, 20])
         self.assertEqual(timeouts(notices), [])
 
-    def test_initial_timeout_scales_with_batch_size(self) -> None:
+    def test_initial_timeout_scales_with_batch_size(self: Self) -> None:
         server = self.serve(5)
         embed, notices = load_ollama_embed(config(base=0.01, per_text=0.02, cap=0.01))
         with self.assertRaises(PlpyError):
             embed("m", posts(5), server.url, None, 2)
         self.assertEqual(timeouts(notices), [0.1])
 
-    def test_each_batch_restarts_from_the_base(self) -> None:
+    def test_each_batch_restarts_from_the_base(self: Self) -> None:
         server = self.serve(0.3)
         embed, notices = load_ollama_embed(config(base=0.2, cap=2.0, batch_size=1))
         out = embed("m", posts(2), server.url, None, None)
@@ -165,14 +165,14 @@ class OllamaEmbedTimeouts(unittest.TestCase):
         self.assertEqual(timeouts(notices), [0.2, 0.2])
         self.assertEqual([n.split("]")[0] for n in notices], ["[Batch 0:1", "[Batch 1:2"])
 
-    def test_bounded_search_path_caps_growth_at_60s(self) -> None:
+    def test_bounded_search_path_caps_growth_at_60s(self: Self) -> None:
         embed, _ = load_ollama_embed(config(base=30, cap=600))
         with mock.patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")) as urlopen:
             with self.assertRaises(PlpyError):
                 embed("m", posts(1), "http://unused", None, 4)
         self.assertEqual([c.kwargs["timeout"] for c in urlopen.call_args_list], [30, 60, 60, 60])
 
-    def test_unbounded_sync_path_grows_to_the_configured_cap(self) -> None:
+    def test_unbounded_sync_path_grows_to_the_configured_cap(self: Self) -> None:
         embed, notices = load_ollama_embed(config(base=30, cap=600))
         calls: list[float] = []
 
