@@ -168,7 +168,7 @@ def _embed_one(cfg, batch, label):
     return [(c[0], c[1], "[" + ",".join(map(str, v)) + "]") for c, v in zip(batch, vecs)]
 
 
-def process_blocks(conn, first_block, last_block):
+def process_blocks(conn, first_block, last_block) -> None:
     """Entry point called by haf_app_driver.py inside its transaction."""
     global _INDEXES_ENSURED
     cfg = _load_config(conn)
