@@ -25,13 +25,14 @@ vectors under a fresh sync_seq, exactly like an edit.
 At the massive -> live transition the HNSW index build
 (hivesense_app.ensure_indexes_are_created) is triggered once.
 
-Configuration (model, server, api style, batch size, parallelism) comes from
-hivesense_app.hivesense_app_status, read once per process.
+Configuration (model, server, api style, batch size, parallelism, request
+timeouts) comes from hivesense_app.hivesense_app_status, read once per process.
 """
 
 import json
 import logging
 import os
+import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +60,11 @@ _INDEXES_ENSURED = False
 INITIAL_RETRY_DELAY = 5
 MAX_RETRY_DELAY = 120
 
+# Floor for a batch's first request timeout: the schedule's defaults (30s base,
+# 1s per text) would cut a 100-text batch to 100s, while a loaded GPU pool can
+# legitimately take minutes on it.
+MIN_REQUEST_TIMEOUT = 300
+
 # Posts per prep slice. Preparing (SQL chunking) and embedding (HTTP) run
 # pipelined: while the workers embed slice N's chunks, the main thread runs
 # prepare_post_chunks for slice N+1 on the driver's connection - the GPUs no
@@ -73,10 +79,12 @@ def _load_config(conn):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT llm, ollama, coalesce(embedding_api, 'ollama'),
-                      embedding_batch_size, parallel_workers, NULLIF(num_ctx, 0)
+                      embedding_batch_size, parallel_workers, NULLIF(num_ctx, 0),
+                      embedding_timeout_base, embedding_timeout_per_text, embedding_timeout_max
                FROM hivesense_app.hivesense_app_status WHERE id = 1"""
         )
-        llm, host, api_style, batch_size, workers, num_ctx = cur.fetchone()
+        (llm, host, api_style, batch_size, workers, num_ctx,
+         timeout_base, timeout_per_text, timeout_max) = cur.fetchone()
         # Mint this node's sync_uuid on the first run (the legacy scheduler did
         # this in its start-up; the driver path has no other hook). Runs inside
         # the driver's transaction, so it commits with the first range.
@@ -89,12 +97,27 @@ def _load_config(conn):
         "batch_size": batch_size or 100,
         "workers": max(1, workers or 1),
         "options": {"num_ctx": num_ctx} if num_ctx else None,
+        "timeout_base": timeout_base,
+        "timeout_per_text": timeout_per_text,
+        "timeout_max": timeout_max,
     }
     log.info(
         "embedding config: model=%(model)s host=%(host)s api=%(api_style)s "
-        "batch=%(batch_size)s workers=%(workers)s", _CONFIG
+        "batch=%(batch_size)s workers=%(workers)s timeout_base=%(timeout_base)gs "
+        "timeout_per_text=%(timeout_per_text)gs timeout_max=%(timeout_max)gs", _CONFIG
     )
     return _CONFIG
+
+
+def _initial_timeout(cfg, n_texts):
+    """A batch's first request timeout in seconds, never below MIN_REQUEST_TIMEOUT."""
+    return max(MIN_REQUEST_TIMEOUT, cfg["timeout_base"], cfg["timeout_per_text"] * n_texts)
+
+
+def _next_timeout(current, timed_out, cap):
+    """The request timeout after an attempt: doubled up to `cap` if it timed out,
+    unchanged otherwise (waiting longer can't fix a refused connection or a 5xx)."""
+    return min(current * 2, cap) if timed_out else current
 
 
 def _embed_batch(cfg, texts, label):
@@ -109,10 +132,13 @@ def _embed_batch(cfg, texts, label):
         url = cfg["host"] + "/api/embed"
     body = json.dumps(payload).encode()
     delay = INITIAL_RETRY_DELAY
+    timeout = _initial_timeout(cfg, len(texts))
+    timeout_cap = max(cfg["timeout_max"], timeout)
     attempts = 0
     while True:
+        timed_out = False
         try:
-            resp = urlopen(Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=300)
+            resp = urlopen(Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=timeout)
             if resp.getcode() == 200:
                 data = json.loads(resp.read().decode())
                 break
@@ -120,11 +146,15 @@ def _embed_batch(cfg, texts, label):
         except HTTPError as e:
             last_err = f"HTTP {e.code}"
         except (URLError, OSError) as e:
-            last_err = f"network error: {e}"
+            # A timeout while connecting arrives wrapped in URLError, one
+            # while waiting for the response arrives bare.
+            timed_out = isinstance(e, socket.timeout) or isinstance(getattr(e, "reason", None), socket.timeout)
+            last_err = f"network error: timed out after {timeout:g}s" if timed_out else f"network error: {e}"
         attempts += 1
         log.warning("[%s] %s, retrying in %ss (attempt %s)", label, last_err, delay, attempts)
         time.sleep(delay)
         delay = min(delay * 2, MAX_RETRY_DELAY)
+        timeout = _next_timeout(timeout, timed_out, timeout_cap)
     if cfg["api_style"] == "openai":
         return [item["embedding"] for item in sorted(data.get("data", []), key=lambda o: o.get("index", 0))]
     return data.get("embeddings", [])
