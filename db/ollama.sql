@@ -81,7 +81,7 @@ IMMUTABLE
 PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $BODY$
-    import json, time, plpy
+    import json, socket, time, plpy
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -102,11 +102,15 @@ AS $BODY$
     #                         local-network GPU pool; ollama remains the default so
     #                         existing/legacy deployments are unaffected.
     r = plpy.execute(
-      "SELECT embedding_batch_size, coalesce(embedding_api, 'ollama') AS embedding_api "
+      "SELECT embedding_batch_size, coalesce(embedding_api, 'ollama') AS embedding_api, "
+      "embedding_timeout_base, embedding_timeout_per_text, embedding_timeout_max "
       "FROM hivesense_app.hivesense_app_status LIMIT 1"
     )
     max_batch = r[0].get('embedding_batch_size', 100)
     api_style = (r[0].get('embedding_api') or 'ollama').lower()
+    timeout_base     = r[0]['embedding_timeout_base']
+    timeout_per_text = r[0]['embedding_timeout_per_text']
+    timeout_max      = r[0]['embedding_timeout_max']
 
     # Flatten inputs
     flat_texts, flat_pids, flat_nums = [], [], []
@@ -131,6 +135,15 @@ AS $BODY$
     # ollama can't hold a snapshot open and starve autovacuum DB-wide.
     retry_label = max_retries if max_retries is not None else 'inf'
 
+    # Per-attempt request timeout. A batch starts at
+    # max(timeout_base, timeout_per_text * len(batch)); after an attempt that
+    # timed out, the next one waits twice as long, up to the cap. Other errors
+    # (refused, HTTP 5xx) keep the timeout, waiting longer can't fix them.
+    # The bounded search path caps growth at 60s, so with its default
+    # max_retries=3 the worst case is 30+60+60s of requests plus 15s of backoff.
+    if max_retries is not None:
+        timeout_max = min(timeout_max, 60)
+
     for start in range(0, total, max_batch):
         end = min(start + max_batch, total)
         batch_texts = flat_texts[start:end]
@@ -147,16 +160,19 @@ AS $BODY$
                 payload["options"] = opts
             url = host_url.rstrip('/') + "/api/embed"
         body = json.dumps(payload).encode('utf-8')
+        timeout_secs = max(timeout_base, timeout_per_text * len(batch_texts))
+        batch_timeout_max = max(timeout_max, timeout_secs)
         attempts = 0
         while True:
             last_err = None
+            timed_out = False
             # Only catch network-layer errors. plpy.QueryCanceledError and
             # other plpy exceptions must propagate so pg_terminate_backend /
             # pg_cancel_backend actually work — a bare `except Exception`
             # here will silently swallow cancellation.
             try:
                 req = Request(url, data=body, headers={'Content-Type': 'application/json'})
-                resp = urlopen(req, timeout=30)
+                resp = urlopen(req, timeout=timeout_secs)
                 status_code = resp.getcode()
                 if status_code == 200:
                     break
@@ -164,14 +180,22 @@ AS $BODY$
             except HTTPError as e:
                 last_err = f"HTTP {e.code}"
             except (URLError, OSError) as e:
-                last_err = f"network error: {e}"
+                # A timeout while connecting arrives wrapped in URLError, one
+                # while waiting for the response arrives bare.
+                timed_out = isinstance(e, socket.timeout) or isinstance(getattr(e, 'reason', None), socket.timeout)
+                if timed_out:
+                    last_err = f"network error: timed out after {timeout_secs:g}s"
+                else:
+                    last_err = f"network error: {e}"
             attempts += 1
             if max_retries is not None and attempts >= max_retries:
                 plpy.error(f"[Batch {start}:{end}] giving up after {attempts} attempts: {last_err}")
             plpy.notice(f"[Batch {start}:{end}] {last_err}, retrying in {delay_secs}s ({attempts}/{retry_label})")
             time.sleep(delay_secs)
             delay_secs = min(delay_secs * 2, max_delay)
-        # reset backoff for next batch
+            if timed_out:
+                timeout_secs = min(timeout_secs * 2, batch_timeout_max)
+        # reset backoff for next batch; the timeout restarts from its base above
         delay_secs = initial_delay
 
         data = json.loads(resp.read().decode('utf-8'))

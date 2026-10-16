@@ -29,6 +29,9 @@ BEGIN
     embedding_api TEXT NOT NULL DEFAULT 'ollama', -- embedding wire protocol: 'ollama' (native /api/embed) or 'openai' (/v1/embeddings, e.g. llama-swap on the local GPU pool)
     start_block INT,
     embedding_batch_size INT, -- send this many texts to ollama in a single API call, it will generate this many embedding vectors and sent them back
+    embedding_timeout_base REAL NOT NULL DEFAULT 30, -- seconds an embedding request may take before it is retried
+    embedding_timeout_per_text REAL NOT NULL DEFAULT 1, -- raises a batch's starting timeout to this many seconds per text
+    embedding_timeout_max REAL NOT NULL DEFAULT 600, -- each timed-out retry doubles the request timeout up to this many seconds
     tokenizer_model TEXT, -- model used for counting tokens, must be compatible with `llm`'s tokenizer
     tokens_per_chunk INT, -- for chunking posts, number of tokens per chunk (should not `llm`'s the model's max tokens)
     overlap_amount REAL, -- for chunking posts, try to include this amount of overlap with the prevoius chunk to add context (0.15 = 15%)
@@ -163,6 +166,12 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS upstream_skipped_op_count INT NOT NULL DEFAULT 0;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS num_ctx INT NOT NULL DEFAULT 0; -- 0 = server default; read by the python block processor
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS embedding_timeout_base REAL NOT NULL DEFAULT 30;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS embedding_timeout_per_text REAL NOT NULL DEFAULT 1;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS embedding_timeout_max REAL NOT NULL DEFAULT 600;
 
 INSERT INTO hivesense_app_status
 (
@@ -175,6 +184,9 @@ INSERT INTO hivesense_app_status
   num_ctx,
   start_block,
   embedding_batch_size,
+  embedding_timeout_base,
+  embedding_timeout_per_text,
+  embedding_timeout_max,
   tokenizer_model,
   tokens_per_chunk,
   overlap_amount,
@@ -211,6 +223,9 @@ VALUES
     COALESCE(current_setting('PG_TEMP.NUM_CTX', TRUE)::INT, 0),
     current_setting('PG_TEMP.START_BLOCK', TRUE)::INT,
     current_setting('PG_TEMP.EMBEDDING_BATCH_SIZE', TRUE)::INT,
+    COALESCE(current_setting('PG_TEMP.EMBEDDING_TIMEOUT_BASE', TRUE)::REAL, 30),
+    COALESCE(current_setting('PG_TEMP.EMBEDDING_TIMEOUT_PER_TEXT', TRUE)::REAL, 1),
+    COALESCE(current_setting('PG_TEMP.EMBEDDING_TIMEOUT_MAX', TRUE)::REAL, 600),
     current_setting('PG_TEMP.TOKENIZER_MODEL', TRUE)::TEXT,
     current_setting('PG_TEMP.TOKENS_PER_CHUNK', TRUE)::INT,
     current_setting('PG_TEMP.OVERLAP_AMOUNT', TRUE)::REAL,
@@ -241,9 +256,12 @@ DO UPDATE SET
 ollama = excluded.ollama,
 embedding_api = excluded.embedding_api,
 num_ctx = excluded.num_ctx,
-embedding_batch_size = excluded.embedding_batch_size;
--- only ollama host, embedding api, and batch size can be overridden by subsequent
--- install; changing llm model or number of host requires resync
+embedding_batch_size = excluded.embedding_batch_size,
+embedding_timeout_base = excluded.embedding_timeout_base,
+embedding_timeout_per_text = excluded.embedding_timeout_per_text,
+embedding_timeout_max = excluded.embedding_timeout_max;
+-- only ollama host, embedding api, batch size and request timeouts can be overridden
+-- by subsequent install; changing llm model or number of host requires resync
 
 CREATE SEQUENCE IF NOT EXISTS hivesense_app.batch_seq START 1;
 
