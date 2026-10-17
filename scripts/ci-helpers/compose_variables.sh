@@ -9,11 +9,18 @@ ROOT_SRC_PATH="$(git rev-parse --show-superproject-working-tree || git rev-parse
 ROOT_SRC_PATH="${CI_PROJECT_DIR:-$ROOT_SRC_PATH}"
 
 # Get Git SHAs
-# HAF version comes from HAF_COMMIT env var (set by CI from find_haf_image job)
-# or HAF_UPSTREAM_COMMIT directly. Falls back to HAF_VERSION if already set.
+# HAF version, unless HAF_VERSION is already set, follows the find_haf_image job's outcome:
+#   - commit image found: HAF_UPSTREAM_TAG is the 8-char commit tag
+#   - release-tag fallback (no recent commit image): HAF_UPSTREAM_TAG is the release tag
+#   - nothing found (HAF_UPSTREAM_CACHE_HIT=false, no HAF_UPSTREAM_TAG): 'latest'
+# HAF_UPSTREAM_TAG wins when set, since it is the tag that job verified exists. Without the
+# detect variables (e.g. a developer exporting only HAF_COMMIT), the short SHA of
+# HAF_COMMIT or HAF_UPSTREAM_COMMIT is used, else 'latest'.
 if [ -z "${HAF_VERSION:-}" ]; then
+    if [ -n "${HAF_UPSTREAM_TAG:-}" ]; then
+        HAF_VERSION="$HAF_UPSTREAM_TAG"
     # If find_haf_image found no image in the registry, fall back to 'latest'
-    if [ "${HAF_UPSTREAM_CACHE_HIT:-}" = "false" ]; then
+    elif [ "${HAF_UPSTREAM_CACHE_HIT:-}" = "false" ]; then
         echo "WARN: No HAF image found in registry for recent commits, falling back to 'latest'"
         HAF_VERSION="latest"
     else
