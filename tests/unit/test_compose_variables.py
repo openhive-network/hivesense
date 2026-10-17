@@ -4,6 +4,7 @@
 Sources the script with sh under each find_haf_image outcome and reads back HAF_VERSION.
 Needs only sh (git is optional: CI_PROJECT_DIR stands in for the checkout root).
 """
+from typing import Self
 import os
 import subprocess
 import unittest
@@ -28,26 +29,26 @@ def haf_version(**env: str) -> str:
 
 
 class HafVersion(unittest.TestCase):
-    def test_release_tag_fallback_uses_upstream_tag(self) -> None:
+    def test_release_tag_fallback_uses_upstream_tag(self: Self) -> None:
         self.assertEqual(haf_version(HAF_UPSTREAM_TAG="1.28.8-rc3", HAF_UPSTREAM_CACHE_HIT="true",
                                      HAF_UPSTREAM_FALLBACK="release-tag", HAF_UPSTREAM_COMMIT=SHA),
                          "1.28.8-rc3")
 
-    def test_commit_image_found_uses_commit_tag(self) -> None:
+    def test_commit_image_found_uses_commit_tag(self: Self) -> None:
         self.assertEqual(haf_version(HAF_UPSTREAM_TAG="8de693b2", HAF_UPSTREAM_CACHE_HIT="true",
                                      HAF_UPSTREAM_FALLBACK="false", HAF_UPSTREAM_COMMIT=SHA),
                          "8de693b2")
 
-    def test_no_image_found_uses_latest(self) -> None:
+    def test_no_image_found_uses_latest(self: Self) -> None:
         self.assertEqual(haf_version(HAF_UPSTREAM_CACHE_HIT="false", HAF_UPSTREAM_COMMIT=SHA), "latest")
 
-    def test_developer_haf_commit_only_uses_short_sha(self) -> None:
+    def test_developer_haf_commit_only_uses_short_sha(self: Self) -> None:
         self.assertEqual(haf_version(HAF_COMMIT=SHA), "8de693b2")
 
-    def test_nothing_set_uses_latest(self) -> None:
+    def test_nothing_set_uses_latest(self: Self) -> None:
         self.assertEqual(haf_version(), "latest")
 
-    def test_preset_haf_version_is_kept(self) -> None:
+    def test_preset_haf_version_is_kept(self: Self) -> None:
         self.assertEqual(haf_version(HAF_VERSION="foo", HAF_UPSTREAM_TAG="1.28.8-rc3"), "foo")
 
 
