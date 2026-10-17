@@ -18,6 +18,7 @@ WORKDIR /app
 # Install only necessary Python packages (before copying scripts for better caching)
 RUN pip install --no-cache-dir \
     'psycopg[binary]' \
+    psycopg2-binary \
     requests
 
 # Copy script last (changes most frequently)
