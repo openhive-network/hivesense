@@ -415,14 +415,15 @@ sync:
     echo "PASS: syncer parks hivesense_app events_id at unreachable_event_id()"
     echo -e "\e[0Ksection_end:$(date +%s):events_id_test\r\e[0K"
   - |
-    echo -e "\e[0Ksection_start:$(date +%s):sync_chains_unit[collapsed=true]\r\e[0KSyncer /sync-chains selection unit checks..."
-    # First-match chain selection, uuid continuity and the config-drift refusal
-    # in scripts/sync_embeddings.py, run from the just-built syncer image (no
-    # database needed). docs/sync_chain_rebase.md describes the protocol.
+    echo -e "\e[0Ksection_start:$(date +%s):python_unit_tests[collapsed=true]\r\e[0KPython unit tests (tests/unit)..."
+    # Every tests/unit/test_*.py by discovery, run from the just-built syncer
+    # image (no database needed). The tree is mounted whole so the tests'
+    # ../../scripts and ../../db paths resolve; the image's WORKDIR stays the
+    # cwd, where the tests' os.getcwd() fallback finds sync_embeddings.py.
     SYNCER_IMG="registry.gitlab.syncad.com/hive/hivesense/syncer:${CI_COMMIT_SHORT_SHA}"
-    docker run --rm -v "${CI_PROJECT_DIR}/tests:/tests:ro" "$SYNCER_IMG" \
-      python /tests/unit/test_sync_chain_selection.py
-    echo -e "\e[0Ksection_end:$(date +%s):sync_chains_unit\r\e[0K"
+    docker run --rm -v "${CI_PROJECT_DIR}:/src:ro" "$SYNCER_IMG" \
+      python -m unittest discover -s /src/tests/unit -p 'test_*.py' -v
+    echo -e "\e[0Ksection_end:$(date +%s):python_unit_tests\r\e[0K"
   - |
     echo -e "\e[0Ksection_start:$(date +%s):pca_phase[collapsed=true]\r\e[0KReconfigure to PCA-reduced embeddings and re-test..."
     # Reuse the synced HAF/hivemind stack: compute a PCA matrix from the
