@@ -48,7 +48,7 @@ if MISSING_POST_ACTION not in ("skip", "exit"):
     )
     sys.exit(1)
 
-def notice_processor(diag):
+def notice_processor(diag) -> None:
     """Process PostgreSQL NOTICE messages and log them."""
     msg = diag.message_primary
     if msg:
@@ -67,7 +67,7 @@ def setup_notice_handler(conn):
 # must be re-acquired on every reconnect (see ensure_connection_alive).
 APP_LOCK_DEPS = ['hivemind', 'hivesense']
 
-def acquire_app_locks(conn):
+def acquire_app_locks(conn) -> None:
     """Take shared advisory locks for the apps this syncer reads from.
     Blocks (with NOTICE logs) until any active installer releases."""
     with conn.cursor() as cur:
@@ -183,7 +183,7 @@ def select_chain(chains, local, local_uuid):
         logging.critical("Upstream lists no sync chains")
         sys.exit(1)
 
-    def describe(c):
+    def describe(c) -> str:
         return "%s (llm=%s dims=%s chunk=%s%s)" % (
             c.get('sync_uuid'), c.get('llm'), c.get('embedding_dimensionality'),
             c.get('tokens_per_chunk'),
@@ -292,7 +292,7 @@ def get_last_seq(cur) -> int:
 
 _warned_no_skip_count = False
 
-def check_upstream_skip_count(count):
+def check_upstream_skip_count(count) -> None:
     """React to the upstream's advertised skip count (from /sync-settings or the
     X-Skipped-Op-Count header). `count` is None when the upstream predates skip
     reporting. In exit mode a nonzero count is fatal: the upstream chain admits
@@ -319,7 +319,7 @@ def check_upstream_skip_count(count):
         sys.exit(1)
 
 
-def store_upstream_skip_count(conn, count):
+def store_upstream_skip_count(conn, count) -> None:
     """Persist the upstream's advertised skip count so we re-advertise it to our
     own downstreams (added to our local skip count by the endpoints). Only
     reached in skip mode -- exit mode dies before this on any nonzero count.
@@ -356,7 +356,87 @@ def resolve_post_id(cur, author, permlink):
     row = cur.fetchone()
     return row[0] if row else None
 
-def upsert_vectors(cur, post_id, sync_seq, embeddings):
+
+def resolve_batch_posts(conn, ops, max_block):
+    """Resolve each op's post_id in the local hivemind.
+
+    max_block is the highest last_vectors_block among the batch's non-delete ops
+    (hivemind's head has already been waited past it). Returns
+    (resolved, absent, ignored_deletes): resolved is a list of (op, post_id);
+    absent counts insert ops dropped under MISSING_POST_ACTION=skip;
+    ignored_deletes counts delete ops whose post does not resolve. Exits the
+    process under MISSING_POST_ACTION=exit when an insert's post stays missing.
+    """
+    resolved = []
+    absent = 0
+    ignored_deletes = 0
+    with conn.cursor() as cur:
+        for op in ops:
+            post_id = resolve_post_id(cur, op["author"], op["permlink"])
+            if post_id is None and op.get("op") == "delete":
+                # Local vectors only exist for posts that resolved on insert, so
+                # there is nothing to delete. Delete ops are not covered by the
+                # hivemind head wait, so a missing post here is usually just
+                # hivemind lag and must not be treated as an inconsistency.
+                ignored_deletes += 1
+                logging.warning(
+                    "Ignoring delete for %s/%s: post not in the local hivemind, "
+                    "so there are no local vectors to delete",
+                    op["author"], op["permlink"]
+                )
+                continue
+            attempts = 0
+            while post_id is None and attempts < MISSING_POST_RETRIES:
+                attempts += 1
+                logging.warning(
+                    "Post %s/%s not found after block %s; retry %s/%s",
+                    op["author"], op["permlink"], max_block,
+                    attempts, MISSING_POST_RETRIES
+                )
+                # rollback to close the transaction and release the lock on hive_posts
+                conn.rollback()
+                time.sleep(1)
+                post_id = resolve_post_id(cur, op["author"], op["permlink"])
+            if post_id is None:
+                # We already waited for hivemind's head to reach max_block, so a
+                # still-missing post is PERMANENTLY absent from hivemind -- e.g. a block
+                # hivemind silently skipped after a mid-block crash (context pointer
+                # advanced, work uncommitted; see hive/hivemind#336). The old unbounded
+                # `while post_id is None` could then never terminate and stalled the
+                # syncer for 17h on a single missing post.
+                logging.error(
+                    "Post %s/%s has embeddings upstream but does not exist in the local "
+                    "hivemind database, even though hivemind has synced past its block "
+                    "(hivemind head > %s, re-checked %s times). This usually means the "
+                    "local hivemind database is inconsistent (e.g. hivemind skipped a "
+                    "block after a mid-block crash, see hive/hivemind#336); the reliable "
+                    "repair is to restore hivemind from a known-good snapshot and resync.",
+                    op["author"], op["permlink"], max_block, MISSING_POST_RETRIES
+                )
+                if MISSING_POST_ACTION == "exit":
+                    logging.critical(
+                        "MISSING_POST_ACTION=exit: stopping the syncer without applying "
+                        "this batch so the hivemind problem cannot go unnoticed. Repair "
+                        "hivemind, or set MISSING_POST_ACTION=skip to sync past posts "
+                        "hivemind is missing (they will never have embeddings)."
+                    )
+                    sys.exit(1)
+                absent += 1
+                logging.error(
+                    "MISSING_POST_ACTION=skip: dropping the op for %s/%s and continuing; "
+                    "this post will never have embeddings on this node. Set "
+                    "MISSING_POST_ACTION=exit to stop the syncer instead.",
+                    op["author"], op["permlink"]
+                )
+                continue
+            resolved.append((op, post_id))
+    if absent:
+        logging.error(
+            "Skipped %s op(s) whose posts are permanently absent from hivemind", absent
+        )
+    return resolved, absent, ignored_deletes
+
+def upsert_vectors(cur, post_id, sync_seq, embeddings) -> None:
     # Ensure all embedding values are floats (psycopg3 requires type consistency)
     rows = [
         (sync_seq, post_id, idx, [float(x) for x in emb])
@@ -372,7 +452,7 @@ def upsert_vectors(cur, post_id, sync_seq, embeddings):
         rows
     )
 
-def apply_op(cur, op, post_id):
+def apply_op(cur, op, post_id) -> None:
     """
     Apply a single operation; assumes post_id already resolved.
     """
@@ -443,7 +523,7 @@ def apply_op(cur, op, post_id):
             """, (post_id,))
 
 
-async def create_indexes_with_live_notices(dsn):
+async def create_indexes_with_live_notices(dsn) -> None:
     """Run index creation in async mode with live notice output."""
     async with await psycopg.AsyncConnection.connect(dsn) as aconn:
         # Register notice handler for async connection
@@ -455,7 +535,7 @@ async def create_indexes_with_live_notices(dsn):
         await aconn.commit()
 
 
-def ensure_context_detached(conn):
+def ensure_context_detached(conn) -> None:
     # Park hivesense_app's events_id at hive.unreachable_event_id() so it does
     # not pin hafd.events_queue cleanup. Called every iteration so that if
     # anything ever attaches the context (operator action, install ordering,
@@ -480,7 +560,7 @@ def ensure_context_detached(conn):
     conn.commit()
 
 
-def main():
+def main() -> None:
     # keep a copy of the log in the datadir when asked to (haf_api_node sets
     # LOG_FILE to a file under logs/apps, which survives docker compose down)
     log_file = os.environ.get("LOG_FILE", "")
@@ -590,8 +670,14 @@ def main():
             time.sleep(3)
             continue
 
-        # wait until hivemind has caught up to the highest block in this batch
-        # deletes can have last_vectors_blocks that are higher than the block where the deletion took place
+        # wait until hivemind has caught up to the highest block in this batch.
+        # Delete ops are excluded: deleted_embeddings is never pruned, so a post
+        # edited twice yields a delete op at the first edit's seq whose
+        # last_vectors_block (read from post_data) is the block of the LATEST edit,
+        # possibly near head. The deletion's own block is not stored anywhere, so
+        # there is no correct value to wait for, and waiting on the latest-edit
+        # block would park a node in initial sync until hivemind caught up to it.
+        # resolve_batch_posts() treats a delete whose post is missing as a no-op.
         block_nums = [op.get('last_vectors_block') for op in ops if op.get('last_vectors_block') is not None and op.get('op') != 'delete']
         max_block = max(block_nums) if block_nums else None
         if max_block is not None:
@@ -619,61 +705,7 @@ def main():
                 )
                 time.sleep(1)
 
-        # resolve all post_ids (bounded retry on missing posts, then skip or exit -- #57)
-        resolved = []  # list of tuples (op, post_id)
-        absent = 0
-        with conn.cursor() as cur:
-            for op in ops:
-                post_id = resolve_post_id(cur, op["author"], op["permlink"])
-                attempts = 0
-                while post_id is None and attempts < MISSING_POST_RETRIES:
-                    attempts += 1
-                    logging.warning(
-                        "Post %s/%s not found after block %s; retry %s/%s",
-                        op["author"], op["permlink"], max_block,
-                        attempts, MISSING_POST_RETRIES
-                    )
-                    # rollback to close the transaction and release the lock on hive_posts
-                    conn.rollback()
-                    time.sleep(1)
-                    post_id = resolve_post_id(cur, op["author"], op["permlink"])
-                if post_id is None:
-                    # We already waited (above) for hivemind's head to reach max_block, so a
-                    # still-missing post is PERMANENTLY absent from hivemind -- e.g. a block
-                    # hivemind silently skipped after a mid-block crash (context pointer
-                    # advanced, work uncommitted; see hive/hivemind#336). The old unbounded
-                    # `while post_id is None` could then never terminate and stalled the
-                    # syncer for 17h on a single missing post.
-                    logging.error(
-                        "Post %s/%s has embeddings upstream but does not exist in the local "
-                        "hivemind database, even though hivemind has synced past its block "
-                        "(hivemind head > %s, re-checked %s times). This usually means the "
-                        "local hivemind database is inconsistent (e.g. hivemind skipped a "
-                        "block after a mid-block crash, see hive/hivemind#336); the reliable "
-                        "repair is to restore hivemind from a known-good snapshot and resync.",
-                        op["author"], op["permlink"], max_block, MISSING_POST_RETRIES
-                    )
-                    if MISSING_POST_ACTION == "exit":
-                        logging.critical(
-                            "MISSING_POST_ACTION=exit: stopping the syncer without applying "
-                            "this batch so the hivemind problem cannot go unnoticed. Repair "
-                            "hivemind, or set MISSING_POST_ACTION=skip to sync past posts "
-                            "hivemind is missing (they will never have embeddings)."
-                        )
-                        sys.exit(1)
-                    absent += 1
-                    logging.error(
-                        "MISSING_POST_ACTION=skip: dropping the op for %s/%s and continuing; "
-                        "this post will never have embeddings on this node. Set "
-                        "MISSING_POST_ACTION=exit to stop the syncer instead.",
-                        op["author"], op["permlink"]
-                    )
-                    continue
-                resolved.append((op, post_id))
-        if absent:
-            logging.error(
-                "Skipped %s op(s) whose posts are permanently absent from hivemind", absent
-            )
+        resolved, absent, ignored_deletes = resolve_batch_posts(conn, ops, max_block)
 
         # Advance the sequence past EVERY op in this batch -- resolved AND skipped.
         # A skipped op is permanently absent, so it must never be re-fetched; the seq
@@ -739,9 +771,11 @@ def main():
         conn.commit()
 
         elapsed = time.monotonic() - batch_start
-        total_ops = inserts + deletes + skipped
+        total_ops = inserts + deletes + skipped + ignored_deletes
         ops_per_sec = total_ops / elapsed if elapsed > 0 else 0
         skip_part = f", {skipped} skipped" if skipped else ""
+        if ignored_deletes:
+            skip_part += f", {ignored_deletes} deletes of absent posts ignored"
         logging.info(
             "Applied %d ops (%d inserts, %d deletes%s) in %.1fs (%.1f ops/s) | seq=%s block=%s",
             total_ops, inserts, deletes, skip_part,
