@@ -48,7 +48,7 @@ if MISSING_POST_ACTION not in ("skip", "exit"):
     )
     sys.exit(1)
 
-def notice_processor(diag):
+def notice_processor(diag) -> None:
     """Process PostgreSQL NOTICE messages and log them."""
     msg = diag.message_primary
     if msg:
@@ -67,7 +67,7 @@ def setup_notice_handler(conn):
 # must be re-acquired on every reconnect (see ensure_connection_alive).
 APP_LOCK_DEPS = ['hivemind', 'hivesense']
 
-def acquire_app_locks(conn):
+def acquire_app_locks(conn) -> None:
     """Take shared advisory locks for the apps this syncer reads from.
     Blocks (with NOTICE logs) until any active installer releases."""
     with conn.cursor() as cur:
@@ -183,7 +183,7 @@ def select_chain(chains, local, local_uuid):
         logging.critical("Upstream lists no sync chains")
         sys.exit(1)
 
-    def describe(c):
+    def describe(c) -> str:
         return "%s (llm=%s dims=%s chunk=%s%s)" % (
             c.get('sync_uuid'), c.get('llm'), c.get('embedding_dimensionality'),
             c.get('tokens_per_chunk'),
@@ -292,7 +292,7 @@ def get_last_seq(cur) -> int:
 
 _warned_no_skip_count = False
 
-def check_upstream_skip_count(count):
+def check_upstream_skip_count(count) -> None:
     """React to the upstream's advertised skip count (from /sync-settings or the
     X-Skipped-Op-Count header). `count` is None when the upstream predates skip
     reporting. In exit mode a nonzero count is fatal: the upstream chain admits
@@ -319,7 +319,7 @@ def check_upstream_skip_count(count):
         sys.exit(1)
 
 
-def store_upstream_skip_count(conn, count):
+def store_upstream_skip_count(conn, count) -> None:
     """Persist the upstream's advertised skip count so we re-advertise it to our
     own downstreams (added to our local skip count by the endpoints). Only
     reached in skip mode -- exit mode dies before this on any nonzero count.
@@ -436,7 +436,7 @@ def resolve_batch_posts(conn, ops, max_block):
         )
     return resolved, absent, ignored_deletes
 
-def upsert_vectors(cur, post_id, sync_seq, embeddings):
+def upsert_vectors(cur, post_id, sync_seq, embeddings) -> None:
     # Ensure all embedding values are floats (psycopg3 requires type consistency)
     rows = [
         (sync_seq, post_id, idx, [float(x) for x in emb])
@@ -452,7 +452,7 @@ def upsert_vectors(cur, post_id, sync_seq, embeddings):
         rows
     )
 
-def apply_op(cur, op, post_id):
+def apply_op(cur, op, post_id) -> None:
     """
     Apply a single operation; assumes post_id already resolved.
     """
@@ -523,7 +523,7 @@ def apply_op(cur, op, post_id):
             """, (post_id,))
 
 
-async def create_indexes_with_live_notices(dsn):
+async def create_indexes_with_live_notices(dsn) -> None:
     """Run index creation in async mode with live notice output."""
     async with await psycopg.AsyncConnection.connect(dsn) as aconn:
         # Register notice handler for async connection
@@ -535,7 +535,7 @@ async def create_indexes_with_live_notices(dsn):
         await aconn.commit()
 
 
-def ensure_context_detached(conn):
+def ensure_context_detached(conn) -> None:
     # Park hivesense_app's events_id at hive.unreachable_event_id() so it does
     # not pin hafd.events_queue cleanup. Called every iteration so that if
     # anything ever attaches the context (operator action, install ordering,
@@ -560,7 +560,7 @@ def ensure_context_detached(conn):
     conn.commit()
 
 
-def main():
+def main() -> None:
     # keep a copy of the log in the datadir when asked to (haf_api_node sets
     # LOG_FILE to a file under logs/apps, which survives docker compose down)
     log_file = os.environ.get("LOG_FILE", "")
