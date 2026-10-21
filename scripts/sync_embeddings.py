@@ -436,6 +436,23 @@ def resolve_batch_posts(conn, ops, max_block):
         )
     return resolved, absent, ignored_deletes
 
+def next_context_block(resolved, current_block):
+    """Return the hivesense_app context block after applying a batch.
+
+    resolved is the batch's list of (op, post_id); current_block is the block
+    the context was last set to by this process, or None. The result is the
+    highest last_vectors_block among the non-delete ops, but never lower than
+    current_block; it is current_block when the batch has no non-delete ops.
+    """
+    # A delete's last_vectors_block is its post's latest-edit block (see the
+    # hivemind wait in main()), possibly near head, so it says nothing about
+    # how far the stream has progressed.
+    blocks = [op["last_vectors_block"] for op, _ in resolved if op.get("op") != "delete"]
+    if current_block is not None:
+        blocks.append(current_block)
+    return max(blocks, default=None)
+
+
 def upsert_vectors(cur, post_id, sync_seq, embeddings) -> None:
     # Ensure all embedding values are floats (psycopg3 requires type consistency)
     rows = [
@@ -650,8 +667,8 @@ def main() -> None:
 
         # manage the current_block_num stored in the context.  The way we manage it isn't perfect, but it's
         # probably fine for our usage.
-        # When we get a list of ops from the server, we set our current_block_num to the higest one in the
-        # list of ops.
+        # When we get a list of ops from the server, we set our current_block_num to the highest one among
+        # the applied non-delete ops, never moving it backwards (see next_context_block()).
         # When we get an empty list, we update the current_block_num to match the API server's.
         # That way, when we're well out-of-sync, we'll keep our current_block_num matching the last embedding
         # we've synced.  Once we're in sync, we'll advance our current_block_num to match the server, even if
@@ -719,7 +736,6 @@ def main() -> None:
         # a skipped op at the tail of the stream).
         batch_max_seq = max(op["sync_seq"] for op in ops)
 
-        max_last_vectors_block = 0
         batch_start = time.monotonic()
         inserts = 0
         deletes = 0
@@ -727,13 +743,10 @@ def main() -> None:
         # apply each resolved operation in one batch transaction
         with conn.cursor() as cur:
             for op, post_id in resolved:
-                last_vectors_block = op.get("last_vectors_block")
-                if last_vectors_block > max_last_vectors_block:
-                    max_last_vectors_block = last_vectors_block
                 logging.debug(
                     "Applying %s %s/%s (seq %s, block %s)",
                     op["op"], op["author"], op["permlink"],
-                    op["sync_seq"], last_vectors_block
+                    op["sync_seq"], op.get("last_vectors_block")
                 )
                 apply_op(cur, op, post_id)
                 if op["op"] == "delete":
@@ -761,12 +774,10 @@ def main() -> None:
                     "SET skipped_op_count = skipped_op_count + %s WHERE id = 1",
                     (absent,)
                 )
-            # Only advance the context block when we actually resolved ops: an
-            # all-skipped batch leaves max_last_vectors_block at 0, and we must not
-            # rewind the context to block 0.
-            if max_last_vectors_block and max_last_vectors_block != last_seen_current_block_num:
-                cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (max_last_vectors_block,))
-                last_seen_current_block_num = max_last_vectors_block
+            context_block = next_context_block(resolved, last_seen_current_block_num)
+            if context_block is not None and context_block != last_seen_current_block_num:
+                cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (context_block,))
+                last_seen_current_block_num = context_block
 
         conn.commit()
 
@@ -779,7 +790,7 @@ def main() -> None:
         logging.info(
             "Applied %d ops (%d inserts, %d deletes%s) in %.1fs (%.1f ops/s) | seq=%s block=%s",
             total_ops, inserts, deletes, skip_part,
-            elapsed, ops_per_sec, batch_max_seq, max_last_vectors_block
+            elapsed, ops_per_sec, batch_max_seq, last_seen_current_block_num
         )
 
         # Optionally create indexes if caught up

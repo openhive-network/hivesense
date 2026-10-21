@@ -123,5 +123,26 @@ class ResolveBatchPosts(unittest.TestCase):
         self.assertEqual(self.sleep.call_count, 1)
 
 
+class NextContextBlock(unittest.TestCase):
+    def test_delete_with_latest_edit_block_does_not_advance(self) -> None:
+        batch = [(op("insert", "alice", "p1", 4_826_900), 1),
+                 (op("delete", "bob", "p2", 60_810_743, seq=2), 2)]
+        self.assertEqual(s.next_context_block(batch, 4_800_000), 4_826_900)
+
+    def test_delete_only_batch_leaves_block_unchanged(self) -> None:
+        batch = [(op("delete", "bob", "p2", 60_810_743), 2)]
+        self.assertEqual(s.next_context_block(batch, 4_800_000), 4_800_000)
+        self.assertIsNone(s.next_context_block(batch, None))
+
+    def test_lower_batch_does_not_rewind(self) -> None:
+        first = s.next_context_block([(op("insert", "alice", "p1", 5_000_000), 1)], None)
+        second = s.next_context_block([(op("insert", "carol", "p3", 4_961_302), 3)], first)
+        self.assertEqual((first, second), (5_000_000, 5_000_000))
+
+    def test_empty_batch_keeps_current(self) -> None:
+        self.assertEqual(s.next_context_block([], 123), 123)
+        self.assertIsNone(s.next_context_block([], None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
