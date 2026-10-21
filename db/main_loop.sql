@@ -494,6 +494,22 @@ BEGIN
 END
 $$;
 
+-- Whether the massive sync may be finalized (the HNSW index built) after
+-- processing up to _last_block: in the live stage, or once the range reaches
+-- HAF's irreversible head - but never while HAF itself is still in its massive
+-- sync. The context opts into early block processing, so during a
+-- keep-monotonic replay it is delivered blocks while hived replays, and
+-- hafd.hive_state.consistent_block is then only the head of the replay so far.
+CREATE OR REPLACE FUNCTION hivesense_app.massive_sync_finished(_context hive.context_name, _last_block INT)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT hive.is_instance_ready()
+       AND (COALESCE(hive.get_current_stage_name(_context) = 'live', FALSE)
+            OR _last_block >= (SELECT consistent_block FROM hafd.hive_state))
+$$;
+
 -- Dropped: the advisory-lock based scheduler/worker handshake has been replaced
 -- by state-based coordination through hivesense_app.block_tasks (see scheduler()
 -- and worker_loop() below).  The old unlock/relock "pulse" protocol could lose a
@@ -639,7 +655,8 @@ BEGIN
             IF __breaking_reason IS NOT NULL THEN
                 IF __breaking_reason = 'BLOCK_LIMIT_REACHED'
                    AND _max_block_limit IS NOT NULL
-                   AND hive.app_get_current_block_num(__context_name) >= _max_block_limit THEN
+                   AND hive.app_get_current_block_num(__context_name) >= _max_block_limit
+                   AND hive.is_instance_ready() THEN
                     CALL ensure_indexes_are_created();
                 END IF;
                 RETURN;
@@ -692,7 +709,8 @@ BEGIN
             ROLLBACK;
             IF __breaking_reason = 'BLOCK_LIMIT_REACHED'
                AND _max_block_limit IS NOT NULL
-               AND hive.app_get_current_block_num(__context_name) >= _max_block_limit THEN
+               AND hive.app_get_current_block_num(__context_name) >= _max_block_limit
+               AND hive.is_instance_ready() THEN
                 CALL ensure_indexes_are_created();
             END IF;
             RETURN;
@@ -837,9 +855,10 @@ BEGIN
          WHERE id = 1;
 
         -------------------------------------------------------------------
-        -- After the batch, create indexes when appropriate
+        -- After the batch, create indexes when appropriate (not while HAF
+        -- is still in its massive sync, see massive_sync_finished())
         -------------------------------------------------------------------
-        IF hive.get_current_stage_name(__context_name) = 'live' THEN
+        IF hive.get_current_stage_name(__context_name) = 'live' AND hive.is_instance_ready() THEN
             CALL ensure_indexes_are_created();
         END IF;
     END LOOP;

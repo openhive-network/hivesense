@@ -67,6 +67,13 @@ BEGIN
                                     _stages => synchronization_stages);
   END IF;
 
+  -- Let HAF deliver blocks while hived still replays (hived's
+  -- psql-massive-index-policy = keep-monotonic). Block processing reads
+  -- hivemind_app's tables and hafd.hive_state, never a core index HAF defers
+  -- to the end of the replay; tests/test_early_block_processing.sql guards
+  -- that. Idempotent, so a reinstall re-asserts it.
+  PERFORM hive.app_context_set_early_block_processing(ARRAY[__schema_name]::hive.contexts_group);
+
   CREATE TABLE IF NOT EXISTS version(
     schema_hash TEXT,
     runtime_hash TEXT

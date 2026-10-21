@@ -188,12 +188,11 @@ def process_blocks(conn, first_block, last_block) -> None:
         # Build the HNSW indexes at the massive -> live transition, or as soon as
         # this range reaches HAF's synced head (covers a --stop-at-block run that
         # ends inside the massive stage - the legacy scheduler built them on its
-        # block-limit exit).
-        cur.execute("SELECT consistent_block FROM hafd.hive_state")
-        haf_head = cur.fetchone()[0]
-        if stage == "live" or last_block >= haf_head:
-            log.info("caught up (stage %s, block %s/%s): ensuring HNSW indexes exist "
-                     "(may take a while the first time)", stage, last_block, haf_head)
+        # block-limit exit); never while hived still replays.
+        cur.execute("SELECT hivesense_app.massive_sync_finished('hivesense_app', %s)", (last_block,))
+        if cur.fetchone()[0]:
+            log.info("caught up (stage %s, block %s): ensuring HNSW indexes exist "
+                     "(may take a while the first time)", stage, last_block)
             cur.execute("CALL hivesense_app.ensure_indexes_are_created()")
             _INDEXES_ENSURED = True
 
