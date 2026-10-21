@@ -32,8 +32,8 @@ write one case per call (`embed-search.xml`, `embed-slice.xml`, `embed-pca.xml`,
 | `sqlfluff` | `sqlfluff lint` 2.1.4 with `.sqlfluff`, as CI's `lint_sql_scripts`; any violation fails |
 | `unit` | `tests/unit` with python's `unittest` (no database, no network) |
 | `sql-registered` | every `.sql` under `db/` and `endpoints/` is applied by `scripts/install_app.sh` |
-| `stack-pins` | the HAF, hafah, reputation_tracker and hivemind images of `test-stack.compose.yml` match `.gitlab-ci.yml`'s `UPSTREAM_BRANCH` (see [the stack](#the-haf-test-stack-test-stackcomposeyml)); fails naming each stale image and the expected branch. Reads only the tree, no registry |
-| `install` | `scripts/install_app.sh` into the stack's HAF database as `haf_admin`, then `hivesense_app.init_local_sync_identity()` (what the block processor runs at start-up) and `tests/test_sync_chains.sql`. The runtime image carries `install_with_app_lock.py`, so `install_app.sh` re-runs itself under the app's exclusive install lock as in hivesense's install image; the step fails if the log has the `install_with_app_lock.py wrapper not found` WARNING or lacks the wrapper's `Acquired install lock for hivesense` |
+| `stack-pins` | the HAF, hafah, reputation_tracker and hivemind images of `test-stack.compose.yml` match `.gitlab-ci.yml`'s `UPSTREAM_BRANCH` and `x-apps-release` (see [the stack](#the-haf-test-stack-test-stackcomposeyml)); fails naming each stale image and the expected branch. Reads only the tree, no registry |
+| `install` | `scripts/install_app.sh` into the stack's HAF database as `haf_admin`, then `hivesense_app.init_local_sync_identity()` (what the block processor runs at start-up) `tests/test_sync_chains.sql` and `tests/test_early_block_processing.sql` (HAF's keep-monotonic replay state, from `hive.disable_indexes_of_irreversible('keep-monotonic')` in a rolled-back transaction: the context is delivered blocks, does not finalize, and no `hivesense_app` function reads a table with deferred core indexes). The runtime image carries `install_with_app_lock.py`, so `install_app.sh` re-runs itself under the app's exclusive install lock as in hivesense's install image; the step fails if the log has the `install_with_app_lock.py wrapper not found` WARNING or lacks the wrapper's `Acquired install lock for hivesense` |
 | `events-id` | CI's `events_id_test` (#54), with CI's messages: set `hafd.contexts.events_id = 0` for `hivesense_app`, call the tree's `sync_embeddings.ensure_context_detached` with psycopg, expect `events_id = hive.unreachable_event_id()` |
 | `install-lock` | CI's `lock_skip_test`: a background psql session holds the app's shared install lock (`pg_advisory_lock_shared(hashtext('hive_fork_manager_app_lock'), hashtext('hivesense'))`, as a block processor does), then `install_app.sh` runs with other options; it must exit 0, log `Skipping hivesense install … lock held by`, and leave the installed objects (by oid) and the configuration row unchanged. The holder is ended (client and server session) however the check ends. Runs after `install` |
 | `reinstall` | `scripts/uninstall_app.sh`, then `install` again |
@@ -111,8 +111,8 @@ pending waits for it, since moving the source branch would cancel it.
 
 ## The HAF test stack (`test-stack.compose.yml`)
 
-`haf`: the HAF testnet image CI resolves for `UPSTREAM_BRANCH` `1.28.8-rc3` (HAF commit
-`8de693b2`), started empty with the `sleep_infinity` maintenance script. It already
+`haf`: the HAF testnet image CI resolves for `UPSTREAM_BRANCH` `develop` (HAF commit
+`ce114878`, the first with the keep-monotonic early block processing API), started empty with the `sleep_infinity` maintenance script. It already
 carries pgvector, plpython3u and the python `tokenizers` / `pysbd` modules hivesense's
 SQL imports. Then one-shot services install hivesense's dependencies in the order
 `docker/ci/compose.yml` does: `haf-init` (`hive.initialize_extension_data()`, what hived
@@ -131,16 +131,20 @@ the `tokenizer-files` volume, which `haf` mounts read-only at
 `/home/hived/tokenizer-files`, where hivesense's chunker reads it
 (`db/posts_preprocessing.sql`). `haf` starts after the copy.
 
-hafah, reputation_tracker and hivemind are their `1.28.8-rc3` release images. Each of
-the four is pinned as `repo:tag@sha256:<digest>`: docker pulls the digest, and the tag
-says what the digest is (the HAF commit for `haf`, the release for the others). The
-top-level `x-haf-upstream-branch` records the HAF branch the commit was resolved for.
-CI resolves the newest HAF image for `UPSTREAM_BRANCH` on every run; `stack-pins`
-fails the `quick` slot when the release tags or `x-haf-upstream-branch` differ from
-`.gitlab-ci.yml`'s `UPSTREAM_BRANCH`, naming each stale image. When it moves, re-pin
-all four images together: HAF to `registry.gitlab.syncad.com/hive/haf/testnet:<new HAF
-commit, 8 chars>@<its linux/amd64 digest>` with `x-haf-upstream-branch` set to the
-branch, the others to `<repo>:<branch>@<digest>`. (A newer HAF commit on the same
+hafah, reputation_tracker and hivemind are their `1.28.8-rc3` release images, recorded
+in the top-level `x-apps-release`: `develop` has no app release images, so while HAF
+follows `develop` they stay at the newest release. Each of the four is pinned as
+`repo:tag@sha256:<digest>`: docker pulls the digest, and the tag says what the digest
+is (the HAF commit for `haf`, the release for the others). The top-level
+`x-haf-upstream-branch` records the HAF branch the commit was resolved for. CI
+resolves the newest HAF image for `UPSTREAM_BRANCH` on every run; `stack-pins` fails
+the `quick` slot when `x-haf-upstream-branch` differs from `.gitlab-ci.yml`'s
+`UPSTREAM_BRANCH`, when a release tag differs from `x-apps-release`, or when
+`x-apps-release` differs from a release `UPSTREAM_BRANCH`, naming each stale image.
+When it moves, re-pin all four images together: HAF to
+`registry.gitlab.syncad.com/hive/haf/testnet:<new HAF commit, 8 chars>@<its linux/amd64
+digest>` with `x-haf-upstream-branch` set to the branch, the others to
+`<repo>:<release>@<digest>` with `x-apps-release` set to the release. (A newer HAF commit on the same
 branch isn't detected: that needs the registry.)
 
 To run the stack checks by hand:

@@ -19,8 +19,8 @@
 #                     (HIVESENSE_TEST_DB_HOST, default `haf`), which already has
 #                     hivemind installed, through install_with_app_lock.py (its log
 #                     must not carry the wrapper-not-found WARNING); then the block
-#                     processor's start-up identity (init_local_sync_identity) and
-#                     tests/test_sync_chains.sql
+#                     processor's start-up identity (init_local_sync_identity),
+#                     tests/test_sync_chains.sql and tests/test_early_block_processing.sql
 #   - events-id       CI's events_id_test (#54): seed hafd.contexts.events_id = 0
 #                     for hivesense_app, run scripts/sync_embeddings.py's
 #                     ensure_context_detached, expect hive.unreachable_event_id()
@@ -122,15 +122,22 @@ stack_pins_of() {
 # Every upstream image must be pinned as repo:tag@sha256:<digest> (docker ignores the
 # tag); the tag is what ties the digest to .gitlab-ci.yml's UPSTREAM_BRANCH, which
 # CI resolves afresh on every run. HAF's tag is a commit, so its branch is recorded
-# next to it (x-haf-upstream-branch). Reads only the tree: no registry access.
+# next to it (x-haf-upstream-branch). The other images are releases (x-apps-release):
+# UPSTREAM_BRANCH's, or, while HAF follows develop, which has no app releases, the
+# newest release. Reads only the tree: no registry access.
 stack_pins() {
-    local branch haf_branch repo pins tag stale=0
+    local branch haf_branch release repo pins tag stale=0
     branch="$(sed -n 's/^ *UPSTREAM_BRANCH: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' .gitlab-ci.yml)"
     if [ -z "$branch" ] || [ "$(printf '%s\n' "$branch" | wc -l)" -ne 1 ]; then
         echo "expected one UPSTREAM_BRANCH in .gitlab-ci.yml, found '$branch'"
         return 1
     fi
     echo ".gitlab-ci.yml UPSTREAM_BRANCH: $branch"
+    release="$(sed -n 's/^x-apps-release: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$STACK_COMPOSE")"
+    if [ -z "$release" ] || { [ "$branch" != develop ] && [ "$release" != "$branch" ]; }; then
+        echo "STALE: $STACK_COMPOSE x-apps-release is '${release}'; expected UPSTREAM_BRANCH $branch (or a release while it is develop)"
+        stale=1
+    fi
     for repo in haf/testnet $STACK_IMAGES_BY_RELEASE; do
         pins="$(stack_pins_of "$repo")"
         if [ "$(printf '%s\n' "$pins" | grep -c .)" -ne 1 ] \
@@ -147,8 +154,8 @@ stack_pins() {
                 stale=1
                 continue
             fi
-        elif [ "$tag" != "$branch" ]; then
-            echo "STALE: $pins is release $tag; expected UPSTREAM_BRANCH $branch: re-pin hive/$repo to its $branch image"
+        elif [ "$tag" != "$release" ]; then
+            echo "STALE: $pins is release $tag; expected x-apps-release $release: re-pin hive/$repo to its $release image"
             stale=1
             continue
         fi
@@ -193,7 +200,8 @@ install() {
     # What the block processor does at start-up; tests/test_sync_chains.sql
     # expects the primary chain's sync_uuid it mints.
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atc "select hivesense_app.init_local_sync_identity()" || return 1
-    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_sync_chains.sql
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_sync_chains.sql || return 1
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_early_block_processing.sql
 }
 
 # query SQL: psql as haf_admin, unaligned tuples only

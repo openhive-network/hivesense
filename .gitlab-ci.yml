@@ -166,7 +166,7 @@ find_haf_image:
   variables:
     UPSTREAM_REPO_URL: "https://gitlab.syncad.com/hive/haf.git"
     UPSTREAM_REGISTRY: "registry.gitlab.syncad.com/hive/haf"
-    UPSTREAM_BRANCH: "1.28.8-rc3"
+    UPSTREAM_BRANCH: "develop"
     UPSTREAM_OUTPUT: "haf_image.env"
   before_script:
     # docker-builder image already has git, bash, and curl
@@ -464,6 +464,8 @@ sync:
     tests/integration/api_node/hivesense_search_test.sh --mode=slice || SEARCH_TEST_RC=1
     docker compose -f "${CI_PROJECT_DIR}/docker/ci/compose.yml" exec -T haf \
       psql -U haf_admin -v ON_ERROR_STOP=on -d haf_block_log -f - < tests/test_sync_chains.sql
+    docker compose -f "${CI_PROJECT_DIR}/docker/ci/compose.yml" exec -T haf \
+      psql -U haf_admin -v ON_ERROR_STOP=on -d haf_block_log -f - < tests/test_early_block_processing.sql
     echo -e "\e[0Ksection_end:$(date +%s):rebase_phase\r\e[0K"
   - |
     if [ "${SEARCH_TEST_RC:-0}" -ne 0 ]; then

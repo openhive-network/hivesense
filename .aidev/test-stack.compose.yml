@@ -19,15 +19,17 @@
 # install has completed and `ollama` serves the model, which is what
 # `docker compose up --wait` waits for.
 #
-# Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH 1.28.8-rc3
-# (hive/haf/testnet:8de693b2); hafah, reputation_tracker and hivemind are their
-# 1.28.8-rc3 release images. Each is pinned as repo:tag@sha256:<digest> (docker uses
-# the digest; the tag is what the `stack-pins` check of .aidev/run-checks.sh reads),
-# and x-haf-upstream-branch records the HAF branch the HAF commit tag was resolved
-# for. Re-pin them together when .gitlab-ci.yml's UPSTREAM_BRANCH moves
-# (.aidev/README.md). The ollama image is built from .aidev/runtime/ollama.Dockerfile
+# Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH develop
+# (hive/haf/testnet:ce114878, the keep-monotonic early block processing API);
+# hafah, reputation_tracker and hivemind are their 1.28.8-rc3 release images
+# (x-apps-release: develop has no release images of its own). Each is pinned as
+# repo:tag@sha256:<digest> (docker uses the digest; the tag is what the
+# `stack-pins` check of .aidev/run-checks.sh reads), and x-haf-upstream-branch
+# records the HAF branch the HAF commit tag was resolved for. Re-pin them together
+# when .gitlab-ci.yml's UPSTREAM_BRANCH moves (.aidev/README.md). The ollama image is built from .aidev/runtime/ollama.Dockerfile
 # by .aidev/runtime/build.sh --image=ollama.
-x-haf-upstream-branch: "1.28.8-rc3"
+x-haf-upstream-branch: "develop"
+x-apps-release: "1.28.8-rc3"
 
 x-haf-client: &haf-client
   depends_on:
@@ -36,7 +38,7 @@ x-haf-client: &haf-client
 
 services:
   haf:
-    image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:8de693b2@sha256:2b8b29a88da7d5bcbac37c5031f41f66846ca510e825a40519696244864604ea
+    image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:ce114878@sha256:7ea12cf8f2aeb7237ecab7ae8c6da6625d22b13c5540a9d5a817143f1d97f816
     command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
     volumes:
       - tokenizer-files:/home/hived/tokenizer-files:ro
@@ -48,7 +50,7 @@ services:
       # Every role from anywhere on the stack network. Test-grade: the database
       # is throwaway and reachable only on the stack's own network.
       PG_ACCESS: |
-        "host    all              all              0.0.0.0/0    trust"
+        host    all              all              0.0.0.0/0    trust
     healthcheck:
       test: ["CMD-SHELL", "psql -h 127.0.0.1 -U haf_admin -d haf_block_log -Atc \"select 1 from pg_extension where extname = 'hive_fork_manager'\" | grep -qx 1"]
       interval: 5s
