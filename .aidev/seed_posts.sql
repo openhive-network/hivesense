@@ -16,10 +16,14 @@ BEGIN;
 -- (HAF fork bookkeeping, deferred foreign keys) may fire on these rows.
 SET LOCAL session_replication_role = replica;
 
-DELETE FROM hivemind_app.hive_post_data WHERE id BETWEEN 900101 AND 900105;
-DELETE FROM hivemind_app.hive_posts WHERE id BETWEEN 900101 AND 900105;
-DELETE FROM hivemind_app.hive_permlink_data WHERE id BETWEEN 900101 AND 900105;
-DELETE FROM hivemind_app.hive_accounts WHERE id BETWEEN 9101 AND 9105;
+DELETE FROM hivemind_app.hive_post_data
+WHERE id BETWEEN 900101 AND 900105;
+DELETE FROM hivemind_app.hive_posts
+WHERE id BETWEEN 900101 AND 900105;
+DELETE FROM hivemind_app.hive_permlink_data
+WHERE id BETWEEN 900101 AND 900105;
+DELETE FROM hivemind_app.hive_accounts
+WHERE id BETWEEN 9101 AND 9105;
 
 INSERT INTO hivemind_app.hive_accounts (id, name, created_at) VALUES
 (9101, 'aidev-witness', '2026-01-01 00:00:00'),

@@ -28,8 +28,8 @@ write one case per call (`embed-search.xml`, `embed-slice.xml`, `embed-pca.xml`,
 
 | Step | What |
 |---|---|
-| `shellcheck` | ShellCheck (pinned 0.11.0, the release CI's `lint_bash_scripts` pins too) at warning severity on every `*.sh` — the files CI's `lint_bash_scripts` checks — and at default severity on `.aidev/`'s own scripts |
-| `sqlfluff` | `sqlfluff lint` 2.1.4 with `.sqlfluff`, as CI's `lint_sql_scripts`; any violation fails |
+| `shellcheck` | ShellCheck (the runtime base's, the one CI's `lint_bash_scripts` runs) at warning severity on every `*.sh` — the files CI's `lint_bash_scripts` checks — and at default severity on `.aidev/`'s own scripts |
+| `sqlfluff` | `sqlfluff lint` (the runtime base's, the one CI's `lint_sql_scripts` runs) with `.sqlfluff`, as CI's `lint_sql_scripts`; any violation `.sqlfluff` does not list under `warnings` fails |
 | `unit` | `tests/unit` with python's `unittest` (no database, no network) |
 | `sql-registered` | every `.sql` under `db/` and `endpoints/` is applied by `scripts/install_app.sh` |
 | `stack-pins` | the HAF, hafah, reputation_tracker and hivemind images of `test-stack.compose.yml` match `.gitlab-ci.yml`'s `UPSTREAM_BRANCH` and `x-apps-release` (see [the stack](#the-haf-test-stack-test-stackcomposeyml)); fails naming each stale image and the expected branch. Reads only the tree, no registry |
@@ -151,8 +151,9 @@ To run the stack checks by hand:
 
 ```bash
 docker compose -p hivesense-checks -f .aidev/test-stack.compose.yml up -d --wait
-docker run --rm --user "$(id -u):$(id -g)" --network hivesense-checks_default -v "$PWD:/w" -w /w \
-    "$(grep -o 'registry[^"]*aidev-tests@sha256:[0-9a-f]*' .aidev/project.yaml)" \
+docker build -t hivesense-aidev-tests \
+    --build-arg BASE_IMAGE=registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools:develop .aidev/runtime
+docker run --rm --user "$(id -u):$(id -g)" --network hivesense-checks_default -v "$PWD:/w" -w /w hivesense-aidev-tests \
     .aidev/run-checks.sh full shellcheck sqlfluff unit sql-registered stack-pins install events-id install-lock reinstall embed-search embed-slice embed-pca api-smoke
 docker compose -p hivesense-checks -f .aidev/test-stack.compose.yml down -v
 ```
@@ -169,35 +170,33 @@ then rebuild and re-pin **in the same commit**:
 # put the printed repo@sha256:<digest> into test-stack.compose.yml's `ollama` image
 ```
 
+`build.sh` can build through a pull-through registry cache near the build host: set
+`AIDEV_IMAGE_CACHE_BY_REGION` to `region=host:port` pairs, e.g.
+`us=steem-9.syncad.com:5001,*=steem-9.syncad.com:5001`: a pair applies when its region
+is a label of the host's FQDN, and `*` applies to any other host. Unset, the image is
+built straight from `registry.gitlab.syncad.com`.
+
 A new model also means new install options in `run-checks.sh` (`EMBEDDING_MODEL` or
 `SLICE_MODEL`, `--vector_size`, `--tokenizer-model`) and `EMBEDDING_DIMS` in
 `hivesense_smoke.py`; re-check that the seeded posts still rank as asserted.
 
 ## The test runtime image (`runtime/`)
 
-The checks run in a container with your uid: `python:3.14-slim-bookworm` (the syncer's
-python) with `postgresql-client`, the `postgrest` binary of
-`common-ci-configuration/postgrest`, ShellCheck 0.11.0, sqlfluff 2.1.4 (with click
-8.1.6, which 2.1.4 needs), `requests`, `psycopg`, `psycopg2` for the unit tests, and
+The checks run in a container with your uid, built from `runtime/Dockerfile` on
+`common-ci-configuration/python-test-tools:develop` — the image CI's lint jobs run in
+(`PYTHON_TEST_TOOLS_IMAGE` of common-ci-configuration's templates) — which brings
+python, `postgresql-client`, `git`, `postgrest`, ShellCheck and sqlfluff. The
+Dockerfile adds `psycopg` and `psycopg2` for the unit tests and
 `/usr/local/bin/install_with_app_lock.py` from the `common-ci-configuration/psql` image
 hivesense's `Dockerfile` names in `PSQL_CLIENT_VERSION` (it needs only python3 and
-psycopg2), so `install_app.sh` takes its advisory-lock path; all bases pinned by
-digest.
+psycopg2), so `install_app.sh` takes its advisory-lock path. It pins no tool version:
+the tools are the ones common-ci-configuration's `docker-bake.hcl` defines, so the
+`shellcheck` and `sqlfluff` steps and CI lint with the same versions.
 
-CI's `lint_bash_scripts` image (`koalaman/shellcheck-alpine`) and this image pin the
-same ShellCheck release, each by digest, so the `shellcheck` step and CI reach the
-same verdict. Bump them together: change the release in `.gitlab-ci.yml` and in
-`runtime/Dockerfile` in one commit, then rebuild and re-pin as below.
+`project.yaml` declares that base as a followed base (`environment.base`, `follow:
+true`): AIDEV resolves the tag before each run and builds and publishes the runtime
+itself when the tag moves or `runtime/Dockerfile` changes, so neither needs a re-pin
+here. `environment.image` is only the seed pin (the base's digest when it was adopted)
+and never has to move. When a new tool release breaks a check, fix the tree (or
+`.sqlfluff`) forward rather than pinning the tool.
 
-When `runtime/Dockerfile` changes, rebuild and re-pin **in the same commit**:
-
-```bash
-.aidev/runtime/build.sh --push   # registry digest if aidev-<input hash> exists, else build + push
-# put the printed repo@sha256:<digest> into project.yaml environment.image
-```
-
-To build through a pull-through registry cache near the build host, set
-`AIDEV_IMAGE_CACHE_BY_REGION` to `region=host:port` pairs, e.g.
-`us=steem-9.syncad.com:5001,*=steem-9.syncad.com:5001`: a pair applies when its region
-is a label of the host's FQDN, and `*` applies to any other host. Unset, the image is
-built straight from `registry.gitlab.syncad.com`.

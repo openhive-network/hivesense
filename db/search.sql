@@ -431,14 +431,12 @@ END;
 $$;
 
 
-
 DROP TYPE IF EXISTS contributors_result CASCADE;
 CREATE TYPE contributors_result AS (
    rank INT,
    author_id INT,
    similarity REAL
 );
-
 
 
 CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(

@@ -2,10 +2,11 @@
 # Build (and with --push, publish) one of the AIDEV images of .aidev/runtime/ and
 # print the digest-pinned reference to put where it is used. See .aidev/README.md.
 #
-#   --image=tests   (default) .aidev/runtime/Dockerfile -> hive/hivesense/aidev-tests,
-#                   the test runtime: .aidev/project.yaml's `environment.image`
-#   --image=ollama  .aidev/runtime/ollama.Dockerfile -> hive/hivesense/aidev-ollama,
+#   --image=ollama  (default) .aidev/runtime/ollama.Dockerfile -> hive/hivesense/aidev-ollama,
 #                   the embedding server: .aidev/test-stack.compose.yml's `ollama`
+#
+# The test runtime (.aidev/runtime/Dockerfile) is not built here: AIDEV builds it on
+# the base .aidev/project.yaml's `environment.base` follows.
 #
 # The tag is `aidev-<hash>`, the hash of the image input (its Dockerfile; every
 # FROM and ADD is digest- or checksum-pinned); the registry cleanup policy keeps
@@ -20,11 +21,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 usage() {
-    echo "usage: $0 [--image=tests|--image=ollama] [--push|--tag]" >&2
+    echo "usage: $0 [--image=ollama] [--push|--tag]" >&2
     exit 2
 }
 
-image=tests mode=""
+image=ollama mode=""
 for arg in "$@"; do
     case "$arg" in
         --image=*) image="${arg#*=}" ;;
@@ -34,9 +35,6 @@ for arg in "$@"; do
 done
 
 case "$image" in
-    tests)
-        DOCKERFILE=.aidev/runtime/Dockerfile
-        REPOSITORY="${AIDEV_RUNTIME_REPOSITORY:-registry.gitlab.syncad.com/hive/hivesense/aidev-tests}" ;;
     ollama)
         DOCKERFILE=.aidev/runtime/ollama.Dockerfile
         REPOSITORY="${AIDEV_OLLAMA_REPOSITORY:-registry.gitlab.syncad.com/hive/hivesense/aidev-ollama}" ;;

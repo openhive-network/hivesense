@@ -584,5 +584,4 @@ RETURNS boolean IMMUTABLE PARALLEL SAFE LANGUAGE sql AS
 $$ SELECT allow_debugging FROM hivesense_app.hivesense_app_status LIMIT 1 $$;
 
 
-
 RESET ROLE;
