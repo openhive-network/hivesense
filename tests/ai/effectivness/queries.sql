@@ -116,7 +116,7 @@ WITH nearest_posts_id AS (
 
 query_and_link AS (
     SELECT
-        npid.query AS query,
+        npid.query,
         (npid.nearest_post_id).similarity_order AS similarity_order,
         'https://hive.blog/@' || ha.name || '/' || hpd.permlink AS link
     FROM nearest_posts_id AS npid

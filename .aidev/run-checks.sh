@@ -9,7 +9,8 @@
 #   - shellcheck      ShellCheck at warning severity on every *.sh (the files CI's
 #                     lint_bash_scripts checks), at default severity on .aidev/'s own
 #   - sqlfluff        `sqlfluff lint` with the repository's .sqlfluff (CI's
-#                     lint_sql_scripts, which fails on any violation)
+#                     lint_sql_scripts, which fails on any violation .sqlfluff
+#                     does not list under `warnings`)
 #   - unit            tests/unit with python's unittest (no database, no network)
 #   - sql-registered  every .sql file under db/ and endpoints/ is applied by
 #                     scripts/install_app.sh (a file it misses never reaches a database)
@@ -88,7 +89,7 @@ run_shellcheck() {
 run_sqlfluff() {
     sqlfluff --version
     sqlfluff lint --dialect postgres --nofail --format yaml --write-output "$out/sqlfluff.yaml" . || return 1
-    if grep -q 'code:' "$out/sqlfluff.yaml"; then
+    if grep -q 'warning: false' "$out/sqlfluff.yaml"; then
         cat "$out/sqlfluff.yaml"
         return 1
     fi

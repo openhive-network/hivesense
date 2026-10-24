@@ -60,10 +60,11 @@ HiveSense is a HAF-based application for semantic search on Hive blockchain post
 
 ### Linting
 ```bash
-# Shell scripts (CI uses shellcheck-alpine)
+# CI runs both in common-ci-configuration's python-test-tools image
+# Shell scripts
 find . -name .git -type d -prune -o -type f -name \*.sh -exec shellcheck {} +
 
-# SQL scripts (CI uses sqlfluff)
+# SQL scripts (fails on any violation .sqlfluff does not list under warnings)
 sqlfluff lint --dialect postgres
 ```
 
@@ -130,8 +131,8 @@ Key parameters (see `./scripts/install_app.sh --help` for full list):
 Stages: detect → lint → build → sync → test → publish → cleanup
 
 - **find_haf_image**: Automatically detects latest HAF image from upstream registry
-- **lint_bash_scripts**: Shellcheck validation
-- **lint_sql_scripts**: SQLFluff validation
+- **lint_bash_scripts**: Shellcheck validation (ccc `.haf_app_lint_bash`)
+- **lint_sql_scripts**: SQLFluff validation (ccc `.haf_app_lint_sql`)
 - **build_images**: Builds and pushes Docker images
 - **sync**: Integration test with HAF API node (syncs 1M blocks) using docker/ci/compose.yml. Tests all three embedding configurations: full vectors, PCA-reduced (matrix computed in-job by the pca image), and Matryoshka slice (mxbai-embed-xsmall-v1). Reconfiguration between phases reuses the synced HAF/hivemind stack via `scripts/ci-helpers/reconfigure-hivesense.sh`; per-configuration search tests live in `tests/integration/api_node/hivesense_search_test.sh`
 - **publish_images**: Tags releases for protected branches
