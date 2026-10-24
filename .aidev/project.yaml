@@ -27,8 +27,15 @@ branches:
 # How this project's suites execute (#13892): one kind, stated once.
 environment:
   kind: "container"
-  # Built by .aidev/runtime/build.sh from .aidev/runtime/Dockerfile (its only input).
-  image: "registry.gitlab.syncad.com/hive/hivesense/aidev-tests@sha256:a689331ce30a0f708f3b1c8ce2c333bf2c631de9c5a7c92937babea8215f45df"
+  # AIDEV builds .aidev/runtime/Dockerfile on the image `base` names now and runs
+  # the suites in that build; moving the tag or editing the Dockerfile rebuilds it.
+  # The base is the image CI's lint jobs run in (common-ci-configuration's
+  # PYTHON_TEST_TOOLS_IMAGE), so both lint with the same tool versions.
+  build: {dockerfile: ".aidev/runtime/Dockerfile", context: ".aidev/runtime"}
+  base: {image: "registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools:develop", follow: true}
+  # The seed pin, read before a slot resolves; the suites never run in it under a
+  # followed base. The base's digest at adoption.
+  image: "registry.gitlab.syncad.com/hive/common-ci-configuration/python-test-tools@sha256:6f7fb3acf0c4f5551cf9fa58a382fbae66c9c47b06510b31685553581ef1409e"
   inputs: [".aidev/runtime/Dockerfile"]
 
 issues:
@@ -64,7 +71,7 @@ sandbox:
 # seven gates report on the same evidence while claiming to check seven
 # different things.
 #
-# Lightweight first: lint (CI's shellcheck and sqlfluff), the python unit tests,
+# Lightweight first: lint (shellcheck and sqlfluff, as CI's lint jobs), the python unit tests,
 # the stack pins against CI's UPSTREAM_BRANCH, then install / reinstall of the
 # candidate's SQL into the stack (through the install-lock wrapper, plus CI's #54
 # events_id and lock-skip checks), embedding a few seeded posts with CI's models in
