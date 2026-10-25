@@ -10,9 +10,16 @@ events {
 }
 http {
     access_log /dev/stdout;
+    # ${RESOLVER} will be replaced by the docker entrypoint script.
+    # Resolving the upstream per request (variable proxy_pass below) lets nginx
+    # start while hivesense-postgrest is not yet in DNS, instead of exiting.
+    resolver ${RESOLVER} valid=10s;
     server {
             listen 0.0.0.0:80 default_server;
             server_name _;
+            # Set at server level: the 'rewrite ... break' rules in the location
+            # stop any later 'set' there from running.
+            set $postgrest_upstream http://hivesense-postgrest:3000;
 
             location / {
                     include rewrite_rules.conf;
@@ -21,7 +28,7 @@ http {
                     # otherwise it will remain disabled
                     ${REWRITE_LOG}
 
-                    proxy_pass  http://hivesense-postgrest:3000;  # my PostREST is  here!
+                    proxy_pass  $postgrest_upstream;  # my PostREST is  here!
 
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
