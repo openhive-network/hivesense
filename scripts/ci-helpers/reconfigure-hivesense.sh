@@ -152,6 +152,32 @@ run_one_shot() {
   fi
 }
 
+# 'docker compose restart' restarts services concurrently and ignores
+# depends_on, so dependent services are restarted one at a time, each after
+# the one before it reports healthy.
+wait_healthy() {
+  svc="$1"
+  cid=$(compose ps -q "$svc")
+  echo "Waiting for ${svc} to become healthy..."
+  i=0
+  until [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null)" = "healthy" ]; do
+    i=$((i+1))
+    if [ "$i" -gt 60 ]; then
+      echo "ERROR: ${svc} not healthy after 5 minutes" >&2
+      compose logs --no-log-prefix --tail 30 "$svc"
+      exit 1
+    fi
+    sleep 5
+  done
+}
+
+restart_in_order() {
+  for svc in "$@"; do
+    compose restart "$svc"
+    wait_healthy "$svc"
+  done
+}
+
 # 1. For PCA, compute the projection matrix from the embeddings that are
 #    currently in the database (before the uninstall wipes them).
 if [ "$MODE" = "pca" ]; then
@@ -212,9 +238,8 @@ fi
 # The uninstall dropped and recreated the hivesense roles, and PostgREST
 # caches the schema. pgbouncer's pooled server connections still reference
 # the dropped role (PostgREST gets HTTP 401 through them), so bounce
-# pgbouncer first, then the PostgREST services.
-compose restart pgbouncer
-compose restart hivesense-postgrest hivesense-postgrest-rewriter
+# pgbouncer first, then PostgREST, then its rewriter.
+restart_in_order pgbouncer hivesense-postgrest hivesense-postgrest-rewriter
 
 # 4. Regenerate embeddings and rebuild the index.
 run_one_shot hivesense-process-blocks

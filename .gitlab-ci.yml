@@ -262,6 +262,10 @@ sync:
   script:
   - docker compose version
   - |
+    echo -e "\e[0Ksection_start:$(date +%s):rewriter_upstream_test[collapsed=true]\r\e[0KRewriter starts before its upstream resolves..."
+    tests/integration/rewriter/rewriter_unresolvable_upstream_test.sh
+    echo -e "\e[0Ksection_end:$(date +%s):rewriter_upstream_test\r\e[0K"
+  - |
     echo -e "\e[0Ksection_start:$(date +%s):compose[collapsed=true]\r\e[0KStarting the test environment..."
     scripts/ci-helpers/start-ci-test-environment.sh --haf-data-directory=${POOL_DIR} --block-log-directory=${BLOCK_LOG_SOURCE_DIR_1M}
     echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
