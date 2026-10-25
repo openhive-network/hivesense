@@ -29,6 +29,10 @@
 #                     shared install lock, install_app.sh skips, exits 0 and leaves
 #                     the installed schema as it was
 #   - reinstall       scripts/uninstall_app.sh, then install again
+#   - hivemind-reinstall  hivemind's role dropped and recreated (its uninstall and
+#                     reinstall, its objects kept) under an installed hivesense; then
+#                     install must restore both hivesense roles' hivemind membership.
+#                     Also: with no hivemind role, builtin_roles.sql fails naming it
 #   - embed-search    reinstall configured as CI's sync job (all-minilm:l6-v2, 384
 #                     dims, the stack's `ollama`; token threshold 200), seed
 #                     .aidev/seed_posts.sql, embed the seeded posts with
@@ -325,6 +329,118 @@ reinstall() {
     install "$@"
 }
 
+# What hivemind's uninstall (DROP OWNED BY hivemind, DROP ROLE hivemind) does to
+# the roles' memberships, without losing hivemind's installed schema: its objects
+# are parked on a holding role and the memberships of hivemind itself (but not
+# hivesense's) are kept in temporary tables for HIVEMIND_ROLE_RECREATE.
+HIVEMIND_ROLE_DROP="
+CREATE TEMP TABLE hm_role AS SELECT * FROM pg_authid WHERE rolname = 'hivemind';
+CREATE TEMP TABLE hm_in AS
+    SELECT r.rolname AS granted, m.admin_option FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+     WHERE m.member = 'hivemind'::regrole;
+CREATE TEMP TABLE hm_members AS
+    SELECT u.rolname AS member, m.admin_option FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member
+     WHERE m.roleid = 'hivemind'::regrole AND u.rolname NOT IN ('hivesense_owner', 'hivesense_user');
+CREATE TEMP TABLE hm_settings AS
+    SELECT setdatabase, unnest(setconfig) AS cfg FROM pg_db_role_setting WHERE setrole = 'hivemind'::regrole;
+CREATE ROLE aidev_hivemind_holder;
+REASSIGN OWNED BY hivemind TO aidev_hivemind_holder;
+DROP OWNED BY hivemind;
+DROP ROLE hivemind;"
+
+# What hivemind's reinstall does: the role again, with its attributes and the
+# memberships HIVEMIND_ROLE_DROP kept, owning what it owned.
+HIVEMIND_ROLE_RECREATE="
+DO \$\$
+DECLARE r hm_role; g record;
+BEGIN
+  SELECT * INTO STRICT r FROM hm_role;
+  EXECUTE format('CREATE ROLE hivemind WITH %s %s %s %s %s %s %s CONNECTION LIMIT %s',
+      CASE WHEN r.rolsuper THEN 'SUPERUSER' ELSE 'NOSUPERUSER' END,
+      CASE WHEN r.rolinherit THEN 'INHERIT' ELSE 'NOINHERIT' END,
+      CASE WHEN r.rolcreaterole THEN 'CREATEROLE' ELSE 'NOCREATEROLE' END,
+      CASE WHEN r.rolcreatedb THEN 'CREATEDB' ELSE 'NOCREATEDB' END,
+      CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END,
+      CASE WHEN r.rolreplication THEN 'REPLICATION' ELSE 'NOREPLICATION' END,
+      CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' ELSE 'NOBYPASSRLS' END,
+      r.rolconnlimit);
+  IF r.rolpassword IS NOT NULL THEN
+    EXECUTE format('ALTER ROLE hivemind PASSWORD %L', r.rolpassword);
+  END IF;
+  FOR g IN SELECT * FROM hm_in LOOP
+    EXECUTE format('GRANT %I TO hivemind%s', g.granted, CASE WHEN g.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END);
+  END LOOP;
+  FOR g IN SELECT * FROM hm_members LOOP
+    EXECUTE format('GRANT hivemind TO %I%s', g.member, CASE WHEN g.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END);
+  END LOOP;
+  FOR g IN SELECT * FROM hm_settings LOOP
+    IF g.setdatabase = 0 THEN
+      EXECUTE format('ALTER ROLE hivemind SET %s TO %L', split_part(g.cfg, '=', 1), substr(g.cfg, strpos(g.cfg, '=') + 1));
+    ELSE
+      EXECUTE format('ALTER ROLE hivemind IN DATABASE %I SET %s TO %L', (SELECT datname FROM pg_database WHERE oid = g.setdatabase),
+          split_part(g.cfg, '=', 1), substr(g.cfg, strpos(g.cfg, '=') + 1));
+    END IF;
+  END LOOP;
+END
+\$\$;
+REASSIGN OWNED BY aidev_hivemind_holder TO hivemind;
+DROP ROLE aidev_hivemind_holder;"
+
+# The hivesense roles' memberships in hivemind, one per line
+hivemind_memberships() {
+    query "select u.rolname from pg_auth_members m join pg_roles u on u.oid = m.member
+            where m.roleid = 'hivemind'::regrole and u.rolname in ('hivesense_owner', 'hivesense_user')
+            order by 1"
+}
+
+# Hivemind uninstalled and reinstalled under an installed hivesense: rerunning
+# install_app.sh must give hivesense_owner and hivesense_user back their hivemind
+# membership, and with it hivemind_app. Before that, with no hivemind role at all
+# (in a rolled-back transaction), builtin_roles.sql must stop naming hivemind.
+hivemind_role_reinstall() {
+    local got role rc=0
+    wait_for_db || return 1
+    got="$(hivemind_memberships | paste -sd,)" || return 1
+    if [ "$got" != "hivesense_owner,hivesense_user" ]; then
+        echo "expected an installed hivesense with both hivemind memberships; found '$got': run after install"
+        return 1
+    fi
+
+    got="$(psql "$ADMIN_URL" -1 -v ON_ERROR_STOP=on -c "$HIVEMIND_ROLE_DROP" -f db/builtin_roles.sql 2>&1)" && rc=1
+    echo "$got"
+    if [ "$rc" -ne 0 ] || ! grep -q 'role "hivemind" does not exist: install hivemind before hivesense' <<<"$got"; then
+        echo "FAIL: without a hivemind role, builtin_roles.sql must fail naming the missing hivemind"
+        return 1
+    fi
+    echo "ok: without a hivemind role builtin_roles.sql fails naming it"
+
+    psql "$ADMIN_URL" -1 -v ON_ERROR_STOP=on -c "$HIVEMIND_ROLE_DROP" -c "$HIVEMIND_ROLE_RECREATE" || return 1
+    got="$(hivemind_memberships | paste -sd,)" || return 1
+    if [ -n "$got" ]; then
+        echo "FAIL: dropping and recreating the hivemind role left memberships '$got'; the check reproduces nothing"
+        return 1
+    fi
+    if [ "$(query "select nspowner::regrole from pg_namespace where nspname = 'hivemind_app'")" != hivemind ]; then
+        echo "FAIL: hivemind_app is no longer owned by the recreated hivemind role"
+        return 1
+    fi
+    echo "ok: hivemind role dropped and recreated; hivesense_owner and hivesense_user are no longer members"
+
+    install || return 1
+    got="$(hivemind_memberships | paste -sd,)" || return 1
+    if [ "$got" != "hivesense_owner,hivesense_user" ]; then
+        echo "FAIL: after reinstalling hivesense the hivemind memberships are '$got', expected hivesense_owner,hivesense_user"
+        return 1
+    fi
+    for role in hivesense_owner hivesense_user; do
+        query "set role $role; select count(*) from hivemind_app.hive_posts" > /dev/null || {
+            echo "FAIL: $role cannot read hivemind_app.hive_posts after the reinstall"
+            return 1
+        }
+    done
+    echo "PASS: reinstalling hivesense restored both hivemind memberships and hivemind_app access"
+}
+
 # The seeded posts (.aidev/seed_posts.sql) in block order; the last one is below
 # the token threshold.
 SEEDED_POSTS="{900101,900102,900103,900104,900105}"
@@ -545,6 +661,7 @@ for s in "$@"; do
         events-id) step events-id events_id ;;
         install-lock) step install-lock install_lock ;;
         reinstall) step reinstall reinstall ;;
+        hivemind-reinstall) step hivemind-reinstall hivemind_role_reinstall ;;
         embed-search) step embed-search with_default_restored embed_search ;;
         embed-slice) step embed-slice with_default_restored embed_slice ;;
         embed-pca) step embed-pca with_default_restored embed_pca ;;

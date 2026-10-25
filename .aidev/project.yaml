@@ -88,7 +88,7 @@ verification:
     artifacts: ["test-results/quick/"]
   full:
     adapter: command
-    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "hivemind-reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/full/"]
   baseline:
     adapter: command
@@ -96,7 +96,7 @@ verification:
     artifacts: ["test-results/baseline/"]
   canary:
     adapter: command
-    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "hivemind-reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/canary/"]
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # (AIDEV runs it in the post-implementation scan only). `static` and `system`
