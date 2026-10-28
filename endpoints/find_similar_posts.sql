@@ -141,6 +141,11 @@ BEGIN
       ) unioned
       ORDER BY 1;   -- UNION ALL keeps original order, but ORDER BY makes it explicit
 
+    -- observer is a URL parameter, so edge caches key per observer and never
+    -- serve one observer's filtered results to another. Set only on success so
+    -- error responses stay uncached.
+    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=60"}]', true);
+
     RETURN COALESCE(__result, '[]'::JSON);
 END;
 $$;

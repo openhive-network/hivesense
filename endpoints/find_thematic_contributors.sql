@@ -97,6 +97,11 @@ BEGIN
     JOIN hivemind_app.hive_accounts ha ON ha.id = search.author_id
     INTO __result;
 
+    -- observer is a URL parameter, so edge caches key per observer and never
+    -- serve one observer's filtered results to another. Set only on success so
+    -- error responses stay uncached.
+    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=60"}]', true);
+
     RETURN COALESCE( __result, '{}'::JSON);
 END
 $$;
