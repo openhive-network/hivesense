@@ -57,13 +57,14 @@ http_get() {
     wget -qO - "http://hivesense-postgrest-rewriter${1}"
 }
 
-# Status line and headers of a response. A raw HTTP/1.0 request rather than
-# `wget -S`: busybox wget stops before printing the headers of a 4xx/5xx
-# response, which would make the error-case check pass vacuously.
+# Status line and headers of a response, for any status code. Not `nc`:
+# busybox nc exits as soon as its stdin reaches EOF, before the reply arrives,
+# so the request pipe reads nothing. Not `wget -S`: busybox wget stops before
+# printing the headers of a 4xx/5xx response, which would make the error-case
+# check pass vacuously.
 http_head() {
-  printf 'GET %s HTTP/1.0\r\nHost: hivesense-postgrest-rewriter\r\n\r\n' "$1" |
-    docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
-      nc -w 60 hivesense-postgrest-rewriter 80 |
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
+    curl -s -m 60 -D - -o /dev/null "http://hivesense-postgrest-rewriter:80${1}" |
     tr -d '\r' | sed '/^$/q'
 }
 
