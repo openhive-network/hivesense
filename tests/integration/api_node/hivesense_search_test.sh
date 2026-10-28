@@ -57,6 +57,37 @@ http_get() {
     wget -qO - "http://hivesense-postgrest-rewriter${1}"
 }
 
+# Status line and headers of a response. A raw HTTP/1.0 request rather than
+# `wget -S`: busybox wget stops before printing the headers of a 4xx/5xx
+# response, which would make the error-case check pass vacuously.
+http_head() {
+  printf 'GET %s HTTP/1.0\r\nHost: hivesense-postgrest-rewriter\r\n\r\n' "$1" |
+    docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
+      nc -w 60 hivesense-postgrest-rewriter 80 |
+    tr -d '\r' | sed '/^$/q'
+}
+
+# expect_cache_control NAME PATH STATUS_PATTERN CACHE_CONTROL
+# An empty CACHE_CONTROL asserts the header is absent.
+expect_cache_control() {
+  response_head=$(http_head "$2")
+  status=$(echo "$response_head" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')
+  actual=$(echo "$response_head" | sed -n 's/^[Cc]ache-[Cc]ontrol:[[:space:]]*//p')
+  # shellcheck disable=SC2254
+  case "$status" in
+    $3) ;;
+    *)
+      fail "$1 answered HTTP '${status}', expected ${3}"
+      return
+      ;;
+  esac
+  if [ "$actual" = "$4" ]; then
+    pass "$1 (HTTP ${status}) sends Cache-Control '${4}'"
+  else
+    fail "$1 (HTTP ${status}) sends Cache-Control '${actual}', expected '${4}'"
+  fi
+}
+
 is_number() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
@@ -154,7 +185,15 @@ else
   fail "/authors/search returned no authors: $(echo "$body" | head -c 300)"
 fi
 
-# ─── 5. internal search functions ──────────────────────────────────────
+# ─── 5. edge-cache headers ─────────────────────────────────────────────
+expect_cache_control "/posts/search" "/posts/search?q=hive&result_limit=1&full_posts=0" 200 "public, max-age=60"
+expect_cache_control "/posts/{author}/{permlink}/similar" "/posts/${sample_post}/similar?result_limit=5" 200 "public, max-age=300"
+expect_cache_control "/authors/search" "/authors/search?topic=blockchain&result_limit=5" 200 "public, max-age=60"
+expect_cache_control "/posts/search error response" "/posts/search?q=hive&result_limit=0" "[45]??" ""
+expect_cache_control "/posts/{author}/{permlink}/similar error response" "/posts/${sample_post}/similar?result_limit=0" "[45]??" ""
+expect_cache_control "/sync-status" "/sync-status" 200 "public, max-age=0"
+
+# ─── 6. internal search functions ──────────────────────────────────────
 # Reference embedding for the check below (store_halfvec is off in CI)
 ref_embedding="(SELECT embedding::public.vector FROM hivesense_app.posts_vectors ORDER BY post_id, chunk_number LIMIT 1)"
 
