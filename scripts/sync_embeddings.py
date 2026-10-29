@@ -9,6 +9,8 @@ from requests.exceptions import RequestException
 import psycopg
 from psycopg.rows import dict_row
 from datetime import datetime, timezone
+from collections.abc import Mapping
+from typing import Any
 
 API_URL = os.environ.get("HIVESENSE_API")   # e.g. https://upstream/
 DB_DSN  = os.environ.get("POSTGRES_URI")         # postgres://…  (same schema names)
@@ -453,6 +455,48 @@ def next_context_block(resolved, current_block):
     return max(blocks, default=None)
 
 
+def empty_page_context_block(upstream_block: int, hivemind_head: int, current_block: int | None) -> int | None:
+    """Return the block to set the hivesense_app context to after an empty page,
+    or None when the context should be left unchanged.
+
+    upstream_block is the upstream's X-Current-Block-Num, hivemind_head the
+    local hivemind committed head (see hivemind_head_block()), current_block
+    the block the context was last set to by this process, or None. The
+    candidate is the lesser of upstream_block and hivemind_head; the result is
+    None when that equals current_block or would move the context backwards.
+    """
+    # The upstream's HAF usually runs a few blocks ahead of ours; naming a block
+    # our node has not processed makes /sync-status report a null timestamp.
+    block = min(upstream_block, hivemind_head)
+    if current_block is not None and block <= current_block:
+        return None
+    return block
+
+
+def upstream_current_block(headers: Mapping[str, str]) -> int:
+    """Return the upstream head block from an embedding-updates response's
+    headers; exits when the X-Current-Block-Num header is missing."""
+    header_block = headers.get("X-Current-Block-Num")
+    if header_block is None:
+        logging.error("Missing X-Current-Block-Num header")
+        sys.exit(1)
+    return int(header_block)
+
+
+def hivemind_head_block(cur: Any) -> int:
+    """Return the block up to which hivemind's data is committed."""
+    # during its massive sync hivemind's context position runs ahead of the
+    # flushed data by one batch; completed_block_num() (hivemind, haf#341)
+    # accounts for that
+    cur.execute("""
+        SELECT CASE WHEN to_regprocedure('hivemind_app.completed_block_num()') IS NOT NULL
+                    THEN hivemind_app.completed_block_num()
+                    ELSE hive.app_get_current_block_num('hivemind_app') END
+    """)
+    head: int = cur.fetchone()[0]
+    return head
+
+
 def upsert_vectors(cur, post_id, sync_seq, embeddings) -> None:
     # Ensure all embedding values are floats (psycopg3 requires type consistency)
     rows = [
@@ -669,21 +713,21 @@ def main() -> None:
         # probably fine for our usage.
         # When we get a list of ops from the server, we set our current_block_num to the highest one among
         # the applied non-delete ops, never moving it backwards (see next_context_block()).
-        # When we get an empty list, we update the current_block_num to match the API server's.
+        # When we get an empty list, we update the current_block_num to match the API server's, capped at
+        # our local hivemind head (see empty_page_context_block()).
         # That way, when we're well out-of-sync, we'll keep our current_block_num matching the last embedding
         # we've synced.  Once we're in sync, we'll advance our current_block_num to match the server, even if
         # blocks are going by without generating any new embedding-related events.
         if not ops:
-            header_block = response.headers.get("X-Current-Block-Num")
-            if header_block is None:
-                logging.error("Missing X-Current-Block-Num header")
-                sys.exit(1)
-            current_block = int(header_block)
-            if current_block != last_seen_current_block_num:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (current_block,))
-                conn.commit()
-                last_seen_current_block_num = current_block
+            upstream_block = upstream_current_block(response.headers)
+            with conn.cursor() as cur:
+                context_block = empty_page_context_block(
+                    upstream_block, hivemind_head_block(cur), last_seen_current_block_num)
+                if context_block is not None:
+                    cur.execute("SELECT hive.app_set_current_block_num('hivesense_app', %s)", (context_block,))
+            conn.commit()
+            if context_block is not None:
+                last_seen_current_block_num = context_block
             time.sleep(3)
             continue
 
@@ -701,15 +745,7 @@ def main() -> None:
             while True:
                 conn = ensure_connection_alive(conn)
                 with conn.cursor() as cur:
-                    # hivemind's committed position: during its massive sync the
-                    # context position runs ahead of the flushed data by one batch;
-                    # completed_block_num() (hivemind, haf#341) accounts for that
-                    cur.execute("""
-                        SELECT CASE WHEN to_regprocedure('hivemind_app.completed_block_num()') IS NOT NULL
-                                    THEN hivemind_app.completed_block_num()
-                                    ELSE hive.app_get_current_block_num('hivemind_app') END
-                    """)
-                    head = cur.fetchone()[0]
+                    head = hivemind_head_block(cur)
 
                 # rollback to avoid hold any locks on the context if we sleep below
                 conn.rollback()
