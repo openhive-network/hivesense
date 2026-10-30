@@ -127,9 +127,7 @@ query_database_rolled_back_with_errors() {
 # HTTP status line of a request through the rewriter (http_get prints
 # nothing for a non-2xx response, so errors are asserted on the status).
 http_status() {
-  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
-    wget -S -q -O /dev/null "http://hivesense-postgrest-rewriter${1}" 2>&1 \
-    | grep -o 'HTTP/1\.[01] [0-9][0-9][0-9]' | tail -1
+  http_head "$1" | head -1 | grep -o 'HTTP/1\.[01] [0-9][0-9][0-9]'
 }
 
 echo "=== hivesense search tests (mode: ${MODE}) ==="
@@ -495,7 +493,7 @@ else
   fi
 fi
 
-# ─── 8. block-range filter on /posts/search (#13) ─────────────────────
+# ─── 9. block-range filter on /posts/search (#13) ─────────────────────
 # from-block/to-block restrict the search to posts CREATED in that block
 # range, ranked exactly. As with the author filter, "ANN + WHERE block" would
 # lose posts, so every check compares against an oracle computed straight
