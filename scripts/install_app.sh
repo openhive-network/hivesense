@@ -63,8 +63,9 @@ print_help () {
     echo "  --min-token-search-threshold=INT      Don't return search results for posts with fewer than this number of tokens"
     echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
     echo "  --maintenance-work-mem                Desired setting of maintenance_work_mem to use while creating the HNSW index"
-    echo "  --default-ef-search                   Default exploratory factor when searching"
-    echo "  --minimum-ann-candidates              Always consider at least this many candidates for reranking"
+    echo "  --ef-floor=NUMBER                     Smallest hnsw.ef_search (and ANN candidate pool) of a search (default 60)"
+    echo "  --ef-multiplier=NUMBER                hnsw.ef_search per requested result, before clamping to floor/ceiling (default 10)"
+    echo "  --ef-ceiling=NUMBER                   Largest hnsw.ef_search of a search, at most 1000 (default 500)"
     echo "  --use-reduced-embeddings=BOOL         Enable dimension reduction (true/false, yes/no, on/off, 1/0, case insensitive)"
     echo "  --reduced-dim=NUMBER                  Reduced dimension size"
     echo "  --reduction-mode=MODE                 Reduction method: 'none', 'pca', or 'slice' (matryoshka truncation)"
@@ -116,8 +117,9 @@ REDUCED_MATRIX_FILE=""
 NUM_CTX=0              # 0 = use Ollama default; set > tokens_per_chunk for large-context models
 HNSW_M=32
 HNSW_EF_CONSTRUCTION=400
-DEFAULT_EF_SEARCH=500
-MINIMUM_ANN_CANDIDATES=1000
+EF_FLOOR=60
+EF_MULTIPLIER=10
+EF_CEILING=500
 ALLOW_DEBUGGING=false
 
 while [ $# -gt 0 ]; do
@@ -224,11 +226,14 @@ while [ $# -gt 0 ]; do
     --hnsw-ef-construction=*)
 	HNSW_EF_CONSTRUCTION="${1#*=}"
 	;;
-    --default-ef-search=*)
-        DEFAULT_EF_SEARCH="${1#*=}"
+    --ef-floor=*)
+        EF_FLOOR="${1#*=}"
         ;;
-    --minimum-ann-candidates=*)
-        MINIMUM_ANN_CANDIDATES="${1#*=}"
+    --ef-multiplier=*)
+        EF_MULTIPLIER="${1#*=}"
+        ;;
+    --ef-ceiling=*)
+        EF_CEILING="${1#*=}"
         ;;
     --num-ctx=*)
         NUM_CTX="${1#*=}"
@@ -261,6 +266,13 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# pgvector accepts hnsw.ef_search in 1..1000; a bad value would only surface as a failing search
+if ! [[ "$EF_FLOOR" =~ ^[0-9]+$ && "$EF_MULTIPLIER" =~ ^[0-9]+$ && "$EF_CEILING" =~ ^[0-9]+$ ]] \
+   || (( EF_FLOOR < 1 || EF_MULTIPLIER < 1 || EF_CEILING < EF_FLOOR || EF_CEILING > 1000 )); then
+    echo "ERROR: need 1 <= --ef-floor <= --ef-ceiling <= 1000 and --ef-multiplier >= 1" >&2
+    exit 1
+fi
 
 POSTGRES_ACCESS=${POSTGRES_URL:-"postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=${POSTGRES_APP_NAME}"}
 
@@ -328,8 +340,9 @@ psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on -c "
   SET pg_temp.REDUCTION_MODE        TO '${REDUCTION_MODE}';
   SET pg_temp.HNSW_M                TO ${HNSW_M};
   SET pg_temp.HNSW_EF_CONSTRUCTION  TO ${HNSW_EF_CONSTRUCTION};
-  SET pg_temp.DEFAULT_EF_SEARCH TO ${DEFAULT_EF_SEARCH};
-  SET pg_temp.MINIMUM_ANN_CANDIDATES TO ${MINIMUM_ANN_CANDIDATES};
+  SET pg_temp.EF_FLOOR TO ${EF_FLOOR};
+  SET pg_temp.EF_MULTIPLIER TO ${EF_MULTIPLIER};
+  SET pg_temp.EF_CEILING TO ${EF_CEILING};
   SET pg_temp.ALLOW_DEBUGGING   TO ${ALLOW_DEBUGGING};
   SET SEARCH_PATH TO ${HIVESENSE_SCHEMA};
 " -f "$SRCPATH/db/database_schema.sql"
