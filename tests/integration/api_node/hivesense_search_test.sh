@@ -205,6 +205,75 @@ else
   fail "one-shot search returned '${count}', expected >= 1"
 fi
 
+# ─── 7. ANN sized to the requested limit ───────────────────────────────
+# Default tunables: ef_search = clamp(limit * 10, 60, 500), candidates = ef.
+for pair in 3:60 10:100 20:200 100:500 1000:500; do
+  limit=${pair%:*}
+  expected_ef=${pair#*:}
+  sizing=$(query_database "SELECT ef_search || ',' || ann_candidates FROM hivesense_app.ann_search_size(${limit})")
+  if [ "$sizing" = "${expected_ef},${expected_ef}" ]; then
+    pass "limit ${limit} sizes ef_search and candidates to ${expected_ef}"
+  else
+    fail "limit ${limit} sizes ef_search,candidates to '${sizing}', expected ${expected_ef},${expected_ef}"
+  fi
+done
+
+# The search must run with that ef_search, and return no more than asked for.
+for pair in 3:60 100:500; do
+  limit=${pair%:*}
+  expected_ef=${pair#*:}
+  got=$(query_database "
+    WITH r AS MATERIALIZED (
+      SELECT * FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, ${limit}))
+    SELECT (SELECT count(*) FROM r) || ',' || current_setting('hnsw.ef_search')")
+  count=${got%,*}
+  ef=${got#*,}
+  if is_number "$count" && [ "$count" -ge 1 ] && [ "$count" -le "$limit" ] && [ "$ef" = "$expected_ef" ]; then
+    pass "one-shot search with limit ${limit} returns ${count} results at ef_search ${ef}"
+  else
+    fail "one-shot search with limit ${limit} returned count,ef_search '${got}', expected 1..${limit},${expected_ef}"
+  fi
+done
+
+# ─── 8. candidate filters are only built when they can remove a row ────
+token_threshold=$(query_database "SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1")
+if [ "$token_threshold" = "0" ]; then
+  filter=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0)")
+  if [ -z "$filter" ]; then
+    pass "anonymous search without a token threshold filters nothing"
+  else
+    fail "anonymous search without a token threshold filters '${filter}'"
+  fi
+fi
+
+# An observer that mutes the author of the reference post never sees it,
+# although it is the post's own nearest neighbour.
+muted_pair=$(query_database "
+  SELECT m.observer_id || ',' || pv.post_id || ':' || pv.chunk_number
+    FROM hivemind_app.muted_accounts_by_id_view m
+    JOIN hivemind_app.hive_posts hp ON hp.author_id = m.muted_id
+    JOIN hivesense_app.posts_vectors pv ON pv.post_id = hp.id
+   LIMIT 1")
+if [ -n "$muted_pair" ]; then
+  observer=${muted_pair%,*}
+  muted_chunk=${muted_pair#*,}
+  muted_post=${muted_chunk%:*}
+  muted_embedding="(SELECT embedding::public.vector FROM hivesense_app.posts_vectors WHERE post_id = ${muted_post} AND chunk_number = ${muted_chunk#*:})"
+  unmuted=$(query_database "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${muted_embedding}, 3) WHERE post_id = ${muted_post}")
+  muted=$(query_database "
+    SELECT count(*)
+      FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${muted_embedding}, 3, _observer_id => ${observer}) r
+      JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id
+      JOIN hivemind_app.muted_accounts_by_id_view m ON m.muted_id = hp.author_id AND m.observer_id = ${observer}")
+  if [ "$unmuted" = "1" ] && [ "$muted" = "0" ]; then
+    pass "observer ${observer} does not see posts of accounts it mutes"
+  else
+    fail "post ${muted_post}: found ${unmuted} time(s) without observer (expected 1), ${muted} muted result(s) for observer ${observer} (expected 0)"
+  fi
+else
+  echo "skip: no observer mutes an author of an embedded post"
+fi
+
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
   echo "${FAILURES} search test(s) failed (mode: ${MODE})" >&2

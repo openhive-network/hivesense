@@ -42,8 +42,9 @@ BEGIN
     reduction_mode          TEXT    NOT NULL DEFAULT 'none', -- 'none', 'pca', or 'slice' (matryoshka)
     hnsw_m                  INT    NOT NULL DEFAULT 32,
     hnsw_ef_construction    INT    NOT NULL DEFAULT 400,
-    default_ef_search INT    NOT NULL DEFAULT 500,
-    minimum_ann_candidates INT   NOT NULL DEFAULT 1000,
+    ef_floor          INT    NOT NULL DEFAULT 60,  -- hnsw.ef_search = clamp(result limit * ef_multiplier, ef_floor, ef_ceiling); measurements in db/search.sql
+    ef_multiplier     INT    NOT NULL DEFAULT 10,
+    ef_ceiling        INT    NOT NULL DEFAULT 500,
     allow_debugging   BOOLEAN NOT NULL DEFAULT FALSE,
     document_prefix     TEXT    NOT NULL DEFAULT 'passage: ', -- prefix used when generating embeddings from posts
     query_prefix        TEXT    NOT NULL DEFAULT 'query: ', -- prefix used when generating embeddings from query strings
@@ -179,6 +180,17 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS embedding_timeout_per_text REAL NOT NULL DEFAULT 1;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS embedding_timeout_max REAL NOT NULL DEFAULT 600;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS ef_floor INT NOT NULL DEFAULT 60;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS ef_multiplier INT NOT NULL DEFAULT 10;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS ef_ceiling INT NOT NULL DEFAULT 500;
+-- replaced by ef_floor/ef_multiplier/ef_ceiling: the search no longer has a fixed ef_search or candidate pool
+ALTER TABLE hivesense_app_status
+  DROP COLUMN IF EXISTS default_ef_search;
+ALTER TABLE hivesense_app_status
+  DROP COLUMN IF EXISTS minimum_ann_candidates;
 
 INSERT INTO hivesense_app_status
 (
@@ -204,8 +216,9 @@ INSERT INTO hivesense_app_status
   reduction_mode,
   hnsw_m,
   hnsw_ef_construction,
-  default_ef_search,
-  minimum_ann_candidates,
+  ef_floor,
+  ef_multiplier,
+  ef_ceiling,
   allow_debugging,
   document_prefix,
   query_prefix,
@@ -243,8 +256,9 @@ VALUES
     COALESCE(current_setting('PG_TEMP.REDUCTION_MODE', TRUE), 'none'),
     current_setting('PG_TEMP.HNSW_M', TRUE)::INT,
     current_setting('PG_TEMP.HNSW_EF_CONSTRUCTION', TRUE)::INT,
-    current_setting('PG_TEMP.DEFAULT_EF_SEARCH', TRUE)::INT,
-    current_setting('PG_TEMP.MINIMUM_ANN_CANDIDATES', TRUE)::INT,
+    COALESCE(current_setting('PG_TEMP.EF_FLOOR', TRUE)::INT, 60),
+    COALESCE(current_setting('PG_TEMP.EF_MULTIPLIER', TRUE)::INT, 10),
+    COALESCE(current_setting('PG_TEMP.EF_CEILING', TRUE)::INT, 500),
     current_setting('PG_TEMP.ALLOW_DEBUGGING',   TRUE)::BOOLEAN,
     current_setting('PG_TEMP.DOCUMENT_PREFIX', TRUE)::TEXT,
     current_setting('PG_TEMP.QUERY_PREFIX', TRUE)::TEXT,
@@ -266,9 +280,12 @@ num_ctx = excluded.num_ctx,
 embedding_batch_size = excluded.embedding_batch_size,
 embedding_timeout_base = excluded.embedding_timeout_base,
 embedding_timeout_per_text = excluded.embedding_timeout_per_text,
-embedding_timeout_max = excluded.embedding_timeout_max;
--- only ollama host, embedding api, batch size and request timeouts can be overridden
--- by subsequent install; changing llm model or number of host requires resync
+embedding_timeout_max = excluded.embedding_timeout_max,
+ef_floor = excluded.ef_floor,
+ef_multiplier = excluded.ef_multiplier,
+ef_ceiling = excluded.ef_ceiling;
+-- only ollama host, embedding api, batch size, request timeouts and search sizing can be
+-- overridden by subsequent install; changing llm model or number of host requires resync
 
 CREATE SEQUENCE IF NOT EXISTS hivesense_app.batch_seq START 1;
 

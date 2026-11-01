@@ -9,6 +9,118 @@ CREATE TYPE hivesense_app.similar_post_result AS (
 );
 
 /* ────────────────────────────────────────────────────────────────
+ * 1.  ANN sizing and candidate filters shared by the searches
+ * ────────────────────────────────────────────────────────────────
+ * hnsw.ef_search = clamp(_limit * ef_multiplier, ef_floor, ef_ceiling),
+ * and the ANN candidate LIMIT is ef_search: with hnsw.iterative_scan off
+ * the index returns at most ef_search rows, so a larger LIMIT never binds.
+ *
+ * Defaults (floor 60, multiplier 10, ceiling 500) from steem-16, 2026-10-28:
+ * jina-embeddings-v5-text-small, 1024-dim halfvec, 128-dim Matryoshka slice
+ * HNSW (m=16, ef_construction=200), full-vector rerank; 24 posts spread
+ * across posts_vectors against their exact brute-force top-50. Buffers per
+ * call measured with EXPLAIN (ANALYZE, BUFFERS) on hbt5.
+ *
+ *   ef_search  recall@10  recall@20  top-1 same  +mean cos dist of top-10  buffers/call
+ *   1000       0.988      0.973      24/24       0.0001                    ~40,000
+ *    500       0.979      0.950      24/24       0.0003                     20,500
+ *    200       0.933      0.900      23/24       0.0011                      9,000
+ *    100       0.896      0.838      23/24       0.0023                      4,800
+ *     60       0.821      0.752      23/24       0.0046
+ *     40       0.771      0.675      22/24       0.0187
+ *
+ * The exact top-1/top-10/top-50 sit at mean cosine distance 0.164/0.265/0.322,
+ * so neighbours swapped in at ef 60-200 are invisible to a reader; ef 40 is
+ * where results get visibly worse. Rank of the exact top-10 in the 128-dim
+ * candidate ordering: median 8, p90 103, p99 522, max 669, 1.2% beyond 1,000;
+ * the slice ordering, not HNSW, is what needs the wide pool on large limits.
+ * Result: result_limit 3 -> ef 60, 10 -> 100, 20 -> 200, >= 50 -> 500.
+ */
+CREATE OR REPLACE FUNCTION hivesense_app.ann_search_size(
+    _limit             int,
+    OUT ef_search      int,
+    OUT ann_candidates int
+)
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    allow_dbg   boolean := hivesense_app.allow_debugging();
+    req_headers jsonb   := current_setting('request.headers', true)::jsonb;
+    __floor      int;
+    __multiplier int;
+    __ceiling    int;
+BEGIN
+    SELECT ef_floor, ef_multiplier, ef_ceiling
+      INTO __floor, __multiplier, __ceiling
+      FROM hivesense_app.hivesense_app_status
+     WHERE id = 1;
+
+    IF allow_dbg THEN
+        __multiplier := COALESCE((req_headers->>'x-batch-size-multiplier')::int, __multiplier);
+    END IF;
+
+    ef_search := LEAST(GREATEST(_limit * __multiplier, __floor), __ceiling);
+
+    IF allow_dbg THEN
+        ef_search := COALESCE((req_headers->>'x-exploratory-factor')::int, ef_search);
+    END IF;
+
+    ann_candidates := ef_search;
+    IF allow_dbg THEN
+        ann_candidates := LEAST(COALESCE((req_headers->>'x-ann-candidates')::int, ef_search), ef_search);
+    END IF;
+END;
+$$;
+
+/* WHERE-clause fragment (empty or starting with AND) restricting the ANN
+ * candidates of table alias _alias. The post_data and hive_posts lookups are
+ * only added when they can remove a row, so in the common case (no search
+ * token threshold, observer mutes nobody) the ANN is the index scan alone. */
+CREATE OR REPLACE FUNCTION hivesense_app.ann_candidate_filter(
+    _alias           text,
+    _exclude_post_id int,
+    _observer_id     int
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __min_tokens int;
+    __filter     text := '';
+BEGIN
+    SELECT min_token_search_threshold
+      INTO __min_tokens
+      FROM hivesense_app.hivesense_app_status
+     WHERE id = 1;
+
+    IF __min_tokens > 0 THEN
+        __filter := __filter || format(
+          ' AND EXISTS (SELECT 1 FROM hivesense_app.post_data pd'
+          ' WHERE pd.post_id = %1$I.post_id AND pd.number_of_tokens >= %2$s)',
+          _alias, __min_tokens);
+    END IF;
+
+    IF _exclude_post_id IS NOT NULL THEN
+        __filter := __filter || format(' AND %I.post_id <> %s', _alias, _exclude_post_id);
+    END IF;
+
+    IF _observer_id <> 0 AND EXISTS (
+           SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+            WHERE m.observer_id = _observer_id) THEN
+        __filter := __filter || format(
+          ' AND NOT EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
+          ' JOIN hivemind_app.muted_accounts_by_id_view m ON m.muted_id = hp.author_id'
+          ' WHERE hp.id = %1$I.post_id AND m.observer_id = %2$s)',
+          _alias, _observer_id);
+    END IF;
+
+    RETURN __filter;
+END;
+$$;
+
+/* ────────────────────────────────────────────────────────────────
  * 2.  One-shot nearest-posts function
  * ────────────────────────────────────────────────────────────────*/
 CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(
@@ -38,12 +150,9 @@ DECLARE
     dist_red  text;                                        -- uses $2 when reduced
 
     /* ───────── runtime tunables ───────── */
-    default_ef   int := (SELECT default_ef_search FROM hivesense_app.hivesense_app_status LIMIT 1);
-    minimum_ann_candidates int := (SELECT minimum_ann_candidates FROM hivesense_app.hivesense_app_status LIMIT 1);
     allow_dbg    boolean := hivesense_app.allow_debugging();
     req_headers        jsonb := current_setting('request.headers', true)::jsonb;
-    batch_multiplier   int := 5;
-    exploratory_factor int := default_ef;
+    exploratory_factor int;             -- computed below
     ann_candidates     int;             -- computed below
     exhaustive boolean := false;
 
@@ -72,20 +181,12 @@ BEGIN
 
     /* ─── apply overrides only if allowed ─── */
     IF allow_dbg THEN
-        batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
-                                       batch_multiplier);
-        exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
-                                       exploratory_factor);
-
         exhaustive := lower(coalesce(req_headers->>'x-exhaustive-search','false')) = 'true';
     END IF;
 
-    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
-    IF allow_dbg THEN
-        ann_candidates := COALESCE((req_headers->>'x-ann-candidates')::int,
-                                   ann_candidates);
-    END IF;
-    ann_candidates := GREATEST(ann_candidates, minimum_ann_candidates);
+    SELECT s.ef_search, s.ann_candidates
+      INTO exploratory_factor, ann_candidates
+      FROM hivesense_app.ann_search_size(_limit) s;
 
 
     /* — apply tunables — */
@@ -215,14 +316,7 @@ BEGIN
                        pv.chunk_number,
                        %s                           AS ann_dist
                   FROM hivesense_app.posts_vectors pv
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($3 IS NULL OR pv.post_id <> $3)
-                   AND ($4 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $4
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY ann_dist, pv.post_id
                  LIMIT %s
             ),
@@ -246,12 +340,11 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr (expression on embedding)
-          (__min_tokens = 0),           -- %L  token filter off?
-          __min_tokens,                 -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
-        USING _embedding, query_red, _exclude_post_id, _observer_id;
+        USING _embedding, query_red;
 
     ELSIF use_reduced THEN
         -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
@@ -261,14 +354,7 @@ BEGIN
                        pr.chunk_number,
                        %s                           AS ann_dist
                   FROM hivesense_app.posts_vectors_reduced pr
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($3 IS NULL OR pr.post_id <> $3)
-                   AND ($4 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $4
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY ann_dist, pr.post_id
                  LIMIT %s
             ),
@@ -292,12 +378,11 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          (__min_tokens = 0),           -- %L  token filter off?
-          __min_tokens,                 -- %s
+          hivesense_app.ann_candidate_filter('pr', _exclude_post_id, _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
-        USING _embedding, query_red, _exclude_post_id, _observer_id;
+        USING _embedding, query_red;
 
     ELSE   /* ───────── full-vector path ───────── */
         RETURN QUERY EXECUTE format($q$
@@ -306,14 +391,7 @@ BEGIN
                        pv.chunk_number,
                        %s                           AS sim
                   FROM hivesense_app.posts_vectors pv
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($2 IS NULL OR pv.post_id <> $2)
-                   AND ($3 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $3
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY sim, pv.post_id
                  LIMIT %s
             ),
@@ -332,12 +410,11 @@ BEGIN
              LIMIT %s
         $q$,
           dist_full,                  -- %s
-          (__min_tokens = 0),         -- %L
-          __min_tokens,               -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, _observer_id),  -- %s
           ann_candidates,             -- %s
           _limit                      -- %s
         )
-        USING _embedding, _exclude_post_id, _observer_id;
+        USING _embedding;
 
     END IF;
 END;
@@ -468,12 +545,9 @@ DECLARE
     dist_red  text;                                        -- uses $2 when reduced
 
     /* ───────── runtime tunables ───────── */
-    default_ef   int := (SELECT default_ef_search FROM hivesense_app.hivesense_app_status LIMIT 1);
-    minimum_ann_candidates int := (SELECT minimum_ann_candidates FROM hivesense_app.hivesense_app_status LIMIT 1);
     allow_dbg    boolean := hivesense_app.allow_debugging();
     req_headers        jsonb := current_setting('request.headers', true)::jsonb;
-    batch_multiplier   int := 10;  -- higher for authors since we need more candidates
-    exploratory_factor int := default_ef;
+    exploratory_factor int;             -- computed below
     ann_candidates     int;             -- computed below
     exhaustive boolean := false;
 
@@ -508,19 +582,12 @@ BEGIN
 
     /* ─── apply overrides only if allowed ─── */
     IF allow_dbg THEN
-        batch_multiplier   := COALESCE((req_headers->>'x-batch-size-multiplier')::int,
-                                       batch_multiplier);
-        exploratory_factor := COALESCE((req_headers->>'x-exploratory-factor')::int,
-                                       exploratory_factor);
         exhaustive := lower(coalesce(req_headers->>'x-exhaustive-search','false')) = 'true';
     END IF;
 
-    ann_candidates := LEAST(_limit * batch_multiplier, 50000);
-    IF allow_dbg THEN
-        ann_candidates := COALESCE((req_headers->>'x-ann-candidates')::int,
-                                   ann_candidates);
-    END IF;
-    ann_candidates := GREATEST(ann_candidates, minimum_ann_candidates);
+    SELECT s.ef_search, s.ann_candidates
+      INTO exploratory_factor, ann_candidates
+      FROM hivesense_app.ann_search_size(_limit) s;
 
     /* — apply tunables — */
     PERFORM set_config('ivfflat.probes', '4', true);
@@ -639,27 +706,21 @@ BEGIN
             WITH ann AS (
                 SELECT pv.post_id,
                        pv.chunk_number,
-                       hp.author_id,
                        %s AS ann_dist
                   FROM hivesense_app.posts_vectors pv
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($3 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $3
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY ann_dist, pv.post_id
                  LIMIT %s
             ),
             reranked AS (
-                SELECT ann.author_id,
+                SELECT hp.author_id,
                        ann.post_id,
                        (pv.embedding <=> $1)::float4 AS sim
                   FROM ann
                   JOIN hivesense_app.posts_vectors pv
                     ON pv.post_id = ann.post_id
                    AND pv.chunk_number = ann.chunk_number
+                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
             ),
             ranked AS (
                 SELECT author_id,
@@ -682,12 +743,11 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          (__min_search_tokens = 0),    -- %L  token filter off?
-          __min_search_tokens,          -- %s
+          hivesense_app.ann_candidate_filter('pv', NULL, _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
-        USING _embedding, query_red, _observer_id;
+        USING _embedding, query_red;
 
     ELSIF use_reduced THEN
         -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
@@ -695,27 +755,21 @@ BEGIN
             WITH ann AS (
                 SELECT pr.post_id,
                        pr.chunk_number,
-                       hp.author_id,
                        %s AS ann_dist
                   FROM hivesense_app.posts_vectors_reduced pr
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pr.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pr.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($3 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $3
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY ann_dist, pr.post_id
                  LIMIT %s
             ),
             reranked AS (
-                SELECT ann.author_id,
+                SELECT hp.author_id,
                        ann.post_id,
                        (pv.embedding <=> $1)::float4 AS sim
                   FROM ann
                   JOIN hivesense_app.posts_vectors pv
                     ON pv.post_id = ann.post_id
                    AND pv.chunk_number = ann.chunk_number
+                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
             ),
             ranked AS (
                 SELECT author_id,
@@ -738,36 +792,29 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          (__min_search_tokens = 0),    -- %L  token filter off?
-          __min_search_tokens,          -- %s
+          hivesense_app.ann_candidate_filter('pr', NULL, _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
-        USING _embedding, query_red, _observer_id;
+        USING _embedding, query_red;
 
     ELSE   /* ───────── full-vector path ───────── */
         RETURN QUERY EXECUTE format($q$
             WITH ann AS (
                 SELECT pv.post_id,
                        pv.chunk_number,
-                       hp.author_id,
                        %s AS sim
                   FROM hivesense_app.posts_vectors pv
-                  JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
-                 WHERE (%L OR pd.number_of_tokens >= %s)
-                   AND ($2 = 0 OR NOT EXISTS (
-                         SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
-                          WHERE m.observer_id = $2
-                            AND m.muted_id    = hp.author_id))
+                 WHERE TRUE%s
                  ORDER BY sim, pv.post_id
                  LIMIT %s
             ),
             ranked AS (
-                SELECT author_id,
-                       sim,
-                       row_number() OVER (ORDER BY sim) AS rn
+                SELECT hp.author_id,
+                       ann.sim,
+                       row_number() OVER (ORDER BY ann.sim) AS rn
                   FROM ann
+                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
             ),
             author_best AS (
                 SELECT author_id,
@@ -784,12 +831,11 @@ BEGIN
              LIMIT %s
         $q$,
           dist_full,                    -- %s  distance expr
-          (__min_search_tokens = 0),    -- %L  token filter off?
-          __min_search_tokens,          -- %s
+          hivesense_app.ann_candidate_filter('pv', NULL, _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
-        USING _embedding, _observer_id;
+        USING _embedding;
     END IF;
 END;
 $BODY$;
