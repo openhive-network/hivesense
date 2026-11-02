@@ -72,8 +72,14 @@ BEGIN
   -- psql-massive-index-policy = keep-monotonic). Block processing reads
   -- hivemind_app's tables and hafd.hive_state, never a core index HAF defers
   -- to the end of the replay; tests/test_early_block_processing.sql guards
-  -- that. Idempotent, so a reinstall re-asserts it.
-  PERFORM hive.app_context_set_early_block_processing(ARRAY[__schema_name]::hive.contexts_group);
+  -- that. Idempotent, so a reinstall re-asserts it. Released HAF (1.28.8)
+  -- has no such function: there the context gets blocks after the replay.
+  IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'hive' AND p.proname = 'app_context_set_early_block_processing') THEN
+    PERFORM hive.app_context_set_early_block_processing(ARRAY[__schema_name]::hive.contexts_group);
+  ELSE
+    RAISE NOTICE 'HAF has no early block processing (hive.app_context_set_early_block_processing), % will be delivered blocks after the replay', __schema_name;
+  END IF;
 
   CREATE TABLE IF NOT EXISTS version(
     schema_hash TEXT,
