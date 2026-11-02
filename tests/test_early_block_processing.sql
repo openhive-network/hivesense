@@ -6,10 +6,23 @@
 --   psql ... -v ON_ERROR_STOP=on -f tests/test_early_block_processing.sql
 -- The replay state is HAF's own: the deferred indexes and the foreign keys are
 -- dropped inside a transaction that is rolled back.
+-- A HAF without early block processing (released 1.28.8) skips the whole test.
+CREATE FUNCTION pg_temp.haf_has_early_block_processing() RETURNS BOOLEAN LANGUAGE sql AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'hive' AND p.proname = 'app_context_set_early_block_processing'
+    )
+$$;
+
 DO $$
 DECLARE
     __offenders TEXT;
 BEGIN
+    IF NOT pg_temp.haf_has_early_block_processing() THEN
+        RAISE NOTICE 'test_early_block_processing: SKIP (HAF has no app_context_set_early_block_processing)';
+        RETURN;
+    END IF;
+
     ASSERT (SELECT early_block_processing FROM hafd.contexts WHERE name = 'hivesense_app'),
         'hivesense_app did not opt into early block processing';
 
@@ -30,13 +43,18 @@ $$;
 -- pinned without the block row its foreign key wants (the test database may
 -- hold no blocks), hence replica mode for the rolled-back update.
 BEGIN;
-SET LOCAL session_replication_role = replica;
-UPDATE hafd.hive_state SET consistent_block = 100;
-SET LOCAL session_replication_role = origin;
-SELECT hive.disable_fk_of_irreversible();
-SELECT hive.disable_indexes_of_irreversible('keep-monotonic');
 DO $$
 BEGIN
+    IF NOT pg_temp.haf_has_early_block_processing() THEN
+        RETURN;
+    END IF;
+
+    SET LOCAL session_replication_role = replica;
+    UPDATE hafd.hive_state SET consistent_block = 100;
+    SET LOCAL session_replication_role = origin;
+    PERFORM hive.disable_fk_of_irreversible();
+    PERFORM hive.disable_indexes_of_irreversible('keep-monotonic');
+
     ASSERT NOT hive.is_instance_ready(), 'deferred indexes are missing, the instance must not be ready';
     ASSERT hive.is_instance_ready_for_block_processing(), 'kept indexes exist, block processing must be possible';
     -- the readiness hive.app_next_iteration delivers blocks on
@@ -55,11 +73,16 @@ ROLLBACK;
 
 -- a ready instance: finalize on reaching HAF's irreversible head, not before
 BEGIN;
-SET LOCAL session_replication_role = replica;
-UPDATE hafd.hive_state SET consistent_block = 100;
-SET LOCAL session_replication_role = origin;
 DO $$
 BEGIN
+    IF NOT pg_temp.haf_has_early_block_processing() THEN
+        RETURN;
+    END IF;
+
+    SET LOCAL session_replication_role = replica;
+    UPDATE hafd.hive_state SET consistent_block = 100;
+    SET LOCAL session_replication_role = origin;
+
     ASSERT (SELECT early_block_processing FROM hafd.contexts WHERE name = 'hivesense_app'),
         'the rollback did not restore the opt-in';
     ASSERT hive.is_instance_ready(), 'the rollback did not restore the indexes';
