@@ -566,7 +566,7 @@ else
   fi
 fi
 
-# ─── 9. block-range filter on /posts/search (#13) ─────────────────────
+# ─── 11. block-range filter on /posts/search (#13) ─────────────────────
 # from-block/to-block restrict the search to posts CREATED in that block
 # range, ranked exactly. As with the author filter, "ANN + WHERE block" would
 # lose posts, so every check compares against an oracle computed straight
@@ -607,7 +607,7 @@ else
   # hive_posts index containing block_num_created is dropped (rolled back) so
   # a filter bolted onto the ANN stage cannot fall back to an exact walk of
   # that index on this small corpus.
-  force_window="UPDATE hivesense_app.hivesense_app_status SET default_ef_search = 1, minimum_ann_candidates = 1 WHERE id = 1;
+  force_window="UPDATE hivesense_app.hivesense_app_status SET ef_floor = 1, ef_ceiling = 1 WHERE id = 1;
     DO \$\$
     DECLARE r record;
     BEGIN
