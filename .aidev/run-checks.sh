@@ -21,7 +21,8 @@
 #                     hivemind installed, through install_with_app_lock.py (its log
 #                     must not carry the wrapper-not-found WARNING); then the block
 #                     processor's start-up identity (init_local_sync_identity),
-#                     tests/test_sync_chains.sql and tests/test_early_block_processing.sql
+#                     tests/test_sync_chains.sql, tests/test_early_block_processing.sql
+#                     and tests/test_deleted_posts.sql
 #   - events-id       CI's events_id_test (#54): seed hafd.contexts.events_id = 0
 #                     for hivesense_app, run scripts/sync_embeddings.py's
 #                     ensure_context_detached, expect hive.unreachable_event_id()
@@ -39,7 +40,9 @@
 #                     generate_embeddings_for_posts, check what posts_vectors
 #                     holds, build the HNSW index and check it exists, then the
 #                     embedding-backed calls of
-#                     .aidev/hivesense_smoke.py (one junit case per call); finally
+#                     .aidev/hivesense_smoke.py (one junit case per call), then
+#                     (rolled back) a deletion of an embedded seeded post in block
+#                     processing and its delete op in embedding_updates; finally
 #                     reinstall as `install` does, so the steps after it see that state
 #   - embed-slice     embed-search in CI's slice configuration
 #                     (mxbai-embed-xsmall-v1, Matryoshka slice to 256 dims)
@@ -206,7 +209,8 @@ install() {
     # expects the primary chain's sync_uuid it mints.
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atc "select hivesense_app.init_local_sync_identity()" || return 1
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_sync_chains.sql || return 1
-    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_early_block_processing.sql
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_early_block_processing.sql || return 1
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_deleted_posts.sql
 }
 
 # query SQL: psql as haf_admin, unaligned tuples only
@@ -556,8 +560,45 @@ config_is() {
     echo "ok: reduction_mode,use_reduced_embeddings,reduced_dims = $got"
 }
 
+# In a rolled-back transaction: hivemind deletes the embedded pasta post
+# (900103) and the other pasta post (900105) is edited in the same block; one
+# generate_embeddings_for_posts pass over that block must drop 900103's vectors
+# with a tombstone that embedding_updates serves as a delete op, and re-embed
+# only 900105 (900103's chunks never reach the embedding server).
+deleted_post_checks() {
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "set statement_timeout = '600s'" -c "
+begin;
+set local session_replication_role = replica;
+do \$\$
+declare
+    __seq_before int := (select max(sync_seq) from hivesense_app.posts_vectors);
+    __uuid       text := (select sync_uuid::text from hivesense_app.hivesense_app_status where id = 1);
+    __stats      record;
+    __ops        text;
+begin
+    update hivemind_app.hive_posts set counter_deleted = 1, block_num = 106 where id = 900103;
+    update hivemind_app.hive_posts set block_num = 106 where id = 900105;
+    set local session_replication_role = origin;
+    select * into __stats
+      from hivesense_app.generate_embeddings_for_posts(hivesense_app.posts_in_range(106, 106), false, 0);
+    assert __stats.processed_posts = 1 and __stats.discarded_posts = 1, format('stats of the pass: %s', __stats);
+    assert not exists (select 1 from hivesense_app.posts_vectors where post_id = 900103),
+        'vectors of the deleted post 900103 survived';
+    assert (select bool_and(sync_seq > __seq_before) from hivesense_app.posts_vectors where post_id = 900105),
+        'the edited post 900105 was not re-embedded';
+    perform hivesense_app.publish_visible_sync_seq();
+    select string_agg(format('%s:%s:%s', u.op, u.permlink, u.post_deleted::text), ',' order by u.sync_seq) into __ops
+      from hivesense_endpoints.embedding_updates(__seq_before, 100, __uuid) u;
+    assert __ops = 'delete:slow-simmered-tomato-sauce-for-pasta:true,update:fresh-egg-pasta-with-tomato-basil-sauce:false',
+        format('embedding_updates after the deletion: %s', __ops);
+    raise notice 'deleted post checks: PASS (%)', __ops;
+end
+\$\$;
+rollback;"
+}
+
 embed_search() {
-    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search
+    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks
 }
 
 # Slice mode keeps no separate reduced vectors: its index and ANN search use the

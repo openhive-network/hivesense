@@ -32,9 +32,10 @@ class FakeCursor:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def execute(self, sql: str, params: tuple[str, str]) -> None:
-        self.lookups.append(params)
-        post_id = self.posts.get(params)
+    def execute(self, sql: str, params: tuple[str, str, bool | None]) -> None:
+        author_permlink = (params[0], params[1])
+        self.lookups.append(author_permlink)
+        post_id = self.posts.get(author_permlink)
         self._row = (post_id,) if post_id is not None else None
 
     def fetchone(self) -> tuple[int] | None:
