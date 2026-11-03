@@ -201,6 +201,8 @@ ALTER TABLE hivesense_app_status
   DROP COLUMN IF EXISTS default_ef_search;
 ALTER TABLE hivesense_app_status
   DROP COLUMN IF EXISTS minimum_ann_candidates;
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS max_window_chunks INT NOT NULL DEFAULT 300000; -- /posts/search from-block/to-block: largest window ranked (exactly), in chunks
 
 INSERT INTO hivesense_app_status
 (
