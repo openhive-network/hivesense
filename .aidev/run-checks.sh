@@ -587,9 +587,9 @@ begin
     assert (select bool_and(sync_seq > __seq_before) from hivesense_app.posts_vectors where post_id = 900105),
         'the edited post 900105 was not re-embedded';
     perform hivesense_app.publish_visible_sync_seq();
-    select string_agg(format('%s:%s:%s', u.op, u.permlink, u.post_deleted::text), ',' order by u.sync_seq) into __ops
+    select string_agg(format('%s:%s', u.op, u.permlink), ',' order by u.sync_seq) into __ops
       from hivesense_endpoints.embedding_updates(__seq_before, 100, __uuid) u;
-    assert __ops = 'delete:slow-simmered-tomato-sauce-for-pasta:true,update:fresh-egg-pasta-with-tomato-basil-sauce:false',
+    assert __ops = 'delete:slow-simmered-tomato-sauce-for-pasta,update:fresh-egg-pasta-with-tomato-basil-sauce',
         format('embedding_updates after the deletion: %s', __ops);
     raise notice 'deleted post checks: PASS (%)', __ops;
 end

@@ -11,7 +11,6 @@ schemas:
       permlink: { type: string }
       number_of_tokens: { type: integer }
       last_vectors_block: { type: integer }
-      post_deleted: { type: boolean }
       embeddings: 
         type: array
         items: 
@@ -27,7 +26,6 @@ CREATE TYPE embeddingupdate AS (
     "permlink" TEXT,
     "number_of_tokens" INT,
     "last_vectors_block" INT,
-    "post_deleted" BOOLEAN,
     "embeddings" FLOAT[][]
 );
 -- openapi-generated-code-end
@@ -149,8 +147,7 @@ BEGIN
       ha.name      AS author,
       hpd.permlink AS permlink,
       pd.number_of_tokens,
-      pd.last_vectors_block,
-      hp.counter_deleted > 0 AS post_deleted
+      pd.last_vectors_block
     FROM limited_ops lo
     JOIN hivemind_app.hive_posts         hp  ON hp.id         = lo.post_id
     JOIN hivemind_app.hive_accounts      ha  ON ha.id         = hp.author_id
@@ -165,10 +162,6 @@ BEGIN
     om.permlink::text,
     om.number_of_tokens,
     om.last_vectors_block,
-    -- the post's current state here: hivemind keeps a deleted post's row and
-    -- may create a new one for a re-post of the same author/permlink, so a
-    -- downstream syncer needs it to tell the two apart (see resolve_post_id)
-    om.post_deleted,
     -- build a Postgres array of float[] here; PostgREST will turn it into JSON
     ARRAY(
       SELECT 

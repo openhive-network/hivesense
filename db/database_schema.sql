@@ -178,10 +178,6 @@ ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS skipped_op_count INT NOT NULL DEFAULT 0;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS upstream_skipped_op_count INT NOT NULL DEFAULT 0;
--- set by purge_deleted_post_vectors() once the vectors of posts deleted before
--- deletions were handled are gone
-ALTER TABLE hivesense_app_status
-  ADD COLUMN IF NOT EXISTS deleted_posts_purged BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS num_ctx INT NOT NULL DEFAULT 0; -- 0 = server default; read by the python block processor
 ALTER TABLE hivesense_app_status
@@ -201,6 +197,9 @@ ALTER TABLE hivesense_app_status
   DROP COLUMN IF EXISTS default_ef_search;
 ALTER TABLE hivesense_app_status
   DROP COLUMN IF EXISTS minimum_ann_candidates;
+-- install-time purge marker of an earlier build; the purge is now a one-time operator call
+ALTER TABLE hivesense_app_status
+  DROP COLUMN IF EXISTS deleted_posts_purged;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS max_window_chunks INT NOT NULL DEFAULT 300000; -- /posts/search from-block/to-block: largest window ranked (exactly), in chunks
 
