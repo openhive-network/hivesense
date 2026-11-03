@@ -145,7 +145,8 @@ BEGIN
             post_id     INT,
             block_num   INT,
             token_count INT,
-            chunks      TEXT[]
+            chunks      TEXT[],
+            deleted     BOOLEAN NOT NULL DEFAULT FALSE
         ) ON COMMIT DROP;
         CREATE TEMP TABLE tmp_chunks(
             post_id      INT,
@@ -155,6 +156,16 @@ BEGIN
             block_num    INT
         ) ON COMMIT DROP;
     END IF;
+
+    -- hivemind deletes a post by setting counter_deleted (keeping its row,
+    -- body and moving block_num to the deleting block): such a post is not
+    -- preprocessed, so its body never reaches the embedding server, and it
+    -- yields zero chunks, which makes the store step drop its vectors
+    INSERT INTO tmp_pre(post_id, block_num, token_count, chunks, deleted)
+    SELECT hp.id, hp.block_num, 0, ARRAY[]::TEXT[], TRUE
+    FROM   unnest(_post_ids)          AS sel(id)
+    JOIN   hivemind_app.hive_posts     hp  ON hp.id = sel.id
+    WHERE  hp.counter_deleted > 0;
 
     -- preprocess with threshold 0 so short posts are kept: they drive the
     -- "post now produces zero chunks" deletion bookkeeping in the store step
@@ -180,7 +191,8 @@ BEGIN
                __doc_prefix,
                0
            ) AS pp
-           ON TRUE;
+           ON TRUE
+    WHERE  hp.counter_deleted = 0;
 
     INSERT INTO tmp_chunks(post_id, chunk_number, chunk_text, token_count, block_num)
     SELECT
@@ -215,20 +227,27 @@ DECLARE
     rec        RECORD;
     __sync_seq INT;
 BEGIN
-    /* posts that now produce zero chunks (true deletions / under-threshold edits) */
+    /* posts that now produce zero chunks (deleted posts / under-threshold edits) */
     CREATE TEMP TABLE tmp_empty_posts ON COMMIT DROP AS
     SELECT p.post_id,
            p.block_num,
-           p.token_count
+           p.token_count,
+           p.deleted
     FROM   tmp_pre p
     LEFT   JOIN tmp_chunks c USING (post_id)
     WHERE  c.post_id IS NULL;
 
     IF EXISTS (SELECT 1 FROM tmp_empty_posts) THEN
+        -- an under-threshold post is always tombstoned (as it always was); a
+        -- deleted post only when it has vectors to remove, so a post deleted
+        -- before we reached it leaves nothing for downstream syncers to apply
         CREATE TEMP TABLE tmp_empty_seq ON COMMIT DROP AS
         SELECT ep.post_id,
                nextval('hivesense_app.sync_seq') AS sync_seq
-        FROM   tmp_empty_posts ep;
+        FROM   tmp_empty_posts ep
+        WHERE  NOT ep.deleted
+           OR  EXISTS (SELECT 1 FROM hivesense_app.posts_vectors pv
+                        WHERE pv.post_id = ep.post_id);
 
         -- post_data first: posts_vectors and deleted_embeddings reference it
         -- (the scheduler used to pre-insert placeholder rows for this)
@@ -336,6 +355,86 @@ AS $$
          COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),0)
        )
      WHERE id = 1
+$$;
+
+-- One-time purge of the vectors of posts hivemind marked deleted before
+-- store_post_embeddings() treated a deleted post as producing zero chunks.
+-- Run by scripts/install_app.sh, i.e. under the app's exclusive install lock
+-- with no block processor or syncer writing; the deleted_posts_purged marker
+-- makes every later call a no-op. Returns the number of posts purged.
+--
+-- Only a chain primary (syncing_embeddings = FALSE, set by
+-- init_local_sync_identity() when this node generates its own embeddings)
+-- writes tombstones, one per purged post with a fresh sync_seq, so its
+-- downstream syncers purge the same posts. Any other node (a replica: the
+-- syncer leaves syncing_embeddings NULL) deletes its vectors without
+-- tombstones: its own sync_seq values come from its upstream, and its syncer
+-- resumes from the maximum sync_seq it holds, so first that maximum is pinned
+-- into max_visible_sync_seq (which get_last_seq() in sync_embeddings.py takes
+-- as a floor) so that deleting the newest vectors cannot move the cursor back.
+CREATE OR REPLACE FUNCTION hivesense_app.purge_deleted_post_vectors(_batch_size INT DEFAULT 1000)
+RETURNS INT
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    __primary BOOLEAN;
+    __batch   INT[];
+    __last    INT := -1;
+    __purged  INT := 0;
+BEGIN
+    IF (SELECT deleted_posts_purged FROM hivesense_app.hivesense_app_status WHERE id = 1) THEN
+        RETURN 0;
+    END IF;
+
+    SELECT COALESCE(syncing_embeddings = FALSE, FALSE) INTO __primary
+      FROM hivesense_app.hivesense_app_status WHERE id = 1;
+
+    IF NOT __primary THEN
+        UPDATE hivesense_app.hivesense_app_status
+           SET max_visible_sync_seq = GREATEST(
+             max_visible_sync_seq,
+             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors), 0),
+             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings), 0)
+           )
+         WHERE id = 1;
+    END IF;
+
+    LOOP
+        SELECT ARRAY_AGG(d.post_id ORDER BY d.post_id) INTO __batch
+        FROM (
+            SELECT DISTINCT pv.post_id
+              FROM hivesense_app.posts_vectors pv
+              JOIN hivemind_app.hive_posts hp ON hp.id = pv.post_id
+             WHERE hp.counter_deleted > 0
+               AND pv.post_id > __last
+             ORDER BY pv.post_id
+             LIMIT _batch_size
+        ) d;
+        EXIT WHEN __batch IS NULL;
+
+        -- posts_vectors_reduced follows by its ON DELETE CASCADE foreign key
+        DELETE FROM hivesense_app.posts_vectors
+         WHERE post_id = ANY(__batch);
+
+        IF __primary THEN
+            INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
+            SELECT b.post_id, nextval('hivesense_app.sync_seq')
+              FROM unnest(__batch) AS b(post_id);
+        END IF;
+
+        __purged := __purged + cardinality(__batch);
+        __last := __batch[cardinality(__batch)];
+    END LOOP;
+
+    UPDATE hivesense_app.hivesense_app_status
+       SET deleted_posts_purged = TRUE
+     WHERE id = 1;
+
+    RAISE NOTICE 'Purged the vectors of % deleted post(s)%', __purged,
+        CASE WHEN __primary THEN ' (tombstoned for downstream syncers)' ELSE '' END;
+    RETURN __purged;
+END;
 $$;
 
 DROP FUNCTION IF EXISTS generate_embeddings_for_posts(integer[],boolean,integer);

@@ -274,6 +274,47 @@ else
   echo "skip: no observer mutes an author of an embedded post"
 fi
 
+# ─── 9. block processing drops the vectors of a post hivemind deleted ──
+# Rolled back: an embedded post is deleted the way hivemind does it
+# (counter_deleted > 0, block_num = the deleting block, kept as it is here) and
+# put through the block processor's prepare/store steps with nothing embedded.
+# Prints in_range,chunks,vectors_left,fresh_tombstones.
+deleted=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf \
+  psql -U haf_admin -q -A -t -v ON_ERROR_STOP=on -d haf_block_log <<'SQL' | tr -d '[:space:]'
+BEGIN;
+SET LOCAL session_replication_role = replica;
+CREATE TEMP TABLE t_victim ON COMMIT DROP AS
+SELECT
+    pv.post_id,
+    GREATEST(hp.block_num_created, hp.block_num) AS blk,
+    (SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors) AS seq_before
+FROM hivesense_app.posts_vectors AS pv
+INNER JOIN hivemind_app.hive_posts AS hp ON pv.post_id = hp.id
+ORDER BY pv.post_id
+LIMIT 1;
+UPDATE hivemind_app.hive_posts AS hp SET counter_deleted = 1
+FROM t_victim AS v WHERE hp.id = v.post_id;
+SET LOCAL session_replication_role = origin;
+CREATE TEMP TABLE t_chunks ON COMMIT DROP AS
+SELECT c.* FROM t_victim AS v
+CROSS JOIN LATERAL hivesense_app.prepare_post_chunks(ARRAY[v.post_id]) AS c;
+CREATE TEMP TABLE tmp_vectors (post_id INT, chunk_number INT, vec PUBLIC.VECTOR) ON COMMIT DROP;
+SELECT COUNT(*) FROM hivesense_app.store_post_embeddings() \g /dev/null
+SELECT
+    (v.post_id = ANY(hivesense_app.posts_in_range(v.blk, v.blk)))::TEXT
+    || ',' || (SELECT COUNT(*) FROM t_chunks)
+    || ',' || (SELECT COUNT(*) FROM hivesense_app.posts_vectors AS pv WHERE pv.post_id = v.post_id)
+    || ',' || (SELECT COUNT(*) FROM hivesense_app.deleted_embeddings AS de WHERE de.post_id = v.post_id AND de.sync_seq > v.seq_before)
+FROM t_victim AS v;
+ROLLBACK;
+SQL
+)
+if [ "$deleted" = "true,0,0,1" ]; then
+  pass "a deleted post yields no chunks, loses its vectors and gets one fresh tombstone"
+else
+  fail "deleted post in block processing: in_range,chunks,vectors_left,fresh_tombstones = '${deleted}', expected true,0,0,1"
+fi
+
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
   echo "${FAILURES} search test(s) failed (mode: ${MODE})" >&2

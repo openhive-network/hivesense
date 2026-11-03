@@ -546,6 +546,9 @@ DO $__$
           "last_vectors_block": {
             "type": "integer"
           },
+          "post_deleted": {
+            "type": "boolean"
+          },
           "embeddings": {
             "type": "array",
             "items": {
