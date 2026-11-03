@@ -343,12 +343,10 @@ def store_upstream_skip_count(conn, count) -> None:
 
 
 # hivemind deletes a post by setting its row's counter_deleted > 0 and keeps
-# the row; posting the same author/permlink again creates a new row, so several
-# local rows can match an op. The upstream sends its row's current state as
-# post_deleted: the row in the same state is preferred, a row in the other state
-# is the fallback for a local hivemind behind or ahead of the upstream's (e.g.
-# the deletion not processed here yet). Without the flag (an upstream predating
-# it) the live row is preferred.
+# the row; posting the same author/permlink again INSERTs a new row with
+# counter_deleted = 0 (ids are never reused), so several local rows can match
+# an op. resolve_post_id finds whether any does (the live row first);
+# _resolve_op_rows decides which one the op is about.
 POST_LOOKUP_SQL = """
 SELECT hp.id
   FROM hivemind_app.hive_posts       hp
@@ -356,45 +354,64 @@ SELECT hp.id
   JOIN hivemind_app.hive_permlink_data pd ON pd.id = hp.permlink_id
  WHERE ha.name = %s
    AND pd.permlink = %s
- ORDER BY ((hp.counter_deleted > 0) = %s) DESC, hp.counter_deleted
+ ORDER BY hp.counter_deleted
  LIMIT 1;
 """
 
-DELETED_ROWS_SQL = """
-SELECT hp.id
+POST_ROWS_SQL = """
+SELECT hp.id, hp.counter_deleted, hp.block_num_created
   FROM hivemind_app.hive_posts       hp
   JOIN hivemind_app.hive_accounts    ha  ON ha.id  = hp.author_id
   JOIN hivemind_app.hive_permlink_data pd ON pd.id = hp.permlink_id
  WHERE ha.name = %s
    AND pd.permlink = %s
-   AND hp.counter_deleted > 0;
+ ORDER BY hp.counter_deleted;
 """
 
 
-def resolve_post_id(cur: Any, author: str, permlink: str, post_deleted: bool | None = None) -> int | None:
-    cur.execute(POST_LOOKUP_SQL, (author, permlink, post_deleted))
+def resolve_post_id(cur: Any, author: str, permlink: str) -> int | None:
+    cur.execute(POST_LOOKUP_SQL, (author, permlink))
     row = cur.fetchone()
     post_id: int | None = row[0] if row else None
     return post_id
 
 
-def delete_targets(cur: Any, op: Mapping[str, Any], post_id: int) -> list[int]:
-    """Return the local post ids whose vectors a delete op removes.
+def _resolve_op_rows(cur: Any, op: Mapping[str, Any], post_id: int) -> tuple[int, list[int]]:
+    """Return (row, delete_targets) for an op resolved to post_id: the local
+    row the op is about, and the local post ids whose vectors a delete op
+    removes.
 
-    A delete for a post the upstream reports deleted removes the vectors of
-    every local deleted row of its author/permlink (which deleted row the
-    upstream meant is unknown, and a deleted row's vectors are dead anyway)
-    plus post_id, the resolved row (the live row when the local hivemind has
-    not processed the deletion yet). It never touches the live row of a re-post
-    when a deleted row exists: the re-post's vectors arrive with its own ops,
-    which a delete of the old row can follow (a primary's one-time purge
-    tombstones posts deleted long ago). Any other delete (an under-threshold
-    edit, a superseded update) removes post_id's vectors only.
+    The op does not say which row of its author/permlink it is about. It is
+    about the live row (counter_deleted = 0) unless it cannot be: the op's
+    last_vectors_block (the upstream post_data row's; for a deleted post at or
+    before its deleting block) is below the live row's block_num_created, and
+    then it is about a deleted row. A deleted row's vectors are dead anyway, so
+    a delete removes those of every row with counter_deleted > 0, plus the live
+    row's when the op is about it. That keeps a primary's purge tombstone for a
+    long-dead post, which arrives after the re-post's own insert, from wiping
+    the re-post (and a replica replaying the old row's insert from storing it
+    on the re-post's row), while an under-threshold edit of the re-post
+    (last_vectors_block at or after its creation) and a deletion the local
+    hivemind has not processed yet (only the live row exists) still remove the
+    live row's vectors. A deletion's tombstone always precedes the re-post's
+    insert in sync_seq order (hivemind processes the deletion first and
+    store_post_embeddings writes zero-chunk tombstones before inserts), so an
+    insert is never undone by the delete of the row it replaced.
+
+    Known gap: a post deleted and re-created in one block, whose dead row was
+    embedded in that same block, has a last_vectors_block equal to the
+    re-post's block_num_created, so a delete of the dead row that arrives
+    after the re-post's insert (a purge tombstone) also removes the re-post's
+    vectors here until the re-post's next edit.
     """
-    if not op.get("post_deleted"):
-        return [post_id]
-    cur.execute(DELETED_ROWS_SQL, (op["author"], op["permlink"]))
-    return sorted({post_id, *(row[0] for row in cur.fetchall())})
+    cur.execute(POST_ROWS_SQL, (op["author"], op["permlink"]))
+    rows = cur.fetchall()
+    dead = [row[0] for row in rows if row[1] > 0]
+    live = next((row for row in rows if row[1] == 0), None)
+    block = op.get("last_vectors_block")
+    if live is not None and (not dead or block is None or block >= live[2]):
+        return live[0], sorted({live[0], *dead})
+    return (dead[-1] if dead else post_id), dead
 
 
 def resolve_batch_posts(
@@ -414,7 +431,7 @@ def resolve_batch_posts(
     ignored_deletes = 0
     with conn.cursor() as cur:
         for op in ops:
-            post_id = resolve_post_id(cur, op["author"], op["permlink"], op.get("post_deleted"))
+            post_id = resolve_post_id(cur, op["author"], op["permlink"])
             if post_id is None and op.get("op") == "delete":
                 # Local vectors only exist for posts that resolved on insert, so
                 # there is nothing to delete. Delete ops are not covered by the
@@ -438,7 +455,7 @@ def resolve_batch_posts(
                 # rollback to close the transaction and release the lock on hive_posts
                 conn.rollback()
                 time.sleep(1)
-                post_id = resolve_post_id(cur, op["author"], op["permlink"], op.get("post_deleted"))
+                post_id = resolve_post_id(cur, op["author"], op["permlink"])
             if post_id is None:
                 # We already waited for hivemind's head to reach max_block, so a
                 # still-missing post is PERMANENTLY absent from hivemind -- e.g. a block
@@ -557,6 +574,7 @@ def apply_op(cur, op, post_id) -> None:
     """
     Apply a single operation; assumes post_id already resolved.
     """
+    post_id, targets = _resolve_op_rows(cur, op, post_id)
     # ① always ensure metadata row exists before touching any FKs
     cur.execute(
         """
@@ -577,7 +595,6 @@ def apply_op(cur, op, post_id) -> None:
     """)
     use_reduced_embeddings = cur.fetchone()[0]
     if op["op"] == "delete":
-        targets = delete_targets(cur, op, post_id)
         cur.execute(
             "DELETE FROM hivesense_app.posts_vectors WHERE post_id = ANY(%s)",
             (targets,)

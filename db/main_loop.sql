@@ -359,45 +359,28 @@ $$;
 
 -- One-time purge of the vectors of posts hivemind marked deleted before
 -- store_post_embeddings() treated a deleted post as producing zero chunks.
--- Run by scripts/install_app.sh, i.e. under the app's exclusive install lock
--- with no block processor or syncer writing; the deleted_posts_purged marker
--- makes every later call a no-op. Returns the number of posts purged.
---
--- Only a chain primary (syncing_embeddings = FALSE, set by
--- init_local_sync_identity() when this node generates its own embeddings)
--- writes tombstones, one per purged post with a fresh sync_seq, so its
--- downstream syncers purge the same posts. Any other node (a replica: the
--- syncer leaves syncing_embeddings NULL) deletes its vectors without
--- tombstones: its own sync_seq values come from its upstream, and its syncer
--- resumes from the maximum sync_seq it holds, so first that maximum is pinned
--- into max_visible_sync_seq (which get_last_seq() in sync_embeddings.py takes
--- as a floor) so that deleting the newest vectors cannot move the cursor back.
+-- Called by hand on the chain primary (see docs/deleted_posts_purge.md), not by
+-- the install or the block processor. Each purged post gets one tombstone with
+-- a fresh sync_seq, published at the end, so every replica drops the same
+-- vectors through /embedding-updates as ordinary delete ops. A second call
+-- finds nothing left to purge. Runs in the caller's transaction; returns the
+-- number of posts purged.
 CREATE OR REPLACE FUNCTION hivesense_app.purge_deleted_post_vectors(_batch_size INT DEFAULT 1000)
 RETURNS INT
 LANGUAGE plpgsql
 VOLATILE
 AS $$
 DECLARE
-    __primary BOOLEAN;
     __batch   INT[];
     __last    INT := -1;
     __purged  INT := 0;
 BEGIN
-    IF (SELECT deleted_posts_purged FROM hivesense_app.hivesense_app_status WHERE id = 1) THEN
-        RETURN 0;
-    END IF;
-
-    SELECT COALESCE(syncing_embeddings = FALSE, FALSE) INTO __primary
-      FROM hivesense_app.hivesense_app_status WHERE id = 1;
-
-    IF NOT __primary THEN
-        UPDATE hivesense_app.hivesense_app_status
-           SET max_visible_sync_seq = GREATEST(
-             max_visible_sync_seq,
-             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors), 0),
-             COALESCE((SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings), 0)
-           )
-         WHERE id = 1;
+    -- syncing_embeddings = FALSE is set by init_local_sync_identity() on a node
+    -- that generates its own embeddings; a replica's syncer leaves it NULL
+    IF (SELECT syncing_embeddings IS DISTINCT FROM FALSE
+          FROM hivesense_app.hivesense_app_status WHERE id = 1) THEN
+        RAISE EXCEPTION 'purge_deleted_post_vectors runs on the chain primary only; '
+                        'replicas receive the deletions through the sync path (/embedding-updates)';
     END IF;
 
     LOOP
@@ -417,22 +400,19 @@ BEGIN
         DELETE FROM hivesense_app.posts_vectors
          WHERE post_id = ANY(__batch);
 
-        IF __primary THEN
-            INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
-            SELECT b.post_id, nextval('hivesense_app.sync_seq')
-              FROM unnest(__batch) AS b(post_id);
-        END IF;
+        INSERT INTO hivesense_app.deleted_embeddings(post_id, sync_seq)
+        SELECT b.post_id, nextval('hivesense_app.sync_seq')
+          FROM unnest(__batch) AS b(post_id);
 
         __purged := __purged + cardinality(__batch);
         __last := __batch[cardinality(__batch)];
     END LOOP;
 
-    UPDATE hivesense_app.hivesense_app_status
-       SET deleted_posts_purged = TRUE
-     WHERE id = 1;
+    IF __purged > 0 THEN
+        PERFORM hivesense_app.publish_visible_sync_seq();
+    END IF;
 
-    RAISE NOTICE 'Purged the vectors of % deleted post(s)%', __purged,
-        CASE WHEN __primary THEN ' (tombstoned for downstream syncers)' ELSE '' END;
+    RAISE NOTICE 'Purged the vectors of % deleted post(s), tombstoned for downstream syncers', __purged;
     RETURN __purged;
 END;
 $$;

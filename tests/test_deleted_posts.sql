@@ -1,7 +1,8 @@
 -- Posts hivemind deletes (counter_deleted > 0, block_num moved to the deleting
 -- block) lose their vectors in block processing and in the one-time purge
--- (hivesense_app.purge_deleted_post_vectors). Run as haf_admin against an
--- installed database whose block processor has minted its sync identity:
+-- (hivesense_app.purge_deleted_post_vectors), which only a chain primary runs.
+-- Run as haf_admin against an installed database whose block processor has
+-- minted its sync identity:
 --   psql ... -v ON_ERROR_STOP=on -f tests/test_deleted_posts.sql
 -- Everything, including the seeded hivemind rows, is rolled back. No embedding
 -- server is needed: the posts processed here are deleted, so none is embedded.
@@ -125,8 +126,11 @@ BEGIN
 
     PERFORM hivesense_app.publish_visible_sync_seq();
     SELECT u.* INTO __op FROM hivesense_endpoints.embedding_updates(__seq_before, 100, __uuid) AS u;
-    ASSERT __op.op = 'delete' AND __op.author = 'aidev-deleter' AND __op.permlink = 'deleted-after-embedding' AND __op.post_deleted,
+    ASSERT __op.op = 'delete' AND __op.author = 'aidev-deleter' AND __op.permlink = 'deleted-after-embedding',
         format('embedding_updates after the deletion: %s', __op);
+    ASSERT (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(to_jsonb(__op)) AS k)
+         = ARRAY['author', 'embeddings', 'last_vectors_block', 'number_of_tokens', 'op', 'permlink', 'sync_seq'],
+        format('embedding_updates op fields: %s', __op);
     RAISE NOTICE 'test_deleted_posts block processing: PASS';
 END
 $$;
@@ -136,11 +140,14 @@ ROLLBACK TO SAVEPOINT block_processing;
 SAVEPOINT purge_primary;
 DO $$
 DECLARE
-    __seq_before INT := (SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors);
+    __seq_before INT := GREATEST(
+        (SELECT MAX(sync_seq) FROM hivesense_app.posts_vectors),
+        (SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings)
+    );
     __tombstones BIGINT;
     __purged     INT;
 BEGIN
-    UPDATE hivesense_app.hivesense_app_status SET syncing_embeddings = FALSE, deleted_posts_purged = FALSE WHERE id = 1;
+    UPDATE hivesense_app.hivesense_app_status SET syncing_embeddings = FALSE WHERE id = 1;
     -- 900201 too, deleted here outside any processed range
     SET LOCAL session_replication_role = replica;
     UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = 900201;
@@ -158,7 +165,9 @@ BEGIN
         SELECT COUNT(*) FROM hivesense_app.deleted_embeddings
          WHERE post_id IN (900201, 900203, 900204) AND sync_seq > __seq_before
     ) = 3, 'the purge did not write one fresh tombstone per purged post';
-    ASSERT (SELECT deleted_posts_purged FROM hivesense_app.hivesense_app_status WHERE id = 1), 'purge marker not set';
+    ASSERT (SELECT max_visible_sync_seq FROM hivesense_app.hivesense_app_status WHERE id = 1)
+         = (SELECT MAX(sync_seq) FROM hivesense_app.deleted_embeddings),
+        'the purge did not publish its tombstones';
 
     SELECT COUNT(*) INTO __tombstones FROM hivesense_app.deleted_embeddings;
     __purged := hivesense_app.purge_deleted_post_vectors(2);
@@ -169,41 +178,32 @@ END
 $$;
 ROLLBACK TO SAVEPOINT purge_primary;
 
--- the purge on a replica: no tombstones, and the syncer's cursor (the
--- get_last_seq() query of scripts/sync_embeddings.py) does not move although
--- the newest vectors (900204's) go
+-- the purge on a node that is not a chain primary (a replica's syncer leaves
+-- syncing_embeddings NULL) refuses and changes nothing
 SAVEPOINT purge_replica;
-CREATE FUNCTION pg_temp.syncer_cursor() RETURNS INT LANGUAGE sql AS $$
-    SELECT GREATEST(
-        COALESCE(MAX(t.sync_seq), 0),
-        COALESCE((SELECT s.max_visible_sync_seq FROM hivesense_app.hivesense_app_status AS s WHERE s.id = 1), 0)
-    ) FROM (
-        SELECT MAX(pv.sync_seq) AS sync_seq FROM hivesense_app.posts_vectors AS pv
-        UNION ALL
-        SELECT MAX(de.sync_seq) FROM hivesense_app.deleted_embeddings AS de
-    ) AS t
-$$;
 DO $$
 DECLARE
-    __cursor     INT;
+    __vectors    BIGINT;
     __tombstones BIGINT := (SELECT COUNT(*) FROM hivesense_app.deleted_embeddings);
-    __purged     INT;
+    __visible    INT;
+    __raised     BOOLEAN := FALSE;
 BEGIN
-    UPDATE hivesense_app.hivesense_app_status SET syncing_embeddings = NULL, deleted_posts_purged = FALSE WHERE id = 1;
-    __cursor := pg_temp.syncer_cursor();
-    ASSERT __cursor = (SELECT sync_seq FROM hivesense_app.posts_vectors WHERE post_id = 900204),
-        'test setup: the newest vectors are not the dead post''s';
-
-    __purged := hivesense_app.purge_deleted_post_vectors(2);
-    ASSERT __purged >= 2, format('replica purge reported %s posts', __purged);
-    ASSERT NOT EXISTS (SELECT 1 FROM hivesense_app.posts_vectors WHERE post_id IN (900203, 900204)),
-        'vectors of deleted posts survived the replica purge';
-    ASSERT (SELECT COUNT(*) FROM hivesense_app.deleted_embeddings) = __tombstones, 'a replica purge wrote tombstones';
-    ASSERT pg_temp.syncer_cursor() = __cursor, format('replica purge moved the syncer cursor from %s to %s', __cursor, pg_temp.syncer_cursor());
-
-    ASSERT hivesense_app.purge_deleted_post_vectors(2) = 0, 'second replica purge did something';
-    ASSERT pg_temp.syncer_cursor() = __cursor, 'second replica purge moved the syncer cursor';
-    RAISE NOTICE 'test_deleted_posts purge on a replica: PASS';
+    UPDATE hivesense_app.hivesense_app_status SET syncing_embeddings = NULL WHERE id = 1;
+    SELECT COUNT(*) INTO __vectors FROM hivesense_app.posts_vectors;
+    SELECT max_visible_sync_seq INTO __visible FROM hivesense_app.hivesense_app_status WHERE id = 1;
+    BEGIN
+        PERFORM hivesense_app.purge_deleted_post_vectors(2);
+    EXCEPTION WHEN raise_exception THEN
+        ASSERT SQLERRM LIKE '%chain primary only%' AND SQLERRM LIKE '%sync path%', format('refusal message: %s', SQLERRM);
+        __raised := TRUE;
+    END;
+    ASSERT __raised, 'purge_deleted_post_vectors ran on a node that is not a chain primary';
+    ASSERT (SELECT COUNT(*) FROM hivesense_app.posts_vectors) = __vectors, 'a refused purge removed vectors';
+    ASSERT EXISTS (SELECT 1 FROM hivesense_app.posts_vectors WHERE post_id = 900203), 'a refused purge removed a dead post''s vectors';
+    ASSERT (SELECT COUNT(*) FROM hivesense_app.deleted_embeddings) = __tombstones, 'a refused purge wrote tombstones';
+    ASSERT (SELECT max_visible_sync_seq FROM hivesense_app.hivesense_app_status WHERE id = 1) = __visible,
+        'a refused purge published sync_seq values';
+    RAISE NOTICE 'test_deleted_posts purge refused on a non-primary: PASS';
 END
 $$;
 ROLLBACK TO SAVEPOINT purge_replica;
