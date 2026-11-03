@@ -261,11 +261,12 @@ done
 deleted_filter=" AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp WHERE hp.id = pv.post_id AND hp.counter_deleted = 0)"
 token_threshold=$(query_database "SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1")
 if [ "$token_threshold" = "0" ]; then
-  filter=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0)")
-  if [ "$filter" = "$deleted_filter" ]; then
+  # compared in SQL: query_database strips whitespace from what it prints
+  same=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0) = '${deleted_filter}'")
+  if [ "$same" = "t" ]; then
     pass "anonymous search without a token threshold filters only deleted posts"
   else
-    fail "anonymous search without a token threshold filters '${filter}', expected '${deleted_filter}'"
+    fail "anonymous search without a token threshold filters '$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0)")', expected '${deleted_filter}' (whitespace aside)"
   fi
 fi
 
