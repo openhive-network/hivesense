@@ -368,9 +368,85 @@ registrations() {
              from hafd.applications where name in ('hivesense', 'hivesense_app') or 'hivesense_app' = any(contexts)"
 }
 
+# The registrations holding hivemind's context, comma separated
+hivemind_registration() {
+    query "select coalesce(string_agg(name, ',' order by name), '') from hafd.applications where contexts @> array['hivemind_app']"
+}
+
+# expect_hivemind_dependency NAME: hivesense's dependencies are exactly NAME
+expect_hivemind_dependency() {
+    local got
+    got="$(query "select coalesce(string_agg(depends_on, ',' order by depends_on), '')
+                    from hafd.application_dependencies where application = 'hivesense'")" || return 1
+    if [ "$got" != "$1" ]; then
+        echo "FAIL: hivemind is registered as '$1' but hivesense depends on '$got'"
+        return 1
+    fi
+    echo "ok: hivesense depends on hivemind's registration $1"
+}
+
+# An install over a stub hivemind registration (context hivemind_app) named
+# `hivemind` (hivemind's lock name), named `hivemind_app` (before its rename),
+# and over none: the dependency on that name, or a WARNING and none. Over two
+# (a leftover) the install fails, naming them. hivemind's own registration and the dependencies on it are put back as they were.
+hivemind_dependency_stubs() (
+    local saved_app saved_deps name rc=0
+    saved_app="$(query "select a::text from hafd.applications a where contexts @> array['hivemind_app']")" || exit 1
+    saved_deps="$(query "select coalesce(string_agg(quote_literal(d::text), ',' order by d::text), '')
+                           from hafd.application_dependencies d join hafd.applications a on a.name in (d.application, d.depends_on)
+                          where a.contexts @> array['hivemind_app'] and d.application <> 'hivesense'")" || exit 1
+    restore_hivemind() {
+        query "delete from hafd.applications where contexts @> array['hivemind_app']" > /dev/null || return 1
+        query "insert into hafd.applications select (\$aidev\$$saved_app\$aidev\$::hafd.applications).*" > /dev/null || return 1
+        if [ -n "$saved_deps" ]; then
+            query "insert into hafd.application_dependencies
+                   select (d::hafd.application_dependencies).* from unnest(array[$saved_deps]) d" > /dev/null || return 1
+        fi
+        echo "restored hivemind's registration"
+    }
+    trap 'restore_hivemind || exit 1' EXIT
+    trap 'exit 143' TERM INT
+
+    for name in hivemind hivemind_app ""; do
+        query "delete from hafd.applications where contexts @> array['hivemind_app']" > /dev/null || exit 1
+        if [ -n "$name" ]; then
+            query "insert into hafd.applications(name, contexts, owner) values ('$name', array['hivemind_app'], 'hivemind')" > /dev/null || exit 1
+        fi
+        if ! install_app; then
+            echo "FAIL: install_app.sh failed over a stub hivemind registration '${name:-none}'"
+            rc=1
+            continue
+        fi
+        if [ -n "$name" ]; then
+            expect_hivemind_dependency "$name" || rc=1
+        elif ! grep -q "WARNING: *hivemind is not registered in the HAF application registry; hivesense runs without the dependency gate" "$out/install_app.log"; then
+            echo "FAIL: with no hivemind registered, install_app.sh did not warn that hivesense runs without the dependency gate"
+            rc=1
+        else
+            expect_hivemind_dependency "" > /dev/null || rc=1
+            echo "ok: with no hivemind registered, the install warns and adds no dependency"
+        fi
+    done
+
+    query "delete from hafd.applications where contexts @> array['hivemind_app'];
+           insert into hafd.applications(name, contexts, owner)
+           values ('hivemind', array['hivemind_app'], 'hivemind'), ('hivemind_app', array['hivemind_app'], 'hivemind')" > /dev/null || exit 1
+    if install_app; then
+        echo "FAIL: install_app.sh succeeded over two registrations holding context hivemind_app"
+        rc=1
+    elif ! grep -qF "its context hivemind_app is registered by applications {hivemind,hivemind_app}" "$out/install_app.log"; then
+        echo "FAIL: install_app.sh failed over two hivemind registrations without naming them"
+        rc=1
+    else
+        echo "ok: two registrations holding context hivemind_app fail the install, naming them"
+    fi
+    exit "$rc"
+)
+
 # hivesense's row in HAF's application registry, after install: registered as
 # `hivesense` (its block-processor lock name) holding its context, depending on
-# hivemind when hivemind is registered under its lock name, and with
+# hivemind's registration (found by its context, under either name; with stub
+# registrations under both and with none), and with
 # install_health() as its health function on a HAF that takes one; a missing core
 # object then refuses the block-processor lock. A reinstall keeps the paused flag.
 # A leftover `hivesense_app` row makes the install fail naming it, and leaves the
@@ -386,17 +462,13 @@ registry() (
     fi
     echo "ok: registered as hivesense, holding context hivesense_app"
 
-    if [ "$(query "select count(*) from hafd.applications where name = 'hivemind'")" = 1 ]; then
-        got="$(query "select coalesce(string_agg(depends_on, ',' order by depends_on), '')
-                        from hafd.application_dependencies where application = 'hivesense'")" || exit 1
-        if [ "$got" != hivemind ]; then
-            echo "FAIL: hivemind is registered but hivesense depends on '$got', expected hivemind"
-            exit 1
-        fi
-        echo "ok: hivesense depends on hivemind"
-    else
-        echo "ok: no hivemind registration (an older hivemind); hivesense runs without the dependency"
+    got="$(hivemind_registration)" || exit 1
+    if [ -z "$got" ] || [[ "$got" == *,* ]]; then
+        echo "FAIL: expected one hivemind registration holding context hivemind_app; found '$got'"
+        exit 1
     fi
+    expect_hivemind_dependency "$got" || exit 1
+    hivemind_dependency_stubs || exit 1
 
     got="$(query "select coalesce(hivesense_app.install_health(), 'NULL')")" || exit 1
     if [ "$got" != NULL ]; then

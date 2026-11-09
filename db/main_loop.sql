@@ -1153,13 +1153,22 @@ BEGIN
   END IF;
 END
 $$;
+-- hivemind is found by its context: its registration's name changed (from
+-- hivemind_app to its lock name hivemind), its context did not.
 DO $$
+DECLARE
+  __hivemind TEXT[];
 BEGIN
-  IF EXISTS ( SELECT 1 FROM hafd.applications WHERE name = 'hivemind' ) THEN
-    PERFORM hive.app_add_dependency( 'hivesense', 'hivemind' );
-  ELSE
+  SELECT array_agg(a.name ORDER BY a.name) INTO __hivemind
+    FROM hafd.applications a
+   WHERE a.contexts @> ARRAY['hivemind_app'];
+  IF __hivemind IS NULL THEN
     -- older hivemind: the scheduler's own hivemind wait loops still apply
     RAISE WARNING 'hivemind is not registered in the HAF application registry; hivesense runs without the dependency gate';
+  ELSIF cardinality(__hivemind) > 1 THEN
+    RAISE EXCEPTION 'Cannot add hivesense''s dependency on hivemind: its context hivemind_app is registered by applications %', __hivemind;
+  ELSE
+    PERFORM hive.app_add_dependency( 'hivesense', __hivemind[1] );
   END IF;
 END
 $$;
