@@ -5,21 +5,24 @@ set -o pipefail
 
 SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
-# Fetch process_openapi.py from HAF repository at runtime
-HAF_BRANCH="${HAF_BRANCH:-develop}"
-PROCESS_OPENAPI_URL="https://gitlab.syncad.com/hive/haf/-/raw/${HAF_BRANCH}/scripts/process_openapi.py"
+# Fetch process_openapi.py from common-ci-configuration's haf-app-tools at runtime.
+# The default ref is the commit Dockerfile.rewriter's nginx image is built from, so
+# rpc_arguments.lua has the format that image's hive.rpc_form module reads.
+COMMON_CI_CONFIGURATION_REF="${COMMON_CI_CONFIGURATION_REF:-1d952fd19118762d0e66f91953e194ff08e69bb0}"
+PROCESS_OPENAPI_URL="https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_CONFIGURATION_REF}/haf-app-tools/python/process_openapi.py"
 PROCESS_OPENAPI_SCRIPT=$(mktemp)
 trap 'rm -f "$PROCESS_OPENAPI_SCRIPT"' EXIT
 
-echo "Fetching process_openapi.py from HAF (branch: $HAF_BRANCH)..."
+echo "Fetching process_openapi.py from common-ci-configuration (ref: $COMMON_CI_CONFIGURATION_REF)..."
 if ! curl -sf "$PROCESS_OPENAPI_URL" -o "$PROCESS_OPENAPI_SCRIPT"; then
-    echo "ERROR: Could not fetch process_openapi.py from HAF"
+    echo "ERROR: Could not fetch process_openapi.py from common-ci-configuration"
     exit 1
 fi
 
 endpoints="endpoints"
 rewrite_dir="${endpoints}_openapi"
 input_file="rewrite_rules.conf"
+arguments_file="rpc_arguments.lua"
 temp_output_file=$(mktemp)
 
 # Default directories with fixed order if none provided
@@ -110,6 +113,9 @@ python3 "$PROCESS_OPENAPI_SCRIPT" $OUTPUT  $ENDPOINTS_IN_ORDER
 reverse_lines > "$temp_output_file"
 mv "$temp_output_file" "../$input_file"
 rm "$input_file"
+
+# The arguments each /rpc/ function declares, for the rewriter's hive.rpc_form module
+mv "$arguments_file" "../$arguments_file"
 
 # Move rewriten directory to /postgrest
 rm -rf "$SCRIPTDIR/../$rewrite_dir"

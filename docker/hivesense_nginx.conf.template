@@ -14,6 +14,15 @@ http {
     # Resolving the upstream per request (variable proxy_pass below) lets nginx
     # start while hivesense-postgrest is not yet in DNS, instead of exiting.
     resolver ${RESOLVER} valid=10s;
+
+    # hive.rpc_form (shipped by the common-ci-configuration nginx base image)
+    # forwards a GET or HEAD of an /rpc/ function as a form POST of the
+    # arguments rpc_arguments.lua says it declares, so a value such as
+    # not.blocktrades reaches the function instead of being read as a filter.
+    init_by_lua_block {
+        rpc_form = require "hive.rpc_form"
+        rpc_arguments = dofile(ngx.config.prefix() .. "conf/rpc_arguments.lua")
+    }
     server {
             listen 0.0.0.0:80 default_server;
             server_name _;
@@ -27,6 +36,13 @@ http {
                     # Set REWRITE_LOG=on in the environment to enable rewrite logging,
                     # otherwise it will remain disabled
                     ${REWRITE_LOG}
+
+                    rewrite_by_lua_block {
+                        rpc_form.forward(rpc_arguments)
+                    }
+                    header_filter_by_lua_block {
+                        rpc_form.restore_head()
+                    }
 
                     proxy_pass  $postgrest_upstream;  # my PostREST is  here!
 

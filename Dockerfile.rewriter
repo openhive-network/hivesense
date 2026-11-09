@@ -1,7 +1,11 @@
-FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:latest AS without_tag
+# The nginx image of common-ci-configuration commit 1d952fd, the first to ship the
+# hive.rpc_form module; scripts/openapi_rewrite.sh generates rpc_arguments.lua
+# with process_openapi.py of the same commit.
+FROM registry.gitlab.syncad.com/hive/common-ci-configuration/nginx:1d952fd19118762d0e66f91953e194ff08e69bb0@sha256:ca1b31e7818d68fe66e7d63b077668495cebe1c67e9b3d9776397f586262405b AS without_tag
 
 COPY docker/hivesense_nginx.conf.template /usr/local/openresty/nginx/conf/nginx.conf.template
 COPY rewrite_rules.conf /usr/local/openresty/nginx/conf/rewrite_rules.conf
+COPY rpc_arguments.lua /usr/local/openresty/nginx/conf/rpc_arguments.lua
 COPY docker/rewriter_entrypoint.sh /entrypoint.sh
 
 CMD ["/entrypoint.sh"]
