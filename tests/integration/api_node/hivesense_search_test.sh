@@ -222,7 +222,7 @@ fi
 
 # ─── 5. edge-cache headers ─────────────────────────────────────────────
 expect_cache_control "/posts/search" "/posts/search?q=hive&result_limit=1&full_posts=0" 200 "public, max-age=60"
-expect_cache_control "/posts/{author}/{permlink}/similar" "/posts/${sample_post}/similar?result_limit=5" 200 "public, max-age=300"
+expect_cache_control "/posts/{author}/{permlink}/similar" "/posts/${sample_post}/similar?result_limit=5" 200 "public, max-age=3600"
 expect_cache_control "/authors/search" "/authors/search?topic=blockchain&result_limit=5" 200 "public, max-age=60"
 expect_cache_control "/posts/search error response" "/posts/search?q=hive&result_limit=0" "[45]??" ""
 expect_cache_control "/posts/{author}/{permlink}/similar error response" "/posts/${sample_post}/similar?result_limit=0" "[45]??" ""
@@ -270,17 +270,24 @@ for pair in 3:60 100:500; do
 done
 
 # ─── 8. candidate filters are only built when they can remove a row ────
-# Deleted posts are always filtered (one hive_posts probe per candidate); the
-# token and mute lookups are added only when they can remove a row.
+# Deleted posts are always filtered (one hive_posts probe per post, see
+# live_post_filter); the token and mute lookups are added only when they can
+# remove a row.
 deleted_filter=" AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp WHERE hp.id = pv.post_id AND hp.counter_deleted = 0)"
+# compared in SQL: query_database strips whitespace from what it prints
+same=$(query_database "SELECT hivesense_app.live_post_filter('pv', 0) = '${deleted_filter}'")
+if [ "$same" = "t" ]; then
+  pass "anonymous search filters deleted posts only"
+else
+  fail "anonymous search filters '$(query_database "SELECT hivesense_app.live_post_filter('pv', 0)")', expected '${deleted_filter}' (whitespace aside)"
+fi
 token_threshold=$(query_database "SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1")
 if [ "$token_threshold" = "0" ]; then
-  # compared in SQL: query_database strips whitespace from what it prints
-  same=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0) = '${deleted_filter}'")
+  same=$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL) = ''")
   if [ "$same" = "t" ]; then
-    pass "anonymous search without a token threshold filters only deleted posts"
+    pass "search without a token threshold adds no candidate filter"
   else
-    fail "anonymous search without a token threshold filters '$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL, 0)")', expected '${deleted_filter}' (whitespace aside)"
+    fail "search without a token threshold filters candidates by '$(query_database "SELECT hivesense_app.ann_candidate_filter('pv', NULL)")', expected nothing"
   fi
 fi
 
@@ -563,6 +570,29 @@ else
     pass "unfiltered search drops a deleted post (post ${top_live})"
   else
     fail "unfiltered search with post ${top_live} deleted: count/that-post = '${got}', expected N/0"
+  fi
+fi
+
+# /similar probes liveness only after the re-rank, refilling from the
+# remaining candidates: with its best match deleted, the rest of the list
+# moves up one place and the list stays full.
+similar_ids="SELECT string_agg(post_id::text, ',' ORDER BY similarity_order)
+               FROM hivesense_app.find_nearest_posts_to_post(split_part('${sample_post}', '/', 1), split_part('${sample_post}', '/', 2), 5)"
+live_list=$(query_database "$similar_ids")
+top_similar=${live_list%%,*}
+if ! is_number "$top_similar"; then
+  fail "/similar returned no top post to delete ('${live_list}')"
+else
+  refilled=$(query_database "SELECT string_agg(post_id::text, ',' ORDER BY similarity_order)
+                               FROM hivesense_app.find_nearest_posts_to_post(split_part('${sample_post}', '/', 1), split_part('${sample_post}', '/', 2), 6)
+                              WHERE post_id <> ${top_similar}")
+  got=$(query_database_rolled_back \
+    "UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = ${top_similar}" \
+    "$similar_ids")
+  if [ -n "$refilled" ] && [ "$got" = "${refilled}" ]; then
+    pass "/similar drops its deleted best match (post ${top_similar}) and refills: ${got}"
+  else
+    fail "/similar with post ${top_similar} deleted returned '${got}', expected the live list without it, refilled: '${refilled}'"
   fi
 fi
 

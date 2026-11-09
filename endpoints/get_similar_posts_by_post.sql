@@ -215,7 +215,7 @@ BEGIN
     -- observer is a URL parameter, so edge caches key per observer and never
     -- serve one observer's filtered results to another. Set only on success so
     -- error responses stay uncached.
-    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=300"}]', true);
+    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=3600"}]', true);
 
     RETURN COALESCE(__result, '[]'::JSON);
 END;

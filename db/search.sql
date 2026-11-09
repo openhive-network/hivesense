@@ -74,17 +74,13 @@ END;
 $$;
 
 /* WHERE-clause fragment (starting with AND) restricting the ANN candidates
- * of table alias _alias. Every search probes hive_posts once per candidate to
- * skip deleted posts: a deleted post keeps its embeddings, but hivemind's
- * full-post view returns no row for it, so one ranked into /posts/search's
- * full_posts slots was silently dropped (fewer full objects than requested)
- * while one ranked lower came back as a bare author/permlink stub. The
- * observer's mute check rides on that same probe, and the post_data lookup is
- * only added when a token threshold can remove a row. */
+ * of table alias _alias: the excluded post, and the post_data lookup only when
+ * a token threshold can remove a row. Liveness is checked separately, by
+ * live_post_filter. */
+DROP FUNCTION IF EXISTS hivesense_app.ann_candidate_filter(text, int, int);
 CREATE OR REPLACE FUNCTION hivesense_app.ann_candidate_filter(
     _alias           text,
-    _exclude_post_id int,
-    _observer_id     int
+    _exclude_post_id int
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -110,23 +106,41 @@ BEGIN
         __filter := __filter || format(' AND %I.post_id <> %s', _alias, _exclude_post_id);
     END IF;
 
+    RETURN __filter;
+END;
+$$;
+
+/* WHERE-clause fragment (starting with AND) keeping only the rows of table
+ * alias _alias whose post is live: one hive_posts probe per row. A deleted
+ * post keeps its embeddings, but hivemind's full-post view returns no row for
+ * it, so one ranked into /posts/search's full_posts slots was silently dropped
+ * (fewer full objects than requested) while one ranked lower came back as a
+ * bare author/permlink stub. The observer's mute check rides on that same
+ * probe. */
+CREATE OR REPLACE FUNCTION hivesense_app.live_post_filter(
+    _alias       text,
+    _observer_id int
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+BEGIN
     IF _observer_id <> 0 AND EXISTS (
            SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
             WHERE m.observer_id = _observer_id) THEN
-        __filter := __filter || format(
+        RETURN format(
           ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
           ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0'
           ' AND NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m'
           ' WHERE m.observer_id = %2$s AND m.muted_id = hp.author_id))',
           _alias, _observer_id);
-    ELSE
-        __filter := __filter || format(
-          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
-          ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0)',
-          _alias);
     END IF;
 
-    RETURN __filter;
+    RETURN format(
+      ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
+      ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0)',
+      _alias);
 END;
 $$;
 
@@ -455,8 +469,19 @@ BEGIN
     /* ────────────────────────────────────────────────────────────
      *  MAIN one-shot query (three variants)
      *
-     *  Every variant skips deleted posts: the ANN variants through
-     *  ann_candidate_filter, the exhaustive one explicitly.
+     *  Every variant skips deleted posts (and posts of authors the observer
+     *  mutes): the exhaustive one explicitly, the ANN variants through
+     *  live_post_filter, applied only after the re-rank. The re-ranked posts
+     *  come out of a fenced subquery (OFFSET 0 keeps the filter from being
+     *  pushed into it) in final order, so the hive_posts probe runs lazily
+     *  under the LIMIT: once per returned post plus once per rejected one,
+     *  not once per ANN candidate (e.g. 8 rather than ~60 at result_limit 8).
+     *
+     *  This returns what probing every ANN candidate did: with
+     *  hnsw.iterative_scan off the index yields at most ef_search rows
+     *  whatever the filter, so the ANN LIMIT (= ef_search) never binds and
+     *  the live posts among the candidates, their best chunks and their
+     *  order are the same; the probe now only drops the dead ones later.
      * ────────────────────────────────────────────────────────────*/
     IF exhaustive THEN
         -- note: this branch is only used for benchmarking debugging
@@ -559,18 +584,26 @@ BEGIN
                     ON pv.post_id     = ann.post_id
                    AND pv.chunk_number = ann.chunk_number
                  ORDER BY pv.post_id, sim
+            ),
+            reranked AS (
+                SELECT post_id, chunk_number, sim
+                  FROM best_chunk
+                 ORDER BY sim, post_id
+                OFFSET 0
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
                    sim::real AS similarity,
                    post_id,
                    chunk_number
-              FROM best_chunk
+              FROM reranked
+             WHERE TRUE%s
              ORDER BY sim, post_id
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr (expression on embedding)
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
           ann_candidates,               -- %s
+          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
           _limit                        -- %s
         )
         USING _embedding, query_red;
@@ -597,18 +630,26 @@ BEGIN
                     ON pv.post_id     = ann.post_id
                    AND pv.chunk_number = ann.chunk_number
                  ORDER BY pv.post_id, sim
+            ),
+            reranked AS (
+                SELECT post_id, chunk_number, sim
+                  FROM best_chunk
+                 ORDER BY sim, post_id
+                OFFSET 0
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
                    sim::real AS similarity,
                    post_id,
                    chunk_number
-              FROM best_chunk
+              FROM reranked
+             WHERE TRUE%s
              ORDER BY sim, post_id
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          hivesense_app.ann_candidate_filter('pr', _exclude_post_id, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pr', _exclude_post_id),  -- %s
           ann_candidates,               -- %s
+          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
           _limit                        -- %s
         )
         USING _embedding, query_red;
@@ -629,18 +670,26 @@ BEGIN
                        post_id, chunk_number, sim
                   FROM ann
                  ORDER BY post_id, sim
+            ),
+            reranked AS (
+                SELECT post_id, chunk_number, sim
+                  FROM best_chunk
+                 ORDER BY sim, post_id
+                OFFSET 0
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
                    sim::real  AS similarity,
                    post_id,
                    chunk_number
-              FROM best_chunk
+              FROM reranked
+             WHERE TRUE%s
              ORDER BY sim, post_id
              LIMIT %s
         $q$,
           dist_full,                  -- %s
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
           ann_candidates,             -- %s
+          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
           _limit                      -- %s
         )
         USING _embedding;
@@ -978,7 +1027,8 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          hivesense_app.ann_candidate_filter('pv', NULL, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', NULL)
+            || hivesense_app.live_post_filter('pv', _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -1027,7 +1077,8 @@ BEGIN
              LIMIT %s
         $q$,
           dist_red,                     -- %s  ann distance expr
-          hivesense_app.ann_candidate_filter('pr', NULL, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pr', NULL)
+            || hivesense_app.live_post_filter('pr', _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )
@@ -1066,7 +1117,8 @@ BEGIN
              LIMIT %s
         $q$,
           dist_full,                    -- %s  distance expr
-          hivesense_app.ann_candidate_filter('pv', NULL, _observer_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', NULL)
+            || hivesense_app.live_post_filter('pv', _observer_id),  -- %s
           ann_candidates,               -- %s
           _limit                        -- %s
         )

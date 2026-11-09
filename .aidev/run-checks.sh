@@ -717,8 +717,32 @@ end
 rollback;"
 }
 
+# In a rolled-back transaction: the sauce post's best match, the pasta post
+# (900105), is deleted; posts_similar probes liveness after the re-rank and
+# must drop it and refill from the remaining candidates, still returning
+# result_limit posts in the order they had behind it.
+similar_refill_checks() {
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "
+begin;
+do \$\$
+declare
+    __live    int[] := array(select post_id from hivesense_app.find_nearest_posts_to_post(
+                         'aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 3) order by similarity_order);
+    __deleted int[];
+begin
+    assert __live[1] = 900105 and cardinality(__live) = 3, format('similar posts while all are live: %s', __live);
+    update hivemind_app.hive_posts set counter_deleted = 1 where id = 900105;
+    __deleted := array(select post_id from hivesense_app.find_nearest_posts_to_post(
+                     'aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 2) order by similarity_order);
+    assert __deleted = __live[2:3], format('similar posts with 900105 deleted: %s, expected %s', __deleted, __live[2:3]);
+    raise notice 'similar refill checks: PASS (% -> %)', __live, __deleted;
+end
+\$\$;
+rollback;"
+}
+
 embed_search() {
-    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks
+    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks && similar_refill_checks
 }
 
 # Slice mode keeps no separate reduced vectors: its index and ANN search use the
