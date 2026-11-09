@@ -69,15 +69,15 @@ docker run -d --name "$UPSTREAM" --network "$NETWORK" --network-alias hivesense-
     printf "%s\n" "events {}" "http { server { listen 3000; location / { return 200 \"\$request_uri\"; } } }" > /tmp/upstream.conf
     exec /usr/local/openresty/bin/openresty -c /tmp/upstream.conf -g "daemon off;"' >/dev/null
 
-expected="/rpc/posts_similar?author=alice&permlink=hello"
+expected="/rpc/get_hivesense_version"
 i=0
-until [ "$(rewriter_get /posts/alice/hello/similar)" = "$expected" ]; do
+until [ "$(rewriter_get /version)" = "$expected" ]; do
   running || fail "rewriter exited"
   i=$((i+1))
   [ "$i" -le 60 ] || fail "rewriter did not reach the upstream within 60s of it starting"
   sleep 1
 done
-echo "Rewriter proxies /posts/alice/hello/similar to ${expected}."
+echo "Rewriter proxies /version to ${expected}."
 
 got=$(rewriter_get "/sync-status?x=1")
 [ "$got" = "/rpc/get_hivesense_sync_status?x=1" ] || fail "/sync-status?x=1 proxied as '${got}'"

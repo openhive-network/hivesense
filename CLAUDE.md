@@ -13,7 +13,7 @@ HiveSense is a HAF-based application for semantic search on Hive blockchain post
 - **Ollama Integration**: Calls Ollama API to generate embeddings for post content
 - **PostgreSQL with pgvector**: Stores embeddings and enables HNSW-indexed vector similarity search
 - **PostgREST API**: Exposes semantic search endpoints (`/similarposts`, `/similarpostsbypost`, `/thematiccontributors`)
-- **PostgREST Rewriter**: Transforms API requests/responses
+- **PostgREST Rewriter**: Transforms API requests/responses. `scripts/openapi_rewrite.sh` regenerates `rewrite_rules.conf` and `rpc_arguments.lua` (both committed) from the endpoints' OpenAPI comments; the nginx base image's `hive.rpc_form` module forwards a GET/HEAD as a form POST of the arguments `rpc_arguments.lua` lists, so values like `not.x` reach the function. Every `hivesense_endpoints` function must stay STABLE (PostgREST runs a POST to a VOLATILE one read-write)
 
 ### Database Schema
 - **hivesense_app**: Main schema containing application state, post vectors, and processing logic

@@ -1054,6 +1054,95 @@ else
   fail "deleted post in block processing: in_range,chunks,vectors_left,fresh_tombstones = '${deleted}', expected true,0,0,1"
 fi
 
+# ─── 13. operator-prefixed values reach the functions (#94) ───────────
+# PostgREST reads a GET value starting with `not.`, `eq.`, ... as a filter; the
+# rewriter's hive.rpc_form module forwards the declared arguments as a form POST,
+# so such a value is an argument and only the other query parameters keep their
+# PostgREST meaning. PostgREST itself (hivesense-postgrest:3000, GET) answers the
+# regression comparisons as the rewriter did before.
+
+# Body of a response, for any status code: $1 is the base URL, $2 the path.
+http_body() {
+  docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
+    curl -s -m 60 "${1}${2}"
+}
+REWRITER_URL="http://hivesense-postgrest-rewriter:80"
+POSTGREST_URL="http://hivesense-postgrest:3000"
+
+# expect_app_answer NAME PATH EXPECTED_SUBSTRING
+expect_app_answer() {
+  body=$(http_body "$REWRITER_URL" "$2")
+  case "$body" in
+    *PGRST*) fail "$1 answered PostgREST's own error: $(echo "$body" | head -c 300)" ;;
+    *"$3"*) pass "$1 reaches the function ($(echo "$body" | head -c 120))" ;;
+    *) fail "$1 answered '$(echo "$body" | head -c 300)', expected it to contain '$3'" ;;
+  esac
+}
+
+expect_app_answer "/posts/search?author=not.blocktrades" \
+  "/posts/search?q=hive&author=not.blocktrades&result_limit=5" "Account not.blocktrades does not exist"
+expect_app_answer "/posts/search?author=eq.blocktrades" \
+  "/posts/search?q=hive&author=eq.blocktrades&result_limit=5" "Account eq.blocktrades does not exist"
+expect_app_answer "/posts/search?q=not.bitcoin" \
+  "/posts/search?q=not.bitcoin&result_limit=3" '"author"'
+sample_permlink=${sample_post#*/}
+expect_app_answer "/posts/eq.blocktrades/{permlink}/similar" \
+  "/posts/eq.blocktrades/${sample_permlink}/similar?result_limit=5" "[]"
+expect_app_answer "/posts/{author}/{permlink}/similar?observer=not.blocktrades" \
+  "/posts/${sample_post}/similar?result_limit=5&observer=not.blocktrades" "Account not.blocktrades does not exist"
+
+# expect_same_as_postgrest NAME REWRITER_PATH POSTGREST_PATH
+expect_same_as_postgrest() {
+  through_rewriter=$(http_body "$REWRITER_URL" "$2")
+  direct=$(http_body "$POSTGREST_URL" "$3")
+  if [ -n "$direct" ] && [ "$through_rewriter" = "$direct" ]; then
+    pass "$1 answers as PostgREST's GET does ($(echo "$direct" | head -c 80))"
+  else
+    fail "$1 through the rewriter: '$(echo "$through_rewriter" | head -c 200)'; PostgREST GET: '$(echo "$direct" | head -c 200)'"
+  fi
+}
+
+expect_same_as_postgrest "/posts/{author}/{permlink}/similar for a real post" \
+  "/posts/${sample_post}/similar?result_limit=5&full_posts=2" \
+  "/rpc/posts_similar?author=${sample_post%/*}&permlink=${sample_permlink}&result_limit=5&full_posts=2"
+if [ -n "$test_author" ]; then
+  expect_same_as_postgrest "/posts/search for the real author @${test_author}" \
+    "/posts/search?q=hive&author=${test_author}&result_limit=5&full_posts=1" \
+    "/rpc/posts_search?q=hive&author=${test_author}&result_limit=5&full_posts=1"
+else
+  fail "/posts/search for a real author: no test author (see section 9)"
+fi
+
+# A column filter and select on an endpoint returning rows stay PostgREST's.
+sync_uuid=$(query_database "SELECT sync_uuid FROM hivesense_app.hivesense_app_status WHERE id = 1")
+filtered="?after_seq=0&page_size=50&sync_uuid=${sync_uuid}&op=eq.insert&select=sync_seq,op"
+expect_same_as_postgrest "/embedding-updates with op=eq.insert&select=sync_seq,op" \
+  "/embedding-updates${filtered}" "/rpc/embedding_updates${filtered}"
+body=$(http_body "$REWRITER_URL" "/embedding-updates${filtered}")
+case "$body" in
+  *'"op":"insert"'*)
+    case "$body" in
+      *'"op":"update"'*|*'"op":"delete"'*|*'"author"'*)
+        fail "/embedding-updates ignored the column filter or select: $(echo "$body" | head -c 300)" ;;
+      *) pass "/embedding-updates applies op=eq.insert and select=sync_seq,op" ;;
+    esac
+    ;;
+  *) fail "/embedding-updates with op=eq.insert returned no insert: $(echo "$body" | head -c 300)" ;;
+esac
+
+# HEAD answers the GET's status with no body, and the GET curl sends next on the
+# same connection (--next reuses it) is framed: a HEAD answered with a body would
+# leave those bytes in front of the GET's status line.
+head_path="/posts/search?q=not.bitcoin&result_limit=1&full_posts=0"
+head_then_get=$(docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T caddy \
+  curl -s -m 60 -I -o /dev/null -w '%{http_code} %{size_download}\n' "${REWRITER_URL}${head_path}" \
+    --next -s -m 60 -o /dev/null -w '%{http_code} %{num_connects}\n' "${REWRITER_URL}${head_path}")
+if [ "$(echo "$head_then_get" | tr '\n' ' ')" = "200 0 200 0 " ]; then
+  pass "HEAD ${head_path} answers 200 with no body, and the next GET on its connection answers 200"
+else
+  fail "HEAD then GET of ${head_path} on one connection: '$(echo "$head_then_get" | tr '\n' ' ')', expected '200 0 200 0'"
+fi
+
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
   echo "${FAILURES} search test(s) failed (mode: ${MODE})" >&2
