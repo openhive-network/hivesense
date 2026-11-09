@@ -1081,13 +1081,17 @@ expect_app_answer() {
 
 expect_app_answer "/posts/search?author=not.blocktrades" \
   "/posts/search?q=hive&author=not.blocktrades&result_limit=5" "Account not.blocktrades does not exist"
+# eq.blocktrades is no well-formed account name (its segment "eq" is too short),
+# so the function rejects it with its own JSON-RPC -32602; read as a filter, the
+# function would run without an author and answer rows instead.
 expect_app_answer "/posts/search?author=eq.blocktrades" \
-  "/posts/search?q=hive&author=eq.blocktrades&result_limit=5" "Account eq.blocktrades does not exist"
+  "/posts/search?q=hive&author=eq.blocktrades&result_limit=5" "-32602"
 expect_app_answer "/posts/search?q=not.bitcoin" \
   "/posts/search?q=not.bitcoin&result_limit=3" '"author"'
 sample_permlink=${sample_post#*/}
 expect_app_answer "/posts/eq.blocktrades/{permlink}/similar" \
-  "/posts/eq.blocktrades/${sample_permlink}/similar?result_limit=5" "[]"
+  "/posts/eq.blocktrades/${sample_permlink}/similar?result_limit=5" \
+  "Post eq.blocktrades/${sample_permlink} does not exist"
 expect_app_answer "/posts/{author}/{permlink}/similar?observer=not.blocktrades" \
   "/posts/${sample_post}/similar?result_limit=5&observer=not.blocktrades" "Account not.blocktrades does not exist"
 
