@@ -49,7 +49,9 @@
 #                     embedding-backed calls of
 #                     .aidev/hivesense_smoke.py (one junit case per call), then
 #                     (rolled back) a deletion of an embedded seeded post in block
-#                     processing and its delete op in embedding_updates; finally
+#                     processing and its delete op in embedding_updates, and
+#                     posts_similar's full posts with and without hivemind's
+#                     _votes_mode (the vote-free call); finally
 #                     reinstall as `install` does, so the steps after it see that state
 #   - embed-slice     embed-search in CI's slice configuration
 #                     (mxbai-embed-xsmall-v1, Matryoshka slice to 256 dims)
@@ -741,8 +743,62 @@ end
 rollback;"
 }
 
+# In a rolled-back transaction: posts_similar's full posts on the stack's
+# hivemind (no _votes_mode yet) embed active_votes; then hivemind's
+# create_bridge_post_object is swapped for a stub of the nine-argument one,
+# which records the mode it is called with, and the same call must ask for
+# vote-free posts (_votes_mode 1, _top_votes 0) for the observer and return the
+# same posts, in the same order, with nothing else changed.
+similar_votes_mode_checks() {
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "
+begin;
+create temp table embedded_votes on commit drop as
+select hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb as posts;
+do \$\$
+declare
+    __posts jsonb := (select posts from embedded_votes);
+begin
+    assert jsonb_array_length(__posts) = 3, format('full similar posts: %s', __posts);
+    assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote') from jsonb_array_elements(__posts) p),
+        format('full similar posts without _votes_mode lack active_votes: %s', __posts);
+end
+\$\$;
+alter function hivemind_postgrest_utilities.create_bridge_post_object(integer, record, integer, text[], boolean, boolean, jsonb)
+    rename to create_bridge_post_object_embedded_votes;
+create function hivemind_postgrest_utilities.create_bridge_post_object(
+    _observer_id integer, _row record, _truncate_body_len integer, _reblogged_by text[], _set_is_pinned_field boolean,
+    _update_reblogs_field boolean, _replies jsonb default null, _votes_mode smallint default 0, _top_votes integer default 0)
+returns jsonb language plpgsql stable as \$f\$
+begin
+    return hivemind_postgrest_utilities.create_bridge_post_object_embedded_votes(
+               _observer_id, _row, _truncate_body_len, _reblogged_by, _set_is_pinned_field, _update_reblogs_field, _replies)
+           - 'active_votes'
+           || jsonb_build_object('votes_mode', _votes_mode, 'top_votes', _top_votes, 'observer_id', _observer_id);
+end
+\$f\$;
+do \$\$
+declare
+    __before   jsonb := (select jsonb_agg(p - 'active_votes' order by o)
+                           from embedded_votes, jsonb_array_elements(posts) with ordinality e(p, o));
+    __posts    jsonb := hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb;
+    __observer int := (select id from hivemind_app.hive_accounts where name = 'aidev-witness');
+begin
+    assert (select bool_and(not p ? 'active_votes' and p->>'votes_mode' = '1' and p->>'top_votes' = '0'
+                            and (p->>'observer_id')::int = __observer)
+              from jsonb_array_elements(__posts) p),
+        format('full similar posts with _votes_mode are not vote-free for observer %s: %s', __observer, __posts);
+    assert (select jsonb_agg(p - 'votes_mode' - 'top_votes' - 'observer_id' order by o)
+              from jsonb_array_elements(__posts) with ordinality e(p, o)) = __before,
+        format('vote-free similar posts %s differ from %s beyond active_votes', __posts, __before);
+    raise notice 'similar votes mode checks: PASS';
+end
+\$\$;
+rollback;"
+}
+
 embed_search() {
-    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks && similar_refill_checks
+    embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks && similar_refill_checks \
+        && similar_votes_mode_checks
 }
 
 # Slice mode keeps no separate reduced vectors: its index and ANN search use the

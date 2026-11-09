@@ -1,4 +1,30 @@
 SET ROLE hivesense_owner;
+
+-- A hivemind older than its _votes_mode parameter has only the seven-argument
+-- create_bridge_post_object, and plpgsql resolves a call only when it runs:
+-- choose the call per row so posts_similar keeps answering on such a node
+-- (with active_votes embedded) and goes vote-free once hivemind has the mode.
+CREATE OR REPLACE FUNCTION hivesense_app.similar_post_object(
+    _observer_id INT,
+    _row RECORD,
+    _truncate INT
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    IF to_regprocedure(
+           'hivemind_postgrest_utilities.create_bridge_post_object(integer, record, integer, text[], boolean, boolean, jsonb, smallint, integer)'
+       ) IS NULL THEN
+        RETURN hivemind_postgrest_utilities.create_bridge_post_object(
+                   _observer_id, _row, _truncate, NULL, _row.is_pinned, TRUE);
+    END IF;
+    RETURN hivemind_postgrest_utilities.create_bridge_post_object(
+               _observer_id, _row, _truncate, NULL, _row.is_pinned, TRUE,
+               _votes_mode => 1::SMALLINT);
+END;
+$$;
+
 /** openapi:paths
 /posts/{author}/{permlink}/similar:
   get:
@@ -21,6 +47,8 @@ SET ROLE hivesense_owner;
       - Optional content filtering through observer blacklists
       - Configurable body length truncation for preview purposes
       - Split response: full data for top results, stubs for remainder
+      - Full posts carry no embedded *active_votes* list; *observer_vote*
+        holds the vote of the observer on the post (null without an observer or vote)
     
       The similarity analysis takes into account:
       - Post content and context
@@ -175,15 +203,12 @@ BEGIN
                   FROM hivemind_app.get_full_post_view_by_id(
                            lim.post_id, __observer_id) fv
           ) fpv ON TRUE
-          /* ② build bridge-post JSON using the augmented record */
+          /* ② build vote-free bridge-post JSON using the augmented record */
           JOIN LATERAL (
-                SELECT hivemind_postgrest_utilities.create_bridge_post_object(
+                SELECT hivesense_app.similar_post_object(
                            __observer_id,
                            fpv.*,
-                           "truncate",
-                           NULL,
-                           fpv.is_pinned,
-                           TRUE) AS obj
+                           "truncate") AS obj
           ) bp ON TRUE
     ),
 
