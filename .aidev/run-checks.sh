@@ -15,7 +15,8 @@
 #   - sql-registered  every .sql file under db/ and endpoints/ is applied by
 #                     scripts/install_app.sh (a file it misses never reaches a database)
 #   - stack-pins      the four upstream images of .aidev/test-stack.compose.yml are
-#                     pinned as repo:tag@sha256 for .gitlab-ci.yml's UPSTREAM_BRANCH
+#                     pinned as repo:tag@sha256 for .gitlab-ci.yml's UPSTREAM_BRANCH,
+#                     and the votes-mode hivemind as repo:tag@sha256
 #   - install         scripts/install_app.sh into the stack's HAF database
 #                     (HIVESENSE_TEST_DB_HOST, default `haf`), which already has
 #                     hivemind installed, through install_with_app_lock.py (its log
@@ -53,6 +54,12 @@
 #                     posts_similar's full posts with and without hivemind's
 #                     _votes_mode (the vote-free call); finally
 #                     reinstall as `install` does, so the steps after it see that state
+#   - votes-mode      on the stack's second HAF (HIVESENSE_TEST_VOTES_MODE_DB_HOST,
+#                     default `haf-votes-mode`), whose hivemind has
+#                     create_bridge_post_object's _votes_mode: install, seed and
+#                     embed as embed-search, then posts_similar's full posts must
+#                     carry no active_votes, the observer's vote as observer_vote,
+#                     and otherwise equal hivemind's seven-argument output
 #   - embed-slice     embed-search in CI's slice configuration
 #                     (mxbai-embed-xsmall-v1, Matryoshka slice to 256 dims)
 #   - embed-pca       embed-search's embedding in PCA mode, with a projection
@@ -131,9 +138,11 @@ sql_registered() {
 STACK_COMPOSE=.aidev/test-stack.compose.yml
 STACK_IMAGES_BY_RELEASE="hafah reputation_tracker hivemind"
 
-# The pins of one image repository in the stack, one per line, deduplicated.
+# The pins of one image repository in the stack, one per line, deduplicated; the
+# votes-mode hivemind (x-hivemind-votes-mode-image) is not a release pin.
 stack_pins_of() {
-    grep -oE "registry\.gitlab\.syncad\.com/hive/$1(:[^@\" ]*)?(@sha256:[0-9a-f]*)?" "$STACK_COMPOSE" | sort -u
+    grep -v '^x-hivemind-votes-mode-image:' "$STACK_COMPOSE" \
+        | grep -oE "registry\.gitlab\.syncad\.com/hive/$1(:[^@\" ]*)?(@sha256:[0-9a-f]*)?" | sort -u
 }
 
 # Every upstream image must be pinned as repo:tag@sha256:<digest> (docker ignores the
@@ -178,6 +187,13 @@ stack_pins() {
         fi
         echo "ok: $pins"
     done
+    pins="$(sed -n 's/^x-hivemind-votes-mode-image: *&[^ ]* *//p' "$STACK_COMPOSE")"
+    if ! grep -qxE "registry\.gitlab\.syncad\.com/hive/hivemind:[^@/]+@sha256:[0-9a-f]{64}" <<<"$pins"; then
+        echo "STALE: $STACK_COMPOSE x-hivemind-votes-mode-image must pin registry.gitlab.syncad.com/hive/hivemind as repo:tag@sha256:<digest>; found: ${pins:-nothing}"
+        stale=1
+    else
+        echo "ok: $pins (votes-mode hivemind)"
+    fi
     [ "$stale" -eq 0 ] || echo "re-pin the stack images together when UPSTREAM_BRANCH moves; see .aidev/README.md"
     return "$stale"
 }
@@ -801,6 +817,75 @@ embed_search() {
         && similar_votes_mode_checks
 }
 
+VOTES_MODE_DB_HOST="${HIVESENSE_TEST_VOTES_MODE_DB_HOST:-haf-votes-mode}"
+
+# In a rolled-back transaction on the HAF whose hivemind is real, not a stub:
+# the observer (aidev-witness) has voted on the sauce post's best match (900105).
+# posts_similar's full posts must carry no active_votes, observer_vote with that
+# vote's rshares and percent (null on the posts the observer did not vote on),
+# and be otherwise equal, in the same order, to what hivemind's seven-argument
+# create_bridge_post_object (its default votes mode) builds for the same posts,
+# whose active_votes hold the observer's vote.
+similar_vote_free_checks() {
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "
+begin;
+set local session_replication_role = replica;
+insert into hivemind_app.hive_votes
+    (post_id, voter_id, author_id, permlink_id, weight, rshares, vote_percent, last_update, block_num, is_effective)
+values (900105, 9101, 9105, 900105, 1000, 123456789, 7500, '2026-01-01 00:06:00', 106, true);
+set local session_replication_role = origin;
+do \$\$
+declare
+    __observer   int := (select id from hivemind_app.hive_accounts where name = 'aidev-witness');
+    __posts      jsonb := hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb;
+    __seven_args jsonb;
+begin
+    select jsonb_agg(hivemind_postgrest_utilities.create_bridge_post_object(__observer, fpv, 0, null, fpv.is_pinned, true)
+                     order by e.o)
+      into __seven_args
+      from jsonb_array_elements(__posts) with ordinality e(p, o)
+      join hivemind_app.hive_accounts ha on ha.name = e.p->>'author'
+      join hivemind_app.hive_permlink_data hpd on hpd.permlink = e.p->>'permlink'
+      join hivemind_app.hive_posts hp on hp.author_id = ha.id and hp.permlink_id = hpd.id
+     cross join lateral (select fv.*, fv.source as blacklists
+                           from hivemind_app.get_full_post_view_by_id(hp.id, __observer) fv) fpv;
+    assert jsonb_array_length(__posts) = 3 and jsonb_array_length(__seven_args) = 3
+           and __posts->0->>'permlink' = 'fresh-egg-pasta-with-tomato-basil-sauce',
+        format('full similar posts: %s', __posts);
+    assert (select bool_and(not p ? 'active_votes' and p ? 'observer_vote') from jsonb_array_elements(__posts) p),
+        format('full similar posts are not vote-free: %s', __posts);
+    assert __posts->0->'observer_vote' = '{\"rshares\": 123456789, \"percent\": 7500}'::jsonb,
+        format('observer_vote of the post the observer voted on: %s', __posts->0->'observer_vote');
+    assert (select bool_and(p->'observer_vote' = 'null'::jsonb) from jsonb_array_elements(__posts - 0) p),
+        format('observer_vote of the posts the observer did not vote on: %s', __posts);
+    assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote') from jsonb_array_elements(__seven_args) p)
+           and jsonb_path_exists(__seven_args->0->'active_votes', '\$[*] ? (@.voter == \"aidev-witness\")'),
+        format('the seven-argument posts do not embed the observer''s vote in active_votes: %s', __seven_args);
+    assert (select jsonb_agg(p - 'observer_vote' order by o) from jsonb_array_elements(__posts) with ordinality e(p, o))
+           = (select jsonb_agg(p - 'active_votes' order by o) from jsonb_array_elements(__seven_args) with ordinality e(p, o)),
+        format('vote-free similar posts %s differ from the seven-argument posts %s beyond the votes', __posts, __seven_args);
+    raise notice 'similar vote-free checks: PASS';
+end
+\$\$;
+rollback;"
+}
+
+# posts_similar against a hivemind that has _votes_mode: the stack's second HAF
+# (haf-votes-mode), installed and embedded as embed-search does it on `haf`. It
+# installs first: uninstall_app.sh fails on a database hivesense never had.
+votes_mode() (
+    ADMIN_URL="postgresql://haf_admin@$VOTES_MODE_DB_HOST/haf_block_log"
+    HIVESENSE_TEST_USER_URL="postgresql://hivesense_user@$VOTES_MODE_DB_HOST/haf_block_log"
+    trap 'exit 143' TERM INT
+    wait_for_db || exit 1
+    if [ "$(query "select to_regprocedure('hivemind_postgrest_utilities.create_bridge_post_object(integer, record, integer, text[], boolean, boolean, jsonb, smallint, integer)') is not null")" != t ]; then
+        echo "FAIL: the hivemind on $VOTES_MODE_DB_HOST has no create_bridge_post_object with _votes_mode"
+        exit 1
+    fi
+    echo "hivemind on $VOTES_MODE_DB_HOST: $(query "select patched_to_revision from hivemind_app.hive_db_patch_level order by level desc limit 1")"
+    install && embed_seeded_posts "$EMBEDDING_MODEL" && similar_vote_free_checks
+)
+
 # Slice mode keeps no separate reduced vectors: its index and ANN search use the
 # first reduced_dims() dims of posts_vectors.embedding.
 embed_slice() {
@@ -905,6 +990,7 @@ for s in "$@"; do
         registry) step registry registry ;;
         hivemind-reinstall) step hivemind-reinstall hivemind_role_reinstall ;;
         embed-search) step embed-search with_default_restored embed_search ;;
+        votes-mode) step votes-mode votes_mode ;;
         embed-slice) step embed-slice with_default_restored embed_slice ;;
         embed-pca) step embed-pca with_default_restored embed_pca ;;
         api-smoke) step api-smoke python3 .aidev/hivesense_smoke.py "$out" api-smoke ;;

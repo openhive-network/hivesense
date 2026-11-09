@@ -15,8 +15,8 @@
 #
 # The checks run in the runtime image (.aidev/runtime/), join this stack's
 # network, reach the database as `haf`, and install the candidate's own SQL, so no
-# hivesense image is built per change. `ready` turns healthy once hivemind's
-# install has completed and `ollama` serves the model, which is what
+# hivesense image is built per change. `ready` turns healthy once both hivemind
+# installs have completed and `ollama` serves the model, which is what
 # `docker compose up --wait` waits for.
 #
 # Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH develop
@@ -28,8 +28,15 @@
 # records the HAF branch the HAF commit tag was resolved for. Re-pin them together
 # when .gitlab-ci.yml's UPSTREAM_BRANCH moves (.aidev/README.md). The ollama image is built from .aidev/runtime/ollama.Dockerfile
 # by .aidev/runtime/build.sh --image=ollama.
+#
+# `haf-votes-mode` is a second HAF of the same image, installed the same way but
+# with x-hivemind-votes-mode-image: a hivemind whose create_bridge_post_object
+# has _votes_mode (hivemind d87d0e714), for the `votes-mode` check. No release has
+# it yet, so it is a develop build, tagged by its 8-char commit; re-pin it to the
+# first release that has it, and drop the variant once x-apps-release does.
 x-haf-upstream-branch: "develop"
 x-apps-release: "1.28.8-rc3"
+x-hivemind-votes-mode-image: &hivemind-votes-mode-image registry.gitlab.syncad.com/hive/hivemind:7061b7db@sha256:82afda4f887c90c22133ea99b90b68eb3a127292b2090fccf13539f64b33c495
 
 x-haf-client: &haf-client
   depends_on:
@@ -37,7 +44,7 @@ x-haf-client: &haf-client
       condition: service_healthy
 
 services:
-  haf:
+  haf: &haf
     image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:ce114878@sha256:7ea12cf8f2aeb7237ecab7ae8c6da6625d22b13c5540a9d5a817143f1d97f816
     command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
     volumes:
@@ -81,7 +88,7 @@ services:
     image: *haf-image
     entrypoint: ["/usr/lib/postgresql/18/bin/psql", "postgresql://haf_admin@haf/haf_block_log", "-v", "ON_ERROR_STOP=on", "-c", "select hive.initialize_extension_data()"]
 
-  hafah-install:
+  hafah-install: &hafah-install
     image: registry.gitlab.syncad.com/hive/hafah:1.28.8-rc3@sha256:6c180ce9cb37671f1639776c9fb1829c33c34bae31f31884f3b14c5af9105997
     environment:
       POSTGRES_URL: postgresql://haf_admin@haf/haf_block_log
@@ -90,7 +97,7 @@ services:
       haf-init:
         condition: service_completed_successfully
 
-  reputation-tracker-install:
+  reputation-tracker-install: &reputation-tracker-install
     image: registry.gitlab.syncad.com/hive/reputation_tracker:1.28.8-rc3@sha256:ccfaf79a072bece9eb036f83be012f6fa7129280197f2c81880a3b3e108b6d58
     environment:
       POSTGRES_HOST: haf
@@ -99,13 +106,48 @@ services:
       haf-init:
         condition: service_completed_successfully
 
-  hivemind-install:
+  hivemind-install: &hivemind-install
     image: registry.gitlab.syncad.com/hive/hivemind:1.28.8-rc3@sha256:4b05d408775e8c38b6b86b4dacc7f5acac1bb8972545c83980cf5efa3bfcfd64
     command: ["setup", "--database-admin-url=postgresql://haf_admin@haf/haf_block_log", "--statement-timeout=5000", "--swagger-url=localhost"]
     depends_on:
       hafah-install:
         condition: service_completed_successfully
       reputation-tracker-install:
+        condition: service_completed_successfully
+
+  haf-votes-mode: *haf
+
+  haf-votes-mode-init:
+    image: *haf-image
+    depends_on:
+      haf-votes-mode:
+        condition: service_healthy
+    entrypoint: ["/usr/lib/postgresql/18/bin/psql", "postgresql://haf_admin@haf-votes-mode/haf_block_log", "-v", "ON_ERROR_STOP=on", "-c", "select hive.initialize_extension_data()"]
+
+  hafah-install-votes-mode:
+    <<: *hafah-install
+    environment:
+      POSTGRES_URL: postgresql://haf_admin@haf-votes-mode/haf_block_log
+    depends_on:
+      haf-votes-mode-init:
+        condition: service_completed_successfully
+
+  reputation-tracker-install-votes-mode:
+    <<: *reputation-tracker-install
+    environment:
+      POSTGRES_HOST: haf-votes-mode
+    depends_on:
+      haf-votes-mode-init:
+        condition: service_completed_successfully
+
+  hivemind-install-votes-mode:
+    <<: *hivemind-install
+    image: *hivemind-votes-mode-image
+    command: ["setup", "--database-admin-url=postgresql://haf_admin@haf-votes-mode/haf_block_log", "--statement-timeout=5000", "--swagger-url=localhost"]
+    depends_on:
+      hafah-install-votes-mode:
+        condition: service_completed_successfully
+      reputation-tracker-install-votes-mode:
         condition: service_completed_successfully
 
   ready:
@@ -118,6 +160,8 @@ services:
       retries: 120
     depends_on:
       hivemind-install:
+        condition: service_completed_successfully
+      hivemind-install-votes-mode:
         condition: service_completed_successfully
       ollama:
         condition: service_healthy
