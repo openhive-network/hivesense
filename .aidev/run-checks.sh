@@ -22,7 +22,9 @@
 #                     must not carry the wrapper-not-found WARNING); then the block
 #                     processor's start-up identity (init_local_sync_identity),
 #                     tests/test_sync_chains.sql, tests/test_early_block_processing.sql
-#                     and tests/test_deleted_posts.sql
+#                     and tests/test_deleted_posts.sql; then
+#                     .aidev/endpoint_volatility_check.sql (no VOLATILE function in
+#                     hivesense_endpoints) and root() by hivesense_user, read only
 #   - events-id       CI's events_id_test (#54): seed hafd.contexts.events_id = 0
 #                     for hivesense_app, run scripts/sync_embeddings.py's
 #                     ensure_context_detached, expect hive.unreachable_event_id()
@@ -215,7 +217,11 @@ install() {
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atc "select hivesense_app.init_local_sync_identity()" || return 1
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_sync_chains.sql || return 1
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_early_block_processing.sql || return 1
-    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_deleted_posts.sql
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f tests/test_deleted_posts.sql || return 1
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -f .aidev/endpoint_volatility_check.sql || return 1
+    # As PostgREST runs a GET: the API role, in a read-only transaction.
+    psql "$HIVESENSE_TEST_USER_URL" -v ON_ERROR_STOP=on -Atc "begin read only" \
+        -c "select jsonb_typeof(hivesense_endpoints.root()::jsonb)" -c "rollback"
 }
 
 # query SQL: psql as haf_admin, unaligned tuples only
