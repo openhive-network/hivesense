@@ -1128,44 +1128,46 @@ RESET ROLE;
 -- completed-block function, exact during massive sync as well), so the
 -- scheduler's own hivemind wait loops normally find hivemind already there.
 -- hivemind must already be registered (its install runs first).
-DO $$
-DECLARE
-  __old_name TEXT;
-BEGIN
-  -- A registration from before the rename holds the context; hive.app_register
-  -- would only print a NOTICE and leave it, and nothing would process blocks.
-  IF to_regclass('hafd.applications') IS NOT NULL THEN
-    SELECT a.name INTO __old_name
-      FROM hafd.applications a
-     WHERE a.name <> 'hivesense' AND 'hivesense_app' = ANY(a.contexts)
-     LIMIT 1;
-    IF __old_name IS NOT NULL THEN
-      RAISE EXCEPTION 'Cannot register hivesense: its context hivesense_app is registered as application % by an older hivesense; replay from scratch, or run %; and reinstall',
-                      __old_name, format('SELECT hive.app_unregister(%L)', __old_name);
-    END IF;
-  END IF;
-
-  IF to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') IS NOT NULL THEN
-    PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group, NULL,
-                              _health_function => 'hivesense_app.install_health');
-  ELSE
-    PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group, NULL);
-  END IF;
-END
-$$;
 -- hivemind is found by its context: its registration's name changed (from
 -- hivemind_app to its lock name hivemind), its context did not. On a HAF with
 -- the registry an unregistered hivemind fails the install: running ungated
 -- would index posts hivemind has not written yet.
 DO $$
 DECLARE
+  __old_name TEXT;
   __hivemind TEXT[];
 BEGIN
-  IF to_regclass('hafd.applications') IS NULL THEN
+  -- Not to_regproc('hive.app_register'): it is NULL when the name is overloaded.
+  IF to_regclass('hafd.applications') IS NULL
+     OR NOT EXISTS (SELECT 1 FROM pg_proc
+                     WHERE pronamespace = to_regnamespace('hive') AND proname = 'app_register') THEN
     -- HAF without the registry: the scheduler's own hivemind wait loops still apply
-    RAISE WARNING 'HAF has no application registry; hivesense runs without the dependency gate';
+    RAISE WARNING 'HAF has no application registry; hivesense is not registered and runs without the dependency gate';
     RETURN;
   END IF;
+
+  -- A registration from before the rename holds the context; hive.app_register
+  -- would only print a NOTICE and leave it, and nothing would process blocks.
+  SELECT a.name INTO __old_name
+    FROM hafd.applications a
+   WHERE a.name <> 'hivesense' AND 'hivesense_app' = ANY(a.contexts)
+   LIMIT 1;
+  IF __old_name IS NOT NULL THEN
+    RAISE EXCEPTION 'Cannot register hivesense: its context hivesense_app is registered as application % by an older hivesense; replay from scratch, or run %; and reinstall',
+                    __old_name, format('SELECT hive.app_unregister(%L)', __old_name);
+  END IF;
+
+  -- The three arguments every registry's hive.app_register takes; the health
+  -- function goes through haf#474's setter or, on a HAF between haf#454 and
+  -- haf#474, a second 5-argument registration, which updates it on conflict.
+  PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group, NULL);
+  IF to_regprocedure('hive.app_set_health_function(text, text)') IS NOT NULL THEN
+    PERFORM hive.app_set_health_function('hivesense', 'hivesense_app.install_health');
+  ELSIF to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') IS NOT NULL THEN
+    PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group,
+                              NULL::TEXT, NULL::TEXT, 'hivesense_app.install_health'::TEXT);
+  END IF;
+
   SELECT array_agg(a.name ORDER BY a.name) INTO __hivemind
     FROM hafd.applications a
    WHERE a.contexts @> ARRAY['hivemind_app'];
