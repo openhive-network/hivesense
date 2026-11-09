@@ -386,9 +386,9 @@ expect_hivemind_dependency() {
 }
 
 # An install over a stub hivemind registration (context hivemind_app) named
-# `hivemind` (hivemind's lock name), named `hivemind_app` (before its rename),
-# and over none: the dependency on that name, or a WARNING and none. Over two
-# (a leftover) the install fails, naming them. hivemind's own registration and the dependencies on it are put back as they were.
+# `hivemind` (hivemind's lock name) and named `hivemind_app` (before its
+# rename): the dependency on that name. Over none (a hivemind that skipped
+# registration) and over two (a leftover) the install fails, naming the problem. hivemind's own registration and the dependencies on it are put back as they were.
 hivemind_dependency_stubs() (
     local saved_app saved_deps name rc=0
     saved_app="$(query "select a::text from hafd.applications a where contexts @> array['hivemind_app']")" || exit 1
@@ -407,26 +407,28 @@ hivemind_dependency_stubs() (
     trap 'restore_hivemind || exit 1' EXIT
     trap 'exit 143' TERM INT
 
-    for name in hivemind hivemind_app ""; do
-        query "delete from hafd.applications where contexts @> array['hivemind_app']" > /dev/null || exit 1
-        if [ -n "$name" ]; then
-            query "insert into hafd.applications(name, contexts, owner) values ('$name', array['hivemind_app'], 'hivemind')" > /dev/null || exit 1
-        fi
+    for name in hivemind hivemind_app; do
+        query "delete from hafd.applications where contexts @> array['hivemind_app'];
+               insert into hafd.applications(name, contexts, owner) values ('$name', array['hivemind_app'], 'hivemind')" > /dev/null || exit 1
         if ! install_app; then
-            echo "FAIL: install_app.sh failed over a stub hivemind registration '${name:-none}'"
+            echo "FAIL: install_app.sh failed over a stub hivemind registration '$name'"
             rc=1
             continue
         fi
-        if [ -n "$name" ]; then
-            expect_hivemind_dependency "$name" || rc=1
-        elif ! grep -q "WARNING: *hivemind is not registered in the HAF application registry; hivesense runs without the dependency gate" "$out/install_app.log"; then
-            echo "FAIL: with no hivemind registered, install_app.sh did not warn that hivesense runs without the dependency gate"
-            rc=1
-        else
-            expect_hivemind_dependency "" > /dev/null || rc=1
-            echo "ok: with no hivemind registered, the install warns and adds no dependency"
-        fi
+        expect_hivemind_dependency "$name" || rc=1
     done
+
+    query "delete from hafd.applications where contexts @> array['hivemind_app']" > /dev/null || exit 1
+    if install_app; then
+        echo "FAIL: install_app.sh succeeded with no hivemind registered on a HAF with the application registry"
+        rc=1
+    elif ! grep -qF "hivemind is not registered in the HAF application registry" "$out/install_app.log" \
+            || ! grep -qF "registry not available" "$out/install_app.log"; then
+        echo "FAIL: install_app.sh failed with no hivemind registered without naming the missing registration"
+        rc=1
+    else
+        echo "ok: with no hivemind registered, the install fails naming the missing registration"
+    fi
 
     query "delete from hafd.applications where contexts @> array['hivemind_app'];
            insert into hafd.applications(name, contexts, owner)
@@ -446,7 +448,7 @@ hivemind_dependency_stubs() (
 # hivesense's row in HAF's application registry, after install: registered as
 # `hivesense` (its block-processor lock name) holding its context, depending on
 # hivemind's registration (found by its context, under either name; with stub
-# registrations under both and with none), and with
+# registrations under both; none or two fail the install), and with
 # install_health() as its health function on a HAF that takes one; a missing core
 # object then refuses the block-processor lock. A reinstall keeps the paused flag.
 # A leftover `hivesense_app` row makes the install fail naming it, and leaves the

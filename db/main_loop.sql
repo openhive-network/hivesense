@@ -1154,17 +1154,23 @@ BEGIN
 END
 $$;
 -- hivemind is found by its context: its registration's name changed (from
--- hivemind_app to its lock name hivemind), its context did not.
+-- hivemind_app to its lock name hivemind), its context did not. On a HAF with
+-- the registry an unregistered hivemind fails the install: running ungated
+-- would index posts hivemind has not written yet.
 DO $$
 DECLARE
   __hivemind TEXT[];
 BEGIN
+  IF to_regclass('hafd.applications') IS NULL THEN
+    -- HAF without the registry: the scheduler's own hivemind wait loops still apply
+    RAISE WARNING 'HAF has no application registry; hivesense runs without the dependency gate';
+    RETURN;
+  END IF;
   SELECT array_agg(a.name ORDER BY a.name) INTO __hivemind
     FROM hafd.applications a
    WHERE a.contexts @> ARRAY['hivemind_app'];
   IF __hivemind IS NULL THEN
-    -- older hivemind: the scheduler's own hivemind wait loops still apply
-    RAISE WARNING 'hivemind is not registered in the HAF application registry; hivesense runs without the dependency gate';
+    RAISE EXCEPTION 'hivemind is not registered in the HAF application registry (no application holds context hivemind_app); hivesense needs hivemind installed and registered first. A hivemind that skipped registration logs "registry not available"';
   ELSIF cardinality(__hivemind) > 1 THEN
     RAISE EXCEPTION 'Cannot add hivesense''s dependency on hivemind: its context hivemind_app is registered by applications %', __hivemind;
   ELSE
