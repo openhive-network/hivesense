@@ -35,7 +35,9 @@
 #   - reinstall       scripts/uninstall_app.sh, then install again
 #   - registry        hivesense's row in HAF's application registry: named
 #                     `hivesense`, its hivemind dependency and health function
-#                     (a missing core function refuses the block-processor lock),
+#                     (a missing core function refuses the block-processor lock;
+#                     set through stubs of haf#474's setter and of the 5-argument
+#                     hive.app_register, rolled back),
 #                     the paused flag kept by a reinstall, and an install over a
 #                     leftover `hivesense_app` row failing, naming it
 #   - hivemind-reinstall  hivemind's role dropped and recreated (its uninstall and
@@ -445,11 +447,61 @@ hivemind_dependency_stubs() (
     exit "$rc"
 )
 
+# health_function_stub LABEL STUB_SQL: runs the install's registry block (the tail
+# of db/main_loop.sql) after STUB_SQL, in a rolled-back transaction with
+# hafd.applications.health_function present and hivesense's cleared; expects
+# hivesense_app.install_health recorded.
+health_function_stub() {
+    local got
+    got="$(psql "$ADMIN_URL" -q -v ON_ERROR_STOP=on -At -c begin \
+             -c "alter table hafd.applications add column if not exists health_function text;
+                 update hafd.applications set health_function = null where name = 'hivesense'" \
+             -c "$2" \
+             -c "$(sed -n '/^-- HAF APPLICATION REGISTRY/,$p' db/main_loop.sql)" \
+             -c "select coalesce(health_function, 'NULL') from hafd.applications where name = 'hivesense'" \
+             -c rollback 2> "$out/health_function_stub.err")" \
+        || { cat "$out/health_function_stub.err"; echo "FAIL: the registry block over $1 failed"; return 1; }
+    if [ "$got" != hivesense_app.install_health ]; then
+        echo "FAIL: over $1, hivesense's health function is '$got', expected hivesense_app.install_health"
+        return 1
+    fi
+    echo "ok: over $1, the install records health function hivesense_app.install_health (rolled back)"
+}
+
+# Moves HAF's own hive.app_register and hive.app_set_health_function aside, so a
+# stub stands in for them.
+HAF_REGISTER_ASIDE="
+DO \$\$
+DECLARE f regprocedure;
+BEGIN
+  FOR f IN SELECT p.oid FROM pg_proc p
+            WHERE p.pronamespace = 'hive'::regnamespace AND p.proname IN ('app_register', 'app_set_health_function')
+  LOOP
+    EXECUTE format('ALTER FUNCTION %s RENAME TO %I', f, (SELECT proname FROM pg_proc WHERE oid = f) || '_aside');
+  END LOOP;
+END
+\$\$;"
+
+HEALTH_SETTER_STUB="
+CREATE OR REPLACE FUNCTION hive.app_set_health_function(_name TEXT, _health_function TEXT) RETURNS void LANGUAGE sql
+AS \$\$ UPDATE hafd.applications SET health_function = _health_function WHERE name = _name \$\$;"
+
+REGISTER_5_STUB="$HAF_REGISTER_ASIDE
+CREATE FUNCTION hive.app_register(_name TEXT, _contexts hive.contexts_group, _process_procedure TEXT DEFAULT NULL,
+                                  _completed_block_function TEXT DEFAULT NULL, _health_function TEXT DEFAULT NULL)
+RETURNS void LANGUAGE plpgsql AS \$\$
+BEGIN
+  PERFORM hive.app_register_aside(_name, _contexts, _process_procedure);
+  UPDATE hafd.applications SET health_function = _health_function WHERE name = _name;
+END
+\$\$;"
+
 # hivesense's row in HAF's application registry, after install: registered as
 # `hivesense` (its block-processor lock name) holding its context, depending on
 # hivemind's registration (found by its context, under either name; with stub
 # registrations under both; none or two fail the install), and with
-# install_health() as its health function on a HAF that takes one; a missing core
+# install_health() as its health function on a HAF that takes one, and over stubs
+# of haf#474's setter and of the 5-argument hive.app_register; a missing core
 # object then refuses the block-processor lock. A reinstall keeps the paused flag.
 # A leftover `hivesense_app` row makes the install fail naming it, and leaves the
 # row as it was. Ends with a default installation, pass or fail.
@@ -486,7 +538,11 @@ registry() (
     fi
     echo "ok: install_health() reports NULL on a complete install and names a missing table (rolled back)"
 
-    if [ "$(query "select to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') is not null")" = t ]; then
+    health_function_stub "a hive.app_set_health_function(text, text) stub" "$HEALTH_SETTER_STUB" || exit 1
+    health_function_stub "a 5-argument hive.app_register stub" "$REGISTER_5_STUB" || exit 1
+
+    if [ "$(query "select to_regprocedure('hive.app_set_health_function(text, text)') is not null
+                       or to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') is not null")" = t ]; then
         got="$(query "select health_function from hafd.applications where name = 'hivesense'")" || exit 1
         if [ "$got" != hivesense_app.install_health ]; then
             echo "FAIL: hivesense's health function is '$got', expected hivesense_app.install_health"
@@ -504,7 +560,7 @@ registry() (
         fi
         echo "ok: a missing core function refuses the block-processor lock (rolled back)"
     else
-        echo "ok: HAF without _health_function: registered without a health function"
+        echo "ok: HAF without a health-function setter or 5-argument hive.app_register: registered without a health function"
     fi
 
     query "select hive.app_pause('hivesense')" > /dev/null || exit 1
