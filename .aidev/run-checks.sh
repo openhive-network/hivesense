@@ -30,6 +30,11 @@
 #                     shared install lock, install_app.sh skips, exits 0 and leaves
 #                     the installed schema as it was
 #   - reinstall       scripts/uninstall_app.sh, then install again
+#   - registry        hivesense's row in HAF's application registry: named
+#                     `hivesense`, its hivemind dependency and health function
+#                     (a missing core function refuses the block-processor lock),
+#                     the paused flag kept by a reinstall, and an install over a
+#                     leftover `hivesense_app` row failing, naming it
 #   - hivemind-reinstall  hivemind's role dropped and recreated (its uninstall and
 #                     reinstall, its objects kept) under an installed hivesense; then
 #                     install must restore both hivesense roles' hivemind membership.
@@ -332,6 +337,115 @@ reinstall() {
     bash scripts/uninstall_app.sh --postgres-url="$ADMIN_URL" || return 1
     install "$@"
 }
+
+# The registrations holding hivesense's context, as name=contexts
+registrations() {
+    query "select coalesce(string_agg(name || '=' || array_to_string(contexts, ','), ' ' order by name), '')
+             from hafd.applications where name in ('hivesense', 'hivesense_app') or 'hivesense_app' = any(contexts)"
+}
+
+# hivesense's row in HAF's application registry, after install: registered as
+# `hivesense` (its block-processor lock name) holding its context, depending on
+# hivemind when hivemind is registered under its lock name, and with
+# install_health() as its health function on a HAF that takes one; a missing core
+# object then refuses the block-processor lock. A reinstall keeps the paused flag.
+# A leftover `hivesense_app` row makes the install fail naming it, and leaves the
+# row as it was. Ends with a default installation, pass or fail.
+registry() (
+    local got rc=0 before after
+    trap 'exit 143' TERM INT
+    wait_for_db || exit 1
+    got="$(registrations)" || exit 1
+    if [ "$got" != "hivesense=hivesense_app" ]; then
+        echo "FAIL: expected one registration hivesense=hivesense_app holding the context; found '$got'"
+        exit 1
+    fi
+    echo "ok: registered as hivesense, holding context hivesense_app"
+
+    if [ "$(query "select count(*) from hafd.applications where name = 'hivemind'")" = 1 ]; then
+        got="$(query "select coalesce(string_agg(depends_on, ',' order by depends_on), '')
+                        from hafd.application_dependencies where application = 'hivesense'")" || exit 1
+        if [ "$got" != hivemind ]; then
+            echo "FAIL: hivemind is registered but hivesense depends on '$got', expected hivemind"
+            exit 1
+        fi
+        echo "ok: hivesense depends on hivemind"
+    else
+        echo "ok: no hivemind registration (an older hivemind); hivesense runs without the dependency"
+    fi
+
+    got="$(query "select coalesce(hivesense_app.install_health(), 'NULL')")" || exit 1
+    if [ "$got" != NULL ]; then
+        echo "FAIL: install_health() reports '$got' on a complete install"
+        exit 1
+    fi
+    got="$(psql "$ADMIN_URL" -q -v ON_ERROR_STOP=on -At -c begin \
+             -c "drop table hivesense_app.sync_chains cascade" \
+             -c "select hivesense_app.install_health()" -c rollback 2>/dev/null)" || exit 1
+    if [ "$got" != "table hivesense_app.sync_chains does not exist" ]; then
+        echo "FAIL: with sync_chains dropped, install_health() reports '$got'"
+        exit 1
+    fi
+    echo "ok: install_health() reports NULL on a complete install and names a missing table (rolled back)"
+
+    if [ "$(query "select to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') is not null")" = t ]; then
+        got="$(query "select health_function from hafd.applications where name = 'hivesense'")" || exit 1
+        if [ "$got" != hivesense_app.install_health ]; then
+            echo "FAIL: hivesense's health function is '$got', expected hivesense_app.install_health"
+            exit 1
+        fi
+        echo "ok: registered with health function hivesense_app.install_health"
+        got="$(psql "$ADMIN_URL" -1 -v ON_ERROR_STOP=on \
+                 -c "drop function hivesense_app.publish_visible_sync_seq()" \
+                 -c "select hive.acquire_app_block_processor_locks(array['hivesense'])" 2>&1)" && rc=1
+        echo "$got"
+        if [ "$rc" -ne 0 ] || ! grep -q 'reinstall the application' <<<"$got" \
+           || ! grep -q 'function hivesense_app.publish_visible_sync_seq does not exist' <<<"$got"; then
+            echo "FAIL: with publish_visible_sync_seq dropped, the block processor must be refused the hivesense lock naming it"
+            exit 1
+        fi
+        echo "ok: a missing core function refuses the block-processor lock (rolled back)"
+    else
+        echo "ok: HAF without _health_function: registered without a health function"
+    fi
+
+    query "select hive.app_pause('hivesense')" > /dev/null || exit 1
+    install_app || rc=$?
+    got="$(query "select paused from hafd.applications where name = 'hivesense'")"
+    query "select hive.app_resume('hivesense')" > /dev/null || exit 1
+    if [ "$rc" -ne 0 ] || [ "$got" != t ]; then
+        echo "FAIL: reinstalling over a paused registration exited $rc and left paused='$got', expected 0 and t"
+        exit 1
+    fi
+    echo "ok: a reinstall keeps the paused flag"
+
+    query "select hive.app_unregister('hivesense'); select hive.app_register('hivesense_app', array['hivesense_app']::hive.contexts_group, null)" > /dev/null || exit 1
+    before="$(query "select a::text from hafd.applications a where name = 'hivesense_app'")"
+    install_app && rc=1
+    after="$(query "select a::text from hafd.applications a where name = 'hivesense_app'")"
+    query "select hive.app_unregister('hivesense_app')" > /dev/null || exit 1
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL: install_app.sh succeeded over a leftover hivesense_app registration"
+    elif ! grep -qF "registered as application hivesense_app by an older hivesense; replay from scratch, or run SELECT hive.app_unregister('hivesense_app'); and reinstall" "$out/install_app.log"; then
+        echo "FAIL: install_app.sh failed over a leftover hivesense_app registration without naming it and the remedy"
+        rc=1
+    elif [ -z "$before" ] || [ "$after" != "$before" ]; then
+        echo "FAIL: the leftover registration changed: '$before' -> '$after'"
+        rc=1
+    else
+        echo "ok: a leftover hivesense_app registration fails the install, naming it, and is left as it was"
+    fi
+
+    echo "== restoring the default installation"
+    install || exit 1
+    got="$(registrations)" || exit 1
+    if [ "$got" != "hivesense=hivesense_app" ]; then
+        echo "FAIL: after unregistering the leftover row and reinstalling, found '$got'"
+        exit 1
+    fi
+    [ "$rc" -eq 0 ] && echo "PASS: hivesense registers under its lock name"
+    exit "$rc"
+)
 
 # What hivemind's uninstall (DROP OWNED BY hivemind, DROP ROLE hivemind) does to
 # the roles' memberships, without losing hivemind's installed schema: its objects
@@ -702,6 +816,7 @@ for s in "$@"; do
         events-id) step events-id events_id ;;
         install-lock) step install-lock install_lock ;;
         reinstall) step reinstall reinstall ;;
+        registry) step registry registry ;;
         hivemind-reinstall) step hivemind-reinstall hivemind_role_reinstall ;;
         embed-search) step embed-search with_default_restored embed_search ;;
         embed-slice) step embed-slice with_default_restored embed_slice ;;
