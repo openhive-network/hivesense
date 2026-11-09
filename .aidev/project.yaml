@@ -58,10 +58,11 @@ issues:
 # built. Slots that only lint say `stack: false`. See .aidev/README.md.
 sandbox:
   compose: .aidev/test-stack.compose.yml
-  # One idle PostgreSQL 18, the install one-shots and a small CPU embedding model;
-  # nothing replayed.
+  # Two idle PostgreSQL 18 (the second, haf-votes-mode, with a hivemind that has
+  # create_bridge_post_object's _votes_mode), the install one-shots and a small CPU
+  # embedding model; nothing replayed.
   resource_class: light
-  services: [haf, haf-init, hafah-install, reputation-tracker-install, hivemind-install, ollama, tokenizer-copy, ready]
+  services: [haf, haf-init, hafah-install, reputation-tracker-install, hivemind-install, haf-votes-mode, haf-votes-mode-init, hafah-install-votes-mode, reputation-tracker-install-votes-mode, hivemind-install-votes-mode, ollama, tokenizer-copy, ready]
   readiness_timeout: 600
   env:
     HIVESENSE_TEST_DB_HOST: haf
@@ -74,7 +75,8 @@ sandbox:
 # Lightweight first: lint (shellcheck and sqlfluff, as CI's lint jobs), the python unit tests,
 # the stack pins against CI's UPSTREAM_BRANCH, then install / reinstall of the
 # candidate's SQL into the stack (through the install-lock wrapper, plus CI's #54
-# events_id and lock-skip checks), embedding a few seeded posts with CI's models in
+# events_id and lock-skip checks), posts_similar's vote-free full posts against a
+# hivemind with _votes_mode, embedding a few seeded posts with CI's models in
 # full, slice and PCA configurations and checking the HNSW index and the search
 # functions and endpoints on them, and a PostgREST smoke test. CI's `sync` job (a
 # 1M-block HAF replay, hivemind sync and block processing), the image builds, the
@@ -88,7 +90,7 @@ verification:
     artifacts: ["test-results/quick/"]
   full:
     adapter: command
-    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "registry", "hivemind-reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
+    args: [".aidev/run-checks.sh", "full", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "registry", "hivemind-reinstall", "embed-search", "votes-mode", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/full/"]
   baseline:
     adapter: command
@@ -96,7 +98,7 @@ verification:
     artifacts: ["test-results/baseline/"]
   canary:
     adapter: command
-    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "registry", "hivemind-reinstall", "embed-search", "embed-slice", "embed-pca", "api-smoke"]
+    args: [".aidev/run-checks.sh", "canary", "shellcheck", "sqlfluff", "unit", "sql-registered", "stack-pins", "install", "events-id", "install-lock", "reinstall", "registry", "hivemind-reinstall", "embed-search", "votes-mode", "embed-slice", "embed-pca", "api-smoke"]
     artifacts: ["test-results/canary/"]
   # There is no coverage measurement for SQL; `coverage` runs the stackless checks
   # (AIDEV runs it in the post-implementation scan only). `static` and `system`
