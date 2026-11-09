@@ -1072,26 +1072,94 @@ END
 $$;
 
 
+-- The broken-install check HAF's lock helpers run through the registry
+-- (hive.app_register's _health_function): NULL while the objects the block
+-- processor needs exist, otherwise which one is missing. hivesense registers no
+-- process procedure, so without it HAF cannot tell a broken install. Runs on
+-- every lock acquisition: catalog lookups only. SECURITY DEFINER so a caller
+-- without access to hivesense's tables can run it.
+CREATE OR REPLACE FUNCTION hivesense_app.install_health()
+RETURNS TEXT
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    __missing TEXT;
+BEGIN
+    SELECT 'table hivesense_app.' || t INTO __missing
+      FROM unnest(ARRAY['hivesense_app_status', 'posts_vectors', 'deleted_embeddings', 'sync_chains']) AS t
+     WHERE to_regclass('hivesense_app.' || t) IS NULL
+     LIMIT 1;
+    IF __missing IS NOT NULL THEN
+        RETURN __missing || ' does not exist';
+    END IF;
+
+    SELECT 'function hivesense_app.' || f INTO __missing
+      FROM unnest(ARRAY[
+          'posts_in_range', 'prepare_post_chunks', 'preprocess_post', 'store_post_embeddings',
+          'publish_visible_sync_seq', 'init_local_sync_identity', 'massive_sync_finished'
+      ]) AS f
+     WHERE NOT EXISTS (
+         SELECT 1 FROM pg_proc p
+          WHERE p.pronamespace = 'hivesense_app'::regnamespace AND p.proname = f
+     )
+     LIMIT 1;
+    IF __missing IS NOT NULL THEN
+        RETURN __missing || ' does not exist';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
 RESET ROLE;
 
 -- ============================================================================
 -- HAF APPLICATION REGISTRY (haf#341)
 -- ============================================================================
 -- hivesense drives its own loop (the scheduler above, or the remote-sync
--- process), so it is registered without a process procedure. The dependency on
--- hivemind_app makes hive.app_next_iteration withhold every block hivemind has
+-- process), so it is registered without a process procedure, under the name of
+-- its block-processor lock (`hivesense`): HAF's lock helpers find the
+-- registration by that name to tell whether the install is broken, through
+-- install_health() where HAF takes a health function. The dependency on
+-- hivemind makes hive.app_next_iteration withhold every block hivemind has
 -- not committed (hivemind reports its committed position through its
 -- completed-block function, exact during massive sync as well), so the
 -- scheduler's own hivemind wait loops normally find hivemind already there.
 -- hivemind must already be registered (its install runs first).
-SELECT hive.app_register( 'hivesense_app', ARRAY[ 'hivesense_app' ]::hive.contexts_group, NULL );
+DO $$
+DECLARE
+  __old_name TEXT;
+BEGIN
+  -- A registration from before the rename holds the context; hive.app_register
+  -- would only print a NOTICE and leave it, and nothing would process blocks.
+  IF to_regclass('hafd.applications') IS NOT NULL THEN
+    SELECT a.name INTO __old_name
+      FROM hafd.applications a
+     WHERE a.name <> 'hivesense' AND 'hivesense_app' = ANY(a.contexts)
+     LIMIT 1;
+    IF __old_name IS NOT NULL THEN
+      RAISE EXCEPTION 'Cannot register hivesense: its context hivesense_app is registered as application % by an older hivesense; replay from scratch, or run %; and reinstall',
+                      __old_name, format('SELECT hive.app_unregister(%L)', __old_name);
+    END IF;
+  END IF;
+
+  IF to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') IS NOT NULL THEN
+    PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group, NULL,
+                              _health_function => 'hivesense_app.install_health');
+  ELSE
+    PERFORM hive.app_register('hivesense', ARRAY['hivesense_app']::hive.contexts_group, NULL);
+  END IF;
+END
+$$;
 DO $$
 BEGIN
-  IF EXISTS ( SELECT 1 FROM hafd.applications WHERE name = 'hivemind_app' ) THEN
-    PERFORM hive.app_add_dependency( 'hivesense_app', 'hivemind_app' );
+  IF EXISTS ( SELECT 1 FROM hafd.applications WHERE name = 'hivemind' ) THEN
+    PERFORM hive.app_add_dependency( 'hivesense', 'hivemind' );
   ELSE
     -- older hivemind: the scheduler's own hivemind wait loops still apply
-    RAISE WARNING 'hivemind_app is not registered in the HAF application registry; hivesense_app runs without the dependency gate';
+    RAISE WARNING 'hivemind is not registered in the HAF application registry; hivesense runs without the dependency gate';
   END IF;
 END
 $$;

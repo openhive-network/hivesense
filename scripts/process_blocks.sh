@@ -222,7 +222,7 @@ if command -v haf_app_driver.py >/dev/null 2>&1 && [ "${HIVESENSE_USE_LEGACY_SCH
     limit_arg=()
     [ "$PROCESS_BLOCK_LIMIT" != "null" ] && limit_arg=(--stop-at-block="$PROCESS_BLOCK_LIMIT")
     export PYTHONPATH="/app/scripts${PYTHONPATH:+:$PYTHONPATH}"
-    exec haf_app_driver.py --app="${HIVESENSE_SCHEMA}" \
+    exec haf_app_driver.py --app=hivesense \
         --postgres-url="$(postgres_access hivesense_block_processing)" \
         --process-python hivesense_block_processor \
         --lock=hivemind --lock=hivesense \

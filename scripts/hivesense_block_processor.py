@@ -2,7 +2,7 @@
 """
 hivesense_block_processor - client-side range processor for haf_app_driver.py.
 
-Run as:  haf_app_driver.py --app=hivesense_app \
+Run as:  haf_app_driver.py --app=hivesense \
              --process-python hivesense_block_processor [...]
 
 For each block range delivered by hive.app_next_iteration (inside the driver's

@@ -110,8 +110,8 @@ BEGIN
   -- by ON DELETE CASCADE). Guarded so uninstall still works against a HAF
   -- without the application registry.
   IF to_regprocedure('hive.app_unregister(text)') IS NOT NULL
-     AND EXISTS ( SELECT 1 FROM hafd.applications WHERE name = '${HIVESENSE_SCHEMA}' ) THEN
-    PERFORM hive.app_unregister('${HIVESENSE_SCHEMA}');
+     AND EXISTS ( SELECT 1 FROM hafd.applications WHERE name = 'hivesense' ) THEN
+    PERFORM hive.app_unregister('hivesense');
   END IF;
 END\$\$;
 EOF
