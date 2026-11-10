@@ -116,7 +116,7 @@ pending waits for it, since moving the source branch would cancel it.
 ## The HAF test stack (`test-stack.compose.yml`)
 
 `haf`: the HAF testnet image CI resolves for `UPSTREAM_BRANCH` `develop` (HAF commit
-`ce114878`, the first with the keep-monotonic early block processing API), started empty with the `sleep_infinity` maintenance script. It already
+`2712c138`, with the 4-argument `hive.app_register` and `hive.app_set_health_function` of haf#474 and the health-function check of haf#454), started empty with the `sleep_infinity` maintenance script. It already
 carries pgvector, plpython3u and the python `tokenizers` / `pysbd` modules hivesense's
 SQL imports. Then one-shot services install hivesense's dependencies in the order
 `docker/ci/compose.yml` does: `haf-init` (`hive.initialize_extension_data()`, what hived

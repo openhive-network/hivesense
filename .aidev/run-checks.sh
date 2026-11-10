@@ -506,7 +506,7 @@ END
 # A leftover `hivesense_app` row makes the install fail naming it, and leaves the
 # row as it was. Ends with a default installation, pass or fail.
 registry() (
-    local got rc=0 before after
+    local got rc=0 before after setter
     trap 'exit 143' TERM INT
     wait_for_db || exit 1
     got="$(registrations)" || exit 1
@@ -541,14 +541,17 @@ registry() (
     health_function_stub "a hive.app_set_health_function(text, text) stub" "$HEALTH_SETTER_STUB" || exit 1
     health_function_stub "a 5-argument hive.app_register stub" "$REGISTER_5_STUB" || exit 1
 
-    if [ "$(query "select to_regprocedure('hive.app_set_health_function(text, text)') is not null
-                       or to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') is not null")" = t ]; then
+    setter="$(query "select case when to_regprocedure('hive.app_set_health_function(text, text)') is not null
+                                  then 'hive.app_set_health_function'
+                                  when to_regprocedure('hive.app_register(text, hive.contexts_group, text, text, text)') is not null
+                                  then 'the 5-argument hive.app_register' end")" || exit 1
+    if [ -n "$setter" ]; then
         got="$(query "select health_function from hafd.applications where name = 'hivesense'")" || exit 1
         if [ "$got" != hivesense_app.install_health ]; then
-            echo "FAIL: hivesense's health function is '$got', expected hivesense_app.install_health"
+            echo "FAIL: hivesense's health function is '$got' on a HAF with $setter, expected hivesense_app.install_health"
             exit 1
         fi
-        echo "ok: registered with health function hivesense_app.install_health"
+        echo "ok: registered with health function hivesense_app.install_health, set through HAF's $setter"
         got="$(psql "$ADMIN_URL" -1 -v ON_ERROR_STOP=on \
                  -c "drop function hivesense_app.publish_visible_sync_seq()" \
                  -c "select hive.acquire_app_block_processor_locks(array['hivesense'])" 2>&1)" && rc=1

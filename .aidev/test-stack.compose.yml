@@ -20,7 +20,8 @@
 # `docker compose up --wait` waits for.
 #
 # Pins: HAF testnet is what find_haf_image resolves for UPSTREAM_BRANCH develop
-# (hive/haf/testnet:ce114878, the keep-monotonic early block processing API);
+# (hive/haf/testnet:2712c138, with haf#454's app health functions and haf#474's
+# 4-argument hive.app_register and hive.app_set_health_function);
 # hafah, reputation_tracker and hivemind are their 1.28.8-rc3 release images
 # (x-apps-release: develop has no release images of its own). Each is pinned as
 # repo:tag@sha256:<digest> (docker uses the digest; the tag is what the
@@ -45,7 +46,7 @@ x-haf-client: &haf-client
 
 services:
   haf: &haf
-    image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:ce114878@sha256:7ea12cf8f2aeb7237ecab7ae8c6da6625d22b13c5540a9d5a817143f1d97f816
+    image: &haf-image registry.gitlab.syncad.com/hive/haf/testnet:2712c138@sha256:cc0a38ec48cece04ecedda65160d0701c599ebead07f183d1c56e92aa9063f59
     command: ["--execute-maintenance-script=/home/hived/source/./scripts/maintenance-scripts/sleep_infinity.sh"]
     volumes:
       - tokenizer-files:/home/hived/tokenizer-files:ro
