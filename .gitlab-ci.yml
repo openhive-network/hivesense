@@ -483,7 +483,8 @@ sync:
     fi
 
     # Manually remove the copy of the replay data to preserve disk space on the replay server
-    sudo rm -rf ${POOL_DIR}
+    # (the job runs as root, so the files the containers wrote are removable without sudo)
+    rm -rf "${POOL_DIR}"
 
     echo -e "\e[0Ksection_end:$(date +%s):compose2\r\e[0K"
   artifacts:
