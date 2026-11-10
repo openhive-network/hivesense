@@ -76,6 +76,7 @@ expect_same_names() {  # $1 label, $2 actual file, $3 expected file
 case "$PHASE" in
   dump)
     echo "=== rebase test: arranging gone, new and already-purged posts ==="
+    mkdir -p "$DIR" || exit 1
     # Three disjoint sets of embedded root posts with a single hive_posts row
     # (a re-posted permlink would resolve to its live row):
     #   gone_posts    marked deleted in hivemind after the dump's chain was
