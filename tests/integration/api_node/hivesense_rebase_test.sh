@@ -61,6 +61,12 @@ POST_NAME_JOIN="JOIN hivemind_app.hive_posts hp ON hp.id = t.post_id
 names_values() {  # $1 = file of names, one per line -> ('a/p'),('b/q')
   sed "s|.*|('&')|" "$1" | paste -sd, -
 }
+ids_named() {  # $1 = file of names -> query selecting their hive_posts ids
+  echo "SELECT hp.id FROM hivemind_app.hive_posts hp
+    JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
+    JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+   WHERE $POST_NAME IN (SELECT name FROM (VALUES $(names_values "$1")) v(name))"
+}
 # sorted names of the post ids a query selects as column post_id
 post_names() {
   $PSQL_CMD -v ON_ERROR_STOP=on -q -A -t -c "SELECT $POST_NAME FROM ($1) t $POST_NAME_JOIN" | sed '/^$/d' | sort
@@ -106,22 +112,18 @@ case "$PHASE" in
     echo "gone: $(paste -sd' ' - < "$DIR/gone_posts")"
     echo "new: $(paste -sd' ' - < "$DIR/new_posts")"
     echo "purged: $(paste -sd' ' - < "$DIR/purged_posts")"
-    by_name="FROM hivemind_app.hive_posts hp
-        JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
-        JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
-       WHERE $POST_NAME IN (SELECT name FROM (VALUES"
     # one transaction; the purge must find exactly the purged posts, so it runs
     # before the gone posts are marked
     $PSQL_CMD -v ON_ERROR_STOP=on -1 -q -A -t \
       -c "UPDATE hivemind_app.hive_posts SET counter_deleted = 1
-           WHERE id IN (SELECT hp.id $by_name $(names_values "$DIR/purged_posts")) v(name))" \
+           WHERE id IN ($(ids_named "$DIR/purged_posts"))" \
       -c "SET ROLE hivesense_owner" \
       -c "SELECT hivesense_app.purge_deleted_post_vectors()" \
       -c "RESET ROLE" \
       -c "UPDATE hivemind_app.hive_posts SET counter_deleted = 1
-           WHERE id IN (SELECT hp.id $by_name $(names_values "$DIR/gone_posts")) v(name))" \
+           WHERE id IN ($(ids_named "$DIR/gone_posts"))" \
       -c "DELETE FROM hivesense_app.posts_vectors
-           WHERE post_id IN (SELECT hp.id $by_name $(names_values "$DIR/new_posts")) v(name))" \
+           WHERE post_id IN ($(ids_named "$DIR/new_posts"))" \
       > "$DIR/arrange.out" || { echo "ERROR: arranging the posts failed" >&2; exit 1; }
     purged=$(tr -d '[:space:]' < "$DIR/arrange.out")
     if [ "$purged" != "2" ]; then
