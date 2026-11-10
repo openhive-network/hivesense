@@ -36,6 +36,8 @@ import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPException
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -109,20 +111,43 @@ def _load_config(conn):
     return _CONFIG
 
 
-def _initial_timeout(cfg, n_texts):
+def _initial_timeout(cfg: dict[str, Any], n_texts: int) -> float:
     """A batch's first request timeout in seconds, never below MIN_REQUEST_TIMEOUT."""
-    return max(MIN_REQUEST_TIMEOUT, cfg["timeout_base"], cfg["timeout_per_text"] * n_texts)
+    return float(max(MIN_REQUEST_TIMEOUT, cfg["timeout_base"], cfg["timeout_per_text"] * n_texts))
 
 
-def _next_timeout(current, timed_out, cap):
+def _next_timeout(current: float, timed_out: bool, cap: float) -> float:
     """The request timeout after an attempt: doubled up to `cap` if it timed out,
     unchanged otherwise (waiting longer can't fix a refused connection or a 5xx)."""
     return min(current * 2, cap) if timed_out else current
 
 
-def _embed_batch(cfg, texts, label):
-    """One HTTP embedding request; retries forever with backoff (the sync path
-    must never drop posts - same policy as the old in-database embedder)."""
+class EmbeddingRejected(RuntimeError):
+    """The embedding server answered a 4xx other than 408/429: deterministic,
+    the same request fails the same way every time."""
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"HTTP {status}: {body}")
+        self.status = status
+        self.body = body
+
+
+def _response_body(err: HTTPError) -> str:
+    """An HTTPError's response body, shortened for the log."""
+    try:
+        text = err.read().decode("utf-8", errors="replace").strip()
+    except (OSError, HTTPException):
+        text = ""
+    finally:
+        err.close()
+    return text[:500] or "(empty body)"
+
+
+def _embed_batch(cfg: dict[str, Any], texts: list[str], label: str) -> list[list[float]]:
+    """One HTTP embedding request; retries transient failures (network, 5xx,
+    408, 429) forever with backoff (the sync path must never drop posts - same
+    policy as the old in-database embedder). Raises EmbeddingRejected on any
+    other 4xx without retrying."""
     payload = {"model": cfg["model"], "input": texts}
     if cfg["api_style"] == "openai":
         url = cfg["host"] + "/v1/embeddings"
@@ -144,7 +169,11 @@ def _embed_batch(cfg, texts, label):
                 break
             last_err = f"HTTP {resp.getcode()}"
         except HTTPError as e:
-            last_err = f"HTTP {e.code}"
+            reply = _response_body(e)
+            if 400 <= e.code < 500 and e.code not in (408, 429):
+                log.error("[%s] HTTP %s, not retrying: %s", label, e.code, reply)
+                raise EmbeddingRejected(e.code, reply) from e
+            last_err = f"HTTP {e.code} ({reply})"
         except (URLError, OSError) as e:
             # A timeout while connecting arrives wrapped in URLError, one
             # while waiting for the response arrives bare.
@@ -157,12 +186,31 @@ def _embed_batch(cfg, texts, label):
         timeout = _next_timeout(timeout, timed_out, timeout_cap)
     if cfg["api_style"] == "openai":
         return [item["embedding"] for item in sorted(data.get("data", []), key=lambda o: o.get("index", 0))]
-    return data.get("embeddings", [])
+    embeddings: list[list[float]] = data.get("embeddings", [])
+    return embeddings
 
 
-def _embed_one(cfg, batch, label):
+def _rejected_text(cfg: dict[str, Any], batch: list[tuple[int, int, str]], label: str,
+                   rejected: EmbeddingRejected) -> EmbeddingRejected:
+    """The error for a batch the server rejected, naming the text it refuses:
+    each text of a larger batch is resent alone to find it."""
+    if len(batch) > 1:
+        for post_id, chunk_number, text in batch:
+            try:
+                _embed_batch(cfg, [text], f"{label} post_id {post_id} chunk_number {chunk_number}")
+            except EmbeddingRejected as single:
+                return EmbeddingRejected(single.status, f"post_id {post_id} chunk_number {chunk_number}: {single.body}")
+        return EmbeddingRejected(rejected.status, f"{rejected.body} (each of the batch's {len(batch)} texts is accepted alone)")
+    post_id, chunk_number, _ = batch[0]
+    return EmbeddingRejected(rejected.status, f"post_id {post_id} chunk_number {chunk_number}: {rejected.body}")
+
+
+def _embed_one(cfg: dict[str, Any], batch: list[tuple[int, int, str]], label: str) -> list[tuple[int, int, str]]:
     """batch: [(post_id, chunk_number, text)] -> [(post_id, chunk_number, vec_text)]"""
-    vecs = _embed_batch(cfg, [c[2] for c in batch], label)
+    try:
+        vecs = _embed_batch(cfg, [c[2] for c in batch], label)
+    except EmbeddingRejected as rejected:
+        raise _rejected_text(cfg, batch, label, rejected) from rejected
     if len(vecs) != len(batch):
         raise RuntimeError(f"embedding server returned {len(vecs)} vectors for {len(batch)} inputs")
     return [(c[0], c[1], "[" + ",".join(map(str, v)) + "]") for c, v in zip(batch, vecs)]
