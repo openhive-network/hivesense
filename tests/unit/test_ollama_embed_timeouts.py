@@ -5,6 +5,7 @@ Runs the function's PL/Python body as written, with a stand-in `plpy` module, ag
 a local stub HTTP server that answers after a configurable delay. Timeouts are scaled
 down to fractions of a second; backoff sleeps are skipped. No database needed.
 """
+import io
 import json
 import os
 import re
@@ -13,7 +14,9 @@ import sys
 import threading
 import types
 import unittest
+import urllib.error
 import urllib.request
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, NoReturn, Self
 from unittest import mock
@@ -43,6 +46,7 @@ def load_ollama_embed(config: dict[str, Any]) -> tuple[Embed, list[str]]:
     setattr(plpy, "Error", PlpyError)
     setattr(plpy, "execute", lambda query: [dict(config)])
     setattr(plpy, "notice", notices.append)
+    setattr(plpy, "warning", notices.append)
     setattr(plpy, "error", error)
     namespace: dict[str, Any] = {}
     exec("def ollama_embed(model, posts, host, embedding_options, max_retries):\n" + body, namespace)
@@ -87,6 +91,51 @@ class SlowEmbedServer:
         self.stop.set()
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+class RejectingEmbedServer:
+    """Answers /api/embed with `status` and an ollama-style error body when any input
+    text contains "bad", else with one 2-dim vector per input text. Records each
+    request's inputs."""
+
+    REASON = "the input length exceeds the context length"
+
+    def __init__(self: Self, status: int) -> None:
+        self.requests: list[list[str]] = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self: Self) -> None:
+                texts = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["input"]
+                server.requests.append(texts)
+                if any("bad" in t for t in texts):
+                    code, out = status, json.dumps({"error": server.REASON}).encode()
+                else:
+                    code, out = 200, json.dumps({"embeddings": [[1.0, float(i)] for i in range(len(texts))]}).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self: Self, format: str, *args: Any) -> None:
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self: Self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class Reply(io.BytesIO):
+    """A 200 response as urlopen returns it."""
+
+    def getcode(self: Self) -> int:
+        return 200
 
 
 def config(base: float, per_text: float = 0.0, cap: float = 600.0, batch_size: int = 100) -> dict[str, Any]:
@@ -186,6 +235,72 @@ class OllamaEmbedTimeouts(unittest.TestCase):
             embed("m", posts(1), "http://unused", None, None)
         self.assertEqual(calls, [30, 60, 120, 240, 480, 600, 600])
         self.assertIn("timed out after 60s, retrying in 10s (2/inf)", notices[1])
+
+
+@mock.patch("time.sleep", lambda secs: None)
+class OllamaEmbedRejections(unittest.TestCase):
+    def serve(self: Self, status: int) -> RejectingEmbedServer:
+        server = RejectingEmbedServer(status)
+        self.addCleanup(server.close)
+        return server
+
+    def test_400_on_a_single_text_is_not_retried_and_names_it(self: Self) -> None:
+        server = self.serve(400)
+        embed, notices = load_ollama_embed(config(base=1))
+        texts = [dict(post_id=15482022, chunk_number=1, chunk_text="bad dots")]
+        with self.assertRaisesRegex(PlpyError, r"\[Batch 0:1\] embedding server rejected post_id 15482022 "
+                                    r"chunk_number 1: HTTP 400: .*" + RejectingEmbedServer.REASON):
+            embed("m", texts, server.url, None, None)
+        self.assertEqual(server.requests, [["bad dots"]])
+        self.assertEqual(len(notices), 1)
+        self.assertRegex(notices[0], r"HTTP 400, not retrying: .*" + RejectingEmbedServer.REASON)
+
+    def test_400_in_a_batch_resends_its_texts_alone_and_names_the_rejected_one(self: Self) -> None:
+        server = self.serve(400)
+        embed, notices = load_ollama_embed(config(base=1, batch_size=4))
+        texts = posts(4) + [dict(post_id=7, chunk_number=3, chunk_text="bad dots"), *posts(2)]
+        with self.assertRaisesRegex(PlpyError, r"\[Batch 4:7\] embedding server rejected post_id 7 "
+                                    r"chunk_number 3: HTTP 400: .*" + RejectingEmbedServer.REASON):
+            embed("m", texts, server.url, None, None)
+        self.assertEqual(server.requests, [
+            ["text 0", "text 1", "text 2", "text 3"],
+            ["bad dots", "text 0", "text 1"],
+            ["bad dots"],
+        ])
+        self.assertTrue(all("not retrying" in n for n in notices), notices)
+
+    def test_a_batch_rejected_while_each_text_is_accepted_alone_fails_naming_the_batch(self: Self) -> None:
+        embed, _ = load_ollama_embed(config(base=1))
+
+        def urlopen(req: urllib.request.Request, timeout: float) -> Any:
+            assert isinstance(req.data, bytes)
+            texts = json.loads(req.data)["input"]
+            if len(texts) > 1:
+                raise urllib.error.HTTPError(req.full_url, 413, "too large", Message(), io.BytesIO(b"batch too large"))
+            return Reply(json.dumps({"embeddings": [[1.0]]}).encode())
+
+        with mock.patch("urllib.request.urlopen", urlopen), self.assertRaisesRegex(PlpyError, r"rejected the batch with HTTP 413: batch too large, "
+                                       r"yet accepted each of its 2 texts alone"):
+            embed("m", posts(2), "http://unused", None, None)
+
+    def test_transient_statuses_keep_retrying_on_the_sync_path(self: Self) -> None:
+        for status in (500, 503, 408, 429):
+            with self.subTest(status=status):
+                server = self.serve(status)
+                embed, notices = load_ollama_embed(config(base=1))
+                sleeps: list[float] = []
+
+                def sleep(secs: float) -> None:
+                    sleeps.append(secs)
+                    if len(sleeps) == 3:
+                        raise RuntimeError("stop")
+
+                with mock.patch("time.sleep", sleep), self.assertRaisesRegex(RuntimeError, "stop"):
+                    embed("m", [dict(post_id=1, chunk_number=1, chunk_text="bad")], server.url, None, None)
+                self.assertEqual(len(server.requests), 3)
+                self.assertEqual(sleeps, [5, 10, 20])
+                self.assertIn(f"HTTP {status} ", notices[0])
+                self.assertIn("(1/inf)", notices[0])
 
 
 if __name__ == "__main__":

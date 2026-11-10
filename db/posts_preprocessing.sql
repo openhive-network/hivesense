@@ -25,6 +25,12 @@ if 'post_clean_patterns' not in globals():
         # embedding model, and raw separators like \x1c crash pySBD's
         # numbered-list parser (int('\x1c2') ValueError, seen at block ~8.9M)
         "remove_control_chars": re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'),
+
+        # a run of more than 16 copies of one character that is no letter,
+        # digit or whitespace (41,812 dots in one post): it means nothing to the
+        # embedding model, and backends' tokenizers merge such runs so
+        # differently that a chunk within our token budget can exceed theirs
+        "long_symbol_run": re.compile(r'([^\w\s]|_)\1{16,}'),
     }
 
 patterns = globals()['post_clean_patterns']
@@ -47,7 +53,10 @@ def clean(text: str) -> str:
     extracted = patterns["remove_markdown_links"].sub(r'\1', extracted)
     extracted = patterns["remove_markdown"].sub('', extracted)
     extracted = patterns["remove_base64"].sub('', extracted)
-    return patterns["remove_unwanted"].sub('', extracted)
+    extracted = patterns["remove_unwanted"].sub('', extracted)
+
+    # last, so no removal above can join shorter runs into a longer one
+    return patterns["long_symbol_run"].sub(lambda m: m.group(1) * 16, extracted)
 
 return clean(_text_input)
 $$;

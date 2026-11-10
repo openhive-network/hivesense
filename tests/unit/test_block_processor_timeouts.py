@@ -5,18 +5,22 @@ _embed_batch runs against a local stub HTTP server that answers after a configur
 delay. The 300s floor and the backoff are scaled down to fractions of a second.
 No database needed.
 """
+import io
+import json
 import os
 import re
 import socket
 import sys
 import unittest
+from email.message import Message
 from typing import Any, Self
 from unittest import mock
+from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 sys.path.insert(0, os.path.dirname(__file__))
 import hivesense_block_processor as bp
-from test_ollama_embed_timeouts import SlowEmbedServer, refused_url
+from test_ollama_embed_timeouts import RejectingEmbedServer, Reply, SlowEmbedServer, refused_url
 
 
 def config(host: str, base: float = 30, per_text: float = 1, cap: float = 600) -> dict[str, Any]:
@@ -115,6 +119,64 @@ class EmbedBatch(unittest.TestCase):
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 10, 20])
         self.assertEqual(self.warnings(logs), [])
         self.assertIn("refused", logs.output[0])
+
+
+@mock.patch.object(bp, "INITIAL_RETRY_DELAY", 0.01)
+@mock.patch.object(bp, "MAX_RETRY_DELAY", 0.01)
+class EmbedRejections(unittest.TestCase):
+    def serve(self: Self, status: int) -> RejectingEmbedServer:
+        server = RejectingEmbedServer(status)
+        self.addCleanup(server.close)
+        return server
+
+    def test_400_on_a_single_text_is_not_retried_and_names_it(self: Self) -> None:
+        server = self.serve(400)
+        with self.assertLogs("hivesense", "WARNING") as logs, \
+                self.assertRaisesRegex(bp.EmbeddingRejected, r"HTTP 400: post_id 15482022 chunk_number 1: .*"
+                                       + RejectingEmbedServer.REASON):
+            bp._embed_one(config(server.url), [(15482022, 1, "bad dots")], "t")
+        self.assertEqual(server.requests, [["bad dots"]])
+        self.assertEqual(len(logs.output), 1)
+        self.assertRegex(logs.output[0], r"ERROR.*\[t\] HTTP 400, not retrying: .*" + RejectingEmbedServer.REASON)
+
+    def test_400_in_a_batch_resends_its_texts_alone_and_names_the_rejected_one(self: Self) -> None:
+        server = self.serve(400)
+        batch = [(1, 1, "a"), (7, 3, "bad dots"), (8, 1, "b")]
+        with self.assertLogs("hivesense", "WARNING") as logs, \
+                self.assertRaisesRegex(bp.EmbeddingRejected, r"HTTP 400: post_id 7 chunk_number 3: .*"
+                                       + RejectingEmbedServer.REASON):
+            bp._embed_one(config(server.url), batch, "t")
+        self.assertEqual(server.requests, [["a", "bad dots", "b"], ["a"], ["bad dots"]])
+        self.assertTrue(all("not retrying" in line for line in logs.output), logs.output)
+
+    def test_a_batch_rejected_while_each_text_is_accepted_alone_names_the_batch(self: Self) -> None:
+        def urlopen(req: Any, timeout: float) -> Any:
+            if len(json.loads(req.data)["input"]) > 1:
+                raise HTTPError(req.full_url, 413, "too large", Message(), io.BytesIO(b"batch too large"))
+            return Reply(json.dumps({"embeddings": [[1.0]]}).encode())
+
+        with mock.patch.object(bp, "urlopen", urlopen), self.assertLogs("hivesense", "WARNING"), \
+                self.assertRaisesRegex(bp.EmbeddingRejected,
+                                       r"HTTP 413: batch too large \(each of the batch's 2 texts is accepted alone\)"):
+            bp._embed_one(config("http://unused"), [(1, 1, "a"), (2, 1, "b")], "t")
+
+    def test_transient_statuses_keep_retrying(self: Self) -> None:
+        for status in (500, 503, 408, 429):
+            with self.subTest(status=status):
+                server = self.serve(status)
+                sleeps: list[float] = []
+
+                def sleep(secs: float) -> None:
+                    sleeps.append(secs)
+                    if len(sleeps) == 3:
+                        raise RuntimeError("stop")
+
+                with mock.patch("time.sleep", sleep), self.assertRaisesRegex(RuntimeError, "stop"), \
+                        self.assertLogs("hivesense", "WARNING") as logs:
+                    bp._embed_one(config(server.url), [(1, 1, "bad")], "t")
+                self.assertEqual(len(server.requests), 3)
+                self.assertIn(f"HTTP {status} ", logs.output[0])
+                self.assertIn("retrying", logs.output[0])
 
 
 if __name__ == "__main__":
