@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -eu
+
 # Get the directory where docker compose is running
 SCRIPTPATH=$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd -P)
 COMPOSE_DIR="${SCRIPTPATH}/../../../docker/ci"
@@ -12,15 +14,29 @@ query_database() {
   docker compose -f "${COMPOSE_DIR}/compose.yml" exec -T haf psql -U haf_admin -A -t -d haf_block_log -c "$query" | tr -d '[:space:]'
 }
 
+# The pipeline's status is tr's, so a failed query shows up only as an empty
+# value; without this guard [ "" -lt N ] is false and the check is skipped.
+query_number() {
+  query=$1
+  value=$(query_database "$query")
+  case "$value" in
+    ''|*[!0-9]*)
+      echo "Query returned no number (got '${value}'): ${query}" >&2
+      exit 1
+      ;;
+  esac
+  echo "$value"
+}
+
 # 1. check if hivesense is synced
-hivesense_block_num=$(query_database "SELECT current_block_num FROM hafd.contexts WHERE name = 'hivesense_app'")
+hivesense_block_num=$(query_number "SELECT current_block_num FROM hafd.contexts WHERE name = 'hivesense_app'")
 if [ "$hivesense_block_num" -ne 1000000 ]; then
   echo "Current block num ${hivesense_block_num} != 1000000" >&2
   exit 1
 fi
 
 # 2. check number of chunks (allow small variance across builders/hivemind versions)
-number_of_chunks=$(query_database "SELECT COUNT(*) FROM hivesense_app.posts_vectors")
+number_of_chunks=$(query_number "SELECT COUNT(*) FROM hivesense_app.posts_vectors")
 MIN_CHUNK_COUNT=${MIN_CHUNK_COUNT:-3100}
 MAX_CHUNK_COUNT=${MAX_CHUNK_COUNT:-3500}
 if [ "$number_of_chunks" -lt "$MIN_CHUNK_COUNT" ] || [ "$number_of_chunks" -gt "$MAX_CHUNK_COUNT" ]; then
