@@ -145,7 +145,10 @@ their own model). The same image carries the MiniLM `tokenizer.json` both models
 `/tokenizer-files/all-MiniLM-L6-v2/`; the one-shot `tokenizer-copy` copies it into
 the `tokenizer-files` volume, which `haf` mounts read-only at
 `/home/hived/tokenizer-files`, where hivesense's chunker reads it
-(`db/posts_preprocessing.sql`). `haf` starts after the copy.
+(`db/posts_preprocessing.sql`). `haf` starts after the copy. `haf-votes-mode` mounts the
+same volume with `nocopy`: Docker copies the HAF image's own tokenizer files into the
+volume for every non-`nocopy` mount, and two such copies starting together race
+(`file exists`), so only `haf` copies them.
 
 hafah, reputation_tracker and hivemind are their `1.28.8-rc3` release images, recorded
 in the top-level `x-apps-release`: `develop` has no app release images, so while HAF

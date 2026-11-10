@@ -116,7 +116,20 @@ services:
       reputation-tracker-install:
         condition: service_completed_successfully
 
-  haf-votes-mode: *haf
+  # Its own mount of the volume with nocopy: Docker copies the HAF image's own
+  # /home/hived/tokenizer-files (e5-base, jina-v5-small) into the volume for every
+  # container that mounts it without nocopy, and `haf` and this service start
+  # together, so two copies raced on the same directories ("file exists"). `haf`
+  # still copies them; this one reads the volume as `haf` leaves it.
+  haf-votes-mode:
+    <<: *haf
+    volumes:
+      - type: volume
+        source: tokenizer-files
+        target: /home/hived/tokenizer-files
+        read_only: true
+        volume:
+          nocopy: true
 
   haf-votes-mode-init:
     image: *haf-image
