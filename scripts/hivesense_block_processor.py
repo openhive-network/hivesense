@@ -147,7 +147,8 @@ def _embed_batch(cfg: dict[str, Any], texts: list[str], label: str) -> list[list
     """One HTTP embedding request; retries transient failures (network, 5xx,
     408, 429) forever with backoff (the sync path must never drop posts - same
     policy as the old in-database embedder). Raises EmbeddingRejected on any
-    other 4xx without retrying."""
+    other 4xx, and ValueError for a host urllib cannot use as an http(s) URL,
+    without retrying."""
     payload = {"model": cfg["model"], "input": texts}
     if cfg["api_style"] == "openai":
         url = cfg["host"] + "/v1/embeddings"
@@ -155,7 +156,11 @@ def _embed_batch(cfg: dict[str, Any], texts: list[str], label: str) -> list[list
         if cfg["options"]:
             payload["options"] = cfg["options"]
         url = cfg["host"] + "/api/embed"
-    body = json.dumps(payload).encode()
+    # Built before the retry loop: a URL urllib cannot use is a configuration
+    # error, raised at once rather than retried.
+    req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    if req.type not in ("http", "https"):
+        raise ValueError(f"unknown url type: {req.type!r} in embedding URL {url!r}")
     delay = INITIAL_RETRY_DELAY
     timeout = _initial_timeout(cfg, len(texts))
     timeout_cap = max(cfg["timeout_max"], timeout)
@@ -166,7 +171,7 @@ def _embed_batch(cfg: dict[str, Any], texts: list[str], label: str) -> list[list
         # The body is read inside the try: a reply can stall or break off
         # after its status line, which is as transient as a failed connect.
         try:
-            with urlopen(Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=timeout) as resp:
+            with urlopen(req, timeout=timeout) as resp:
                 if resp.getcode() == 200:
                     data = json.loads(resp.read().decode())
                     if isinstance(data, dict) and reply_key in data:

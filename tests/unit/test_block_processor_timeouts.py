@@ -20,8 +20,8 @@ from urllib.error import HTTPError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 sys.path.insert(0, os.path.dirname(__file__))
 import hivesense_block_processor as bp
-from test_ollama_embed_timeouts import (BODY_READ_FAILURES, RejectingEmbedServer, Reply, SlowEmbedServer,
-                                        embeddings_reply, refused_url)
+from test_ollama_embed_timeouts import (BODY_READ_FAILURES, UNUSABLE_HOSTS, RejectingEmbedServer, Reply,
+                                        SlowEmbedServer, embeddings_reply, refused_url)
 
 
 def config(host: str, base: float = 30, per_text: float = 1, cap: float = 600) -> dict[str, Any]:
@@ -139,6 +139,16 @@ class EmbedBatch(unittest.TestCase):
                 self.assertEqual(len(logs.output), 1)
                 self.assertIn(f"[t] {notice}", logs.output[0])
                 self.assertIn("retrying", logs.output[0])
+
+
+class UnusableHost(unittest.TestCase):
+    def test_a_host_urllib_cannot_use_fails_at_once_without_a_request(self: Self) -> None:
+        for host in UNUSABLE_HOSTS:
+            with self.subTest(host=host), mock.patch.object(bp, "urlopen") as urlopen, \
+                    mock.patch("time.sleep", side_effect=AssertionError("retried")), \
+                    self.assertRaisesRegex(ValueError, "unknown url type"):
+                bp._embed_batch(config(host), ["a"], "t")
+            self.assertEqual(urlopen.call_count, 0)
 
 
 @mock.patch.object(bp, "INITIAL_RETRY_DELAY", 0.01)

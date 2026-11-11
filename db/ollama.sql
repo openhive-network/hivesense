@@ -174,6 +174,11 @@ AS $BODY$
         if api_style != 'openai' and opts is not None:
             payload["options"] = opts
         body = json.dumps(payload).encode('utf-8')
+        # Built before the retry loop: a URL urllib cannot use is a
+        # configuration error, raised at once rather than retried.
+        req = Request(url, data=body, headers={'Content-Type': 'application/json'})
+        if req.type not in ('http', 'https'):
+            raise ValueError(f"unknown url type: {req.type!r} in embedding URL {url!r}")
         timeout_secs = max(timeout_base, timeout_per_text * len(texts))
         request_timeout_max = max(timeout_max, timeout_secs)
         delay_secs = initial_delay
@@ -188,7 +193,6 @@ AS $BODY$
             # pg_cancel_backend actually work — a bare `except Exception`
             # here will silently swallow cancellation.
             try:
-                req = Request(url, data=body, headers={'Content-Type': 'application/json'})
                 with urlopen(req, timeout=timeout_secs) as resp:
                     status_code = resp.getcode()
                     if status_code == 200:

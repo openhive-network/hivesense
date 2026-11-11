@@ -165,6 +165,9 @@ BODY_READ_FAILURES: list[tuple[str, Callable[[], Reply], str]] = [
     ("no embeddings", lambda: Reply(b'{"error": "busy"}'), "malformed reply: no 'embeddings' in the JSON body"),
 ]
 
+# Hosts without a scheme: urllib's Request rejects the first, urlopen the rest.
+UNUSABLE_HOSTS = ["haproxy", "haproxy:7012", "127.0.0.1:7012"]
+
 
 def config(base: float, per_text: float = 0.0, cap: float = 600.0, batch_size: int = 100) -> dict[str, Any]:
     return dict(embedding_batch_size=batch_size, embedding_api="ollama", embedding_timeout_base=base,
@@ -367,6 +370,20 @@ class OllamaEmbedBodyReadFailures(unittest.TestCase):
                     embed("m", posts(1), "http://unused", None, 3)
                 self.assertEqual(urlopen.call_count, 3)
                 self.assertEqual(len(notices), 2)
+
+
+class OllamaEmbedUnusableHost(unittest.TestCase):
+    def test_a_host_urllib_cannot_use_fails_at_once_without_a_request(self: Self) -> None:
+        for host in UNUSABLE_HOSTS:
+            for max_retries in (None, 3):
+                with self.subTest(host=host, max_retries=max_retries):
+                    embed, notices = load_ollama_embed(config(base=30))
+                    with mock.patch("urllib.request.urlopen") as urlopen, \
+                            mock.patch("time.sleep", side_effect=AssertionError("retried")), \
+                            self.assertRaisesRegex(ValueError, "unknown url type"):
+                        embed("m", posts(1), host, None, max_retries)
+                    self.assertEqual(urlopen.call_count, 0)
+                    self.assertEqual(notices, [])
 
 
 if __name__ == "__main__":
