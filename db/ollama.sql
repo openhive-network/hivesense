@@ -148,8 +148,10 @@ AS $BODY$
         # llama-server ignores an ollama-style "options" block; context size
         # is fixed at server launch, so num_ctx et al. are not sent.
         url = host_url.rstrip('/') + "/v1/embeddings"
+        reply_key = "data"
     else:
         url = host_url.rstrip('/') + "/api/embed"
+        reply_key = "embeddings"
 
     class Rejected(Exception):
         """args: (status, response body). A 4xx other than 408/429 is
@@ -179,31 +181,40 @@ AS $BODY$
         while True:
             last_err = None
             timed_out = False
+            # The body is read inside the try: a reply can stall or break off
+            # after its status line, which is as transient as a failed connect.
             # Only catch network-layer errors. plpy.QueryCanceledError and
             # other plpy exceptions must propagate so pg_terminate_backend /
             # pg_cancel_backend actually work — a bare `except Exception`
             # here will silently swallow cancellation.
             try:
                 req = Request(url, data=body, headers={'Content-Type': 'application/json'})
-                resp = urlopen(req, timeout=timeout_secs)
-                status_code = resp.getcode()
-                if status_code == 200:
-                    break
-                last_err = f"HTTP {status_code}"
+                with urlopen(req, timeout=timeout_secs) as resp:
+                    status_code = resp.getcode()
+                    if status_code == 200:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        if isinstance(data, dict) and reply_key in data:
+                            return data
+                        last_err = f"malformed reply: no {reply_key!r} in the JSON body"
+                    else:
+                        last_err = f"HTTP {status_code}"
             except HTTPError as e:
                 reply = response_body(e)
                 if 400 <= e.code < 500 and e.code not in (408, 429):
                     plpy.warning(f"[{label}] HTTP {e.code}, not retrying: {reply}")
                     raise Rejected(e.code, reply)
                 last_err = f"HTTP {e.code} ({reply})"
-            except (URLError, OSError) as e:
+            except (URLError, OSError, HTTPException) as e:
                 # A timeout while connecting arrives wrapped in URLError, one
-                # while waiting for the response arrives bare.
+                # while waiting for or reading the response arrives bare.
                 timed_out = isinstance(e, socket.timeout) or isinstance(getattr(e, 'reason', None), socket.timeout)
                 if timed_out:
                     last_err = f"network error: timed out after {timeout_secs:g}s"
                 else:
-                    last_err = f"network error: {e}"
+                    last_err = f"network error: {str(e) or repr(e)}"
+            except ValueError as e:
+                # Not UTF-8 or not JSON: most likely a reply cut short.
+                last_err = f"malformed reply: {e}"
             attempts += 1
             if max_retries is not None and attempts >= max_retries:
                 plpy.error(f"[{label}] giving up after {attempts} attempts: {last_err}")
@@ -212,7 +223,6 @@ AS $BODY$
             delay_secs = min(delay_secs * 2, max_delay)
             if timed_out:
                 timeout_secs = min(timeout_secs * 2, request_timeout_max)
-        return json.loads(resp.read().decode('utf-8'))
 
     for start in range(0, total, max_batch):
         end = min(start + max_batch, total)

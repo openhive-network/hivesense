@@ -5,6 +5,7 @@ Runs the function's PL/Python body as written, with a stand-in `plpy` module, ag
 a local stub HTTP server that answers after a configurable delay. Timeouts are scaled
 down to fractions of a second; backoff sleeps are skipped. No database needed.
 """
+import http.client
 import io
 import json
 import os
@@ -136,6 +137,33 @@ class Reply(io.BytesIO):
 
     def getcode(self: Self) -> int:
         return 200
+
+
+class FailingReply(Reply):
+    """A 200 response whose body read raises `error`."""
+
+    def __init__(self: Self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    def read(self: Self, size: int | None = -1) -> bytes:
+        raise self.error
+
+
+def embeddings_reply(n: int) -> Reply:
+    return Reply(json.dumps({"embeddings": [[1.0, float(i)] for i in range(n)]}).encode())
+
+
+BODY_READ_FAILURES: list[tuple[str, Callable[[], Reply], str]] = [
+    ("timeout", lambda: FailingReply(socket.timeout("timed out")), "network error: timed out after 30s"),
+    ("TimeoutError", lambda: FailingReply(TimeoutError("timed out")), "network error: timed out after 30s"),
+    ("IncompleteRead", lambda: FailingReply(http.client.IncompleteRead(b"{", 99)),
+     "network error: IncompleteRead(1 bytes read, 99 more expected)"),
+    ("reset", lambda: FailingReply(ConnectionResetError(104, "Connection reset by peer")),
+     "network error: [Errno 104] Connection reset by peer"),
+    ("not JSON", lambda: Reply(b'{"embeddings": [[1.0, 0'), "malformed reply: "),
+    ("no embeddings", lambda: Reply(b'{"error": "busy"}'), "malformed reply: no 'embeddings' in the JSON body"),
+]
 
 
 def config(base: float, per_text: float = 0.0, cap: float = 600.0, batch_size: int = 100) -> dict[str, Any]:
@@ -301,6 +329,44 @@ class OllamaEmbedRejections(unittest.TestCase):
                 self.assertEqual(sleeps, [5, 10, 20])
                 self.assertIn(f"HTTP {status} ", notices[0])
                 self.assertIn("(1/inf)", notices[0])
+
+
+
+class OllamaEmbedBodyReadFailures(unittest.TestCase):
+    def test_a_failed_body_read_is_retried_like_a_network_error(self: Self) -> None:
+        for name, failing, notice in BODY_READ_FAILURES:
+            with self.subTest(name):
+                embed, notices = load_ollama_embed(config(base=30, cap=600))
+                replies = [failing(), embeddings_reply(2)]
+                calls: list[tuple[float, list[str]]] = []
+
+                def urlopen(req: urllib.request.Request, timeout: float) -> Reply:
+                    assert isinstance(req.data, bytes)
+                    calls.append((timeout, json.loads(req.data)["input"]))
+                    return replies.pop(0)
+
+                with mock.patch("urllib.request.urlopen", urlopen), mock.patch("time.sleep") as sleep:
+                    out = embed("m", posts(2), "http://unused", None, None)
+                self.assertEqual(out, [(0, 1, [1.0, 0.0]), (1, 1, [1.0, 1.0])])
+                self.assertEqual([c[1] for c in calls], [["text 0", "text 1"]] * 2)
+                grown = 60 if "timed out" in notice else 30
+                self.assertEqual([c[0] for c in calls], [30, grown])
+                self.assertEqual([c.args[0] for c in sleep.call_args_list], [5])
+                self.assertEqual(len(notices), 1)
+                self.assertIn(f"[Batch 0:2] {notice}", notices[0])
+                self.assertIn("retrying in 5s (1/inf)", notices[0])
+
+    def test_a_failed_body_read_counts_as_an_attempt_on_the_search_path(self: Self) -> None:
+        for name, failing, notice in BODY_READ_FAILURES:
+            with self.subTest(name):
+                embed, notices = load_ollama_embed(config(base=30, cap=600))
+                with mock.patch("urllib.request.urlopen", side_effect=lambda req, timeout: failing()) as urlopen, \
+                        mock.patch("time.sleep"), \
+                        self.assertRaisesRegex(PlpyError, r"\[Batch 0:1\] giving up after 3 attempts: "
+                                               + re.escape(notice.replace("30s", "60s"))):
+                    embed("m", posts(1), "http://unused", None, 3)
+                self.assertEqual(urlopen.call_count, 3)
+                self.assertEqual(len(notices), 2)
 
 
 if __name__ == "__main__":

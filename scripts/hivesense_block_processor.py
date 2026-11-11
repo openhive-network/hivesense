@@ -160,25 +160,34 @@ def _embed_batch(cfg: dict[str, Any], texts: list[str], label: str) -> list[list
     timeout = _initial_timeout(cfg, len(texts))
     timeout_cap = max(cfg["timeout_max"], timeout)
     attempts = 0
+    reply_key = "data" if cfg["api_style"] == "openai" else "embeddings"
     while True:
         timed_out = False
+        # The body is read inside the try: a reply can stall or break off
+        # after its status line, which is as transient as a failed connect.
         try:
-            resp = urlopen(Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=timeout)
-            if resp.getcode() == 200:
-                data = json.loads(resp.read().decode())
-                break
-            last_err = f"HTTP {resp.getcode()}"
+            with urlopen(Request(url, data=body, headers={"Content-Type": "application/json"}), timeout=timeout) as resp:
+                if resp.getcode() == 200:
+                    data = json.loads(resp.read().decode())
+                    if isinstance(data, dict) and reply_key in data:
+                        break
+                    last_err = f"malformed reply: no {reply_key!r} in the JSON body"
+                else:
+                    last_err = f"HTTP {resp.getcode()}"
         except HTTPError as e:
             reply = _response_body(e)
             if 400 <= e.code < 500 and e.code not in (408, 429):
                 log.error("[%s] HTTP %s, not retrying: %s", label, e.code, reply)
                 raise EmbeddingRejected(e.code, reply) from e
             last_err = f"HTTP {e.code} ({reply})"
-        except (URLError, OSError) as e:
+        except (URLError, OSError, HTTPException) as e:
             # A timeout while connecting arrives wrapped in URLError, one
-            # while waiting for the response arrives bare.
+            # while waiting for or reading the response arrives bare.
             timed_out = isinstance(e, socket.timeout) or isinstance(getattr(e, "reason", None), socket.timeout)
-            last_err = f"network error: timed out after {timeout:g}s" if timed_out else f"network error: {e}"
+            last_err = f"network error: timed out after {timeout:g}s" if timed_out else f"network error: {str(e) or repr(e)}"
+        except ValueError as e:
+            # Not UTF-8 or not JSON: most likely a reply cut short.
+            last_err = f"malformed reply: {e}"
         attempts += 1
         log.warning("[%s] %s, retrying in %ss (attempt %s)", label, last_err, delay, attempts)
         time.sleep(delay)

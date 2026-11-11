@@ -20,7 +20,8 @@ from urllib.error import HTTPError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 sys.path.insert(0, os.path.dirname(__file__))
 import hivesense_block_processor as bp
-from test_ollama_embed_timeouts import RejectingEmbedServer, Reply, SlowEmbedServer, refused_url
+from test_ollama_embed_timeouts import (BODY_READ_FAILURES, RejectingEmbedServer, Reply, SlowEmbedServer,
+                                        embeddings_reply, refused_url)
 
 
 def config(host: str, base: float = 30, per_text: float = 1, cap: float = 600) -> dict[str, Any]:
@@ -119,6 +120,25 @@ class EmbedBatch(unittest.TestCase):
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 10, 20])
         self.assertEqual(self.warnings(logs), [])
         self.assertIn("refused", logs.output[0])
+
+    def test_a_failed_body_read_is_retried_like_a_network_error(self: Self) -> None:
+        for name, failing, notice in BODY_READ_FAILURES:
+            with self.subTest(name):
+                replies = [failing(), embeddings_reply(2)]
+                calls: list[tuple[float, list[str]]] = []
+
+                def urlopen(req: Any, timeout: float) -> Reply:
+                    calls.append((timeout, json.loads(req.data)["input"]))
+                    return replies.pop(0)
+
+                with mock.patch.object(bp, "urlopen", urlopen), self.assertLogs("hivesense", "WARNING") as logs:
+                    out = bp._embed_batch(config("http://unused", base=30, per_text=0), ["a", "b"], "t")
+                self.assertEqual(out, [[1.0, 0.0], [1.0, 1.0]])
+                self.assertEqual([c[1] for c in calls], [["a", "b"]] * 2)
+                self.assertEqual([c[0] for c in calls], [30, 60 if "timed out" in notice else 30])
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn(f"[t] {notice}", logs.output[0])
+                self.assertIn("retrying", logs.output[0])
 
 
 @mock.patch.object(bp, "INITIAL_RETRY_DELAY", 0.01)
