@@ -1334,6 +1334,171 @@ if [ -n "$muted_pair" ]; then
   fi
 fi
 
+# ─── 15. posts search fills result_limit (#118) ────────────────────────
+# A filter applied after the fixed pool (deleted posts, muted authors, the
+# /similar source post) must not leave the list short: the posts search reads
+# its index past the ef_search pool until result_limit live posts are found.
+# The pool-of-one squeeze from section 14 makes the pool that one chunk.
+# rank-ordered post ids of the posts search for embedding $1, limit $2 and
+# observer $3
+posts_search() {
+  echo "SELECT string_agg(post_id::text, ',' ORDER BY similarity_order)
+          FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${1}, ${2}, _observer_id => ${3})"
+}
+pool_post=$(query_database_rolled_back "$pool_of_one" "$(posts_search "$ref_embedding" 1 0)")
+pool_author=$(query_database "SELECT author_id FROM hivemind_app.hive_posts WHERE id = ${pool_post:-0}")
+pool_observer=$(query_database "
+  SELECT ha.id FROM hivemind_app.hive_accounts ha
+   WHERE ha.id > 0 AND ha.id <> ${pool_author:-0}
+     AND NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m WHERE m.observer_id = ha.id)
+   ORDER BY ha.id LIMIT 1")
+# live embedded posts the search may return, not by the pool's author
+other_posts=$(query_database "
+  SELECT count(DISTINCT hp.id)
+    FROM hivemind_app.hive_posts hp
+    JOIN hivesense_app.posts_vectors pv ON pv.post_id = hp.id
+    JOIN hivesense_app.post_data pd     ON pd.post_id = hp.id
+   WHERE hp.counter_deleted = 0 AND pd.number_of_tokens >= ${min_tokens}
+     AND hp.author_id <> ${pool_author:-0}")
+if ! is_number "$pool_post" || ! is_number "$pool_author" || ! is_number "$pool_observer" || ! is_number "$other_posts"; then
+  fail "posts pool-of-one checks could not be set up (post '${pool_post}', author '${pool_author}', observer '${pool_observer}', other posts '${other_posts}')"
+elif [ "$other_posts" -lt 10 ]; then
+  echo "skip: only ${other_posts} live embedded posts by other authors than ${pool_author}"
+else
+  # The observer mutes the author of the pool's only chunk.
+  for limit in 5 10; do
+    got=$(query_database_rolled_back \
+      "${pool_of_one}; INSERT INTO hivemind_app.muted (follower, following, block_num) VALUES (${pool_observer}, ${pool_author}, 1)" \
+      "WITH r AS MATERIALIZED (
+         SELECT * FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, ${limit}, _observer_id => ${pool_observer}))
+       SELECT count(DISTINCT r.post_id) || '/' || count(*) FILTER (WHERE hp.author_id = ${pool_author} OR hp.counter_deleted <> 0)
+         FROM r JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id")
+    if [ "$got" = "${limit}/0" ]; then
+      pass "posts search from a one-chunk pool fills ${limit} posts for an observer muting its author ${pool_author}"
+    else
+      fail "posts search from a one-chunk pool, observer ${pool_observer} muting ${pool_author}, limit ${limit}: distinct/muted-or-deleted = '${got}', expected ${limit}/0"
+    fi
+  done
+
+  # The pool's only post is deleted.
+  got=$(query_database_rolled_back \
+    "${pool_of_one}; UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE id = ${pool_post}" \
+    "SELECT count(DISTINCT post_id) || '/' || count(*) FILTER (WHERE post_id = ${pool_post})
+       FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 5)")
+  if [ "$got" = "5/0" ]; then
+    pass "posts search from a one-chunk pool fills 5 posts without its deleted post ${pool_post}"
+  else
+    fail "posts search from a one-chunk pool with post ${pool_post} deleted: distinct/that-post = '${got}', expected 5/0"
+  fi
+fi
+
+# /similar never returns its source post and fills the limit, also when the
+# source post's own chunks are the whole pool.
+source_post="hivemind_app.find_comment_id(split_part('${sample_post}', '/', 1), split_part('${sample_post}', '/', 2), TRUE)"
+for limit in 4 8; do
+  similar_check="
+    SELECT count(DISTINCT post_id) || '/' || count(*) FILTER (WHERE post_id = ${source_post})
+      FROM hivesense_app.find_nearest_posts_to_post(split_part('${sample_post}', '/', 1), split_part('${sample_post}', '/', 2), ${limit})"
+  got=$(query_database "$similar_check")
+  squeezed=$(query_database_rolled_back "$pool_of_one" "$similar_check")
+  if [ "$got" = "${limit}/0" ] && [ "$squeezed" = "${limit}/0" ]; then
+    pass "/similar for ${sample_post} returns ${limit} posts without the source post, also from a one-chunk pool"
+  else
+    fail "/similar for ${sample_post}, limit ${limit}: distinct/source = '${got}', from a one-chunk pool '${squeezed}', expected ${limit}/0"
+  fi
+done
+
+# Where the ef_search pool already holds result_limit live posts, the result
+# is exactly the pre-#118 fixed-pool query's: same posts, same order.
+fixed_pool_posts_oracle=$(cat <<'SQL'
+CREATE FUNCTION pg_temp.fixed_pool_posts(_e public.vector, _limit int) RETURNS text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    mode text := hivesense_app.reduction_mode();
+    d    int  := hivesense_app.reduced_dims();
+    ef   int  := (SELECT ef_search FROM hivesense_app.ann_search_size(_limit));
+    res  text;
+BEGIN
+    PERFORM set_config('hnsw.ef_search', ef::text, true);
+    EXECUTE format($q$
+        WITH ann AS (
+            SELECT c.post_id, c.chunk_number, %1$s AS d
+              FROM %2$s c
+             WHERE TRUE%3$s
+             ORDER BY d, c.post_id
+             LIMIT %4$s
+        ),
+        best_chunk AS (
+            SELECT DISTINCT ON (ann.post_id) ann.post_id, %5$s AS sim
+              FROM ann
+              JOIN hivesense_app.posts_vectors pv
+                ON pv.post_id = ann.post_id AND pv.chunk_number = ann.chunk_number
+             ORDER BY ann.post_id, sim
+        ),
+        reranked AS (
+            SELECT post_id, sim FROM best_chunk ORDER BY sim, post_id OFFSET 0
+        )
+        SELECT string_agg(post_id::text, ',' ORDER BY sim, post_id)
+          FROM (SELECT * FROM reranked WHERE TRUE%6$s ORDER BY sim, post_id LIMIT %7$s) top
+    $q$,
+      CASE mode
+        WHEN 'pca'   THEN 'reduced_embedding <=> $2'
+        WHEN 'slice' THEN format('public.subvector(embedding, 1, %1$s)::public.vector(%1$s) <=> $2', d)
+        ELSE hivesense_app.distance_clause(1)
+      END,
+      CASE mode WHEN 'pca' THEN 'hivesense_app.posts_vectors_reduced' ELSE 'hivesense_app.posts_vectors' END,
+      hivesense_app.ann_candidate_filter('c', NULL),
+      ef,
+      CASE mode WHEN 'none' THEN 'ann.d' ELSE '(pv.embedding <=> $1)::float4' END,
+      hivesense_app.live_post_filter('reranked', 0),
+      _limit)
+    INTO res
+    USING _e,
+          CASE mode
+            WHEN 'pca'   THEN hivesense_app.reduce_embedding(_e)
+            WHEN 'slice' THEN public.subvector(_e, 1, d)
+          END;
+    RETURN res;
+END;
+$f$
+SQL
+)
+compared=0
+for topic in blockchain "introduce yourself" bitcoin mining; do
+  for limit in 5 10; do
+    got=$(query_database_rolled_back "$fixed_pool_posts_oracle" "
+      WITH q AS MATERIALIZED (
+        SELECT hivesense_app.hivesense_embed(query_prefix || '${topic}') AS e
+          FROM hivesense_app.hivesense_app_status WHERE id = 1)
+      SELECT pg_temp.fixed_pool_posts(q.e, ${limit}) || '/' || ($(posts_search q.e "$limit" 0))
+        FROM q")
+    expected=${got%/*}
+    if [ -z "$got" ] || [ "$got" = "$expected" ]; then
+      fail "posts search vs fixed-pool oracle for '${topic}', limit ${limit}: no answer ('${got}')"
+    elif [ "$(count_ids "$expected")" != "$limit" ]; then
+      echo "skip: the fixed pool holds only '${expected}' for '${topic}', fewer than ${limit} posts"
+    elif [ "${got#*/}" = "$expected" ]; then
+      compared=$((compared+1))
+      pass "posts search for '${topic}', limit ${limit} equals the fixed-pool result: ${expected}"
+    else
+      fail "posts search for '${topic}', limit ${limit} returned '${got#*/}', the fixed pool '${expected}'"
+    fi
+  done
+done
+if [ "$compared" -eq 0 ]; then
+  fail "no topic's fixed pool held the limit's posts, so the unchanged-results check compared nothing"
+fi
+
+# The posts search's iterative scan and its cap stay inside the call too.
+got=$(query_database_rolled_back \
+  "DO \$\$ BEGIN PERFORM count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10); END \$\$" \
+  "SELECT current_setting('hnsw.iterative_scan') || ',' || current_setting('hnsw.max_scan_tuples')")
+if [ "$got" = "off,20000" ]; then
+  pass "a posts search leaves iterative scan off and max_scan_tuples at its default for the rest of the transaction"
+else
+  fail "after a posts search in one transaction iterative_scan,max_scan_tuples = '${got}', expected off,20000"
+fi
+
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
   echo "${FAILURES} search test(s) failed (mode: ${MODE})" >&2
