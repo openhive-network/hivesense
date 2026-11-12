@@ -12,8 +12,9 @@ CREATE TYPE hivesense_app.similar_post_result AS (
  * 1.  ANN sizing and candidate filters shared by the searches
  * ────────────────────────────────────────────────────────────────
  * hnsw.ef_search = clamp(_limit * ef_multiplier, ef_floor, ef_ceiling),
- * and the ANN candidate LIMIT is ef_search: with hnsw.iterative_scan off
- * the index returns at most ef_search rows, so a larger LIMIT never binds.
+ * and the fixed ANN candidate pool is ef_search index rows. The post and
+ * author searches read past it (iterative scan) only when its live,
+ * unmuted candidates cannot fill the limit.
  *
  * Defaults (floor 60, multiplier 10, ceiling 500) from steem-16, 2026-10-28:
  * jina-embeddings-v5-text-small, 1024-dim halfvec, 128-dim Matryoshka slice
@@ -210,6 +211,15 @@ $$;
 /* ────────────────────────────────────────────────────────────────
  * 2.  One-shot nearest-posts function
  * ────────────────────────────────────────────────────────────────*/
+-- The SET clauses of this function and of the author search name pgvector
+-- settings, which a non-superuser may attach only once the library has
+-- defined them in this session: reading a vector value loads it.
+DO $$
+BEGIN
+    PERFORM '[1]'::public.vector;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(
     _embedding       public.vector,      -- full-size query embedding (768-d)
     _limit           int     DEFAULT 1000,
@@ -222,6 +232,8 @@ CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_s
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
 STABLE PARALLEL SAFE
+SET hnsw.iterative_scan = relaxed_order
+SET hnsw.max_scan_tuples = 20000
 AS $$
 DECLARE
     /* ───────── flags & dims ───────── */
@@ -248,6 +260,7 @@ DECLARE
 
     /* ───────── misc ───────── */
     __min_tokens int;
+    __ef_ceiling int;
     author_post_ids int[];  -- author filter: that author's live root posts
 
     /* ------ block-range (time window) filter ------ */
@@ -256,6 +269,27 @@ DECLARE
     last_blk      int     := COALESCE(_last_block, 2147483647);
     window_lo     int;      -- exclusive post_id bounds, see window_post_bounds
     window_hi     int;
+
+    /* ------ iterative ANN scan ------ */
+    ann_cursor    refcursor;
+    cand          record;
+    __max_fetch   int;          -- cap on rows read from the cursor
+    __seqscan     text;         -- caller's enable_seqscan
+    fetched       int      := 0;
+    pool_posts    int[]    := '{}';  -- fixed pool: chunks passing
+    pool_chunks   int[]    := '{}';  --   ann_candidate_filter and their
+    pool_sims     float8[] := '{}';  --   re-ranked distance
+    live_posts    int[];             -- live posts: best chunk ...
+    live_chunks   int[];
+    live_sims     float8[];          --   ... and its distance
+    dead_posts    int[];             -- posts the probe rejected
+    new_posts     int[];             -- a shortfall round's unprobed posts:
+    new_chunks    int[];             --   best chunk ...
+    new_sims      float8[];          --   ... and its distance
+    need          int;               -- live posts still missing
+    probe         text;              -- live_post_filter over new_posts
+    probed_live   int[];             -- those of new_posts it keeps
+    i             int;
 
     /* ------ for exhaustive ------ */
     post_ids      int[];    -- candidate post_ids
@@ -292,8 +326,8 @@ BEGIN
     PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
 
     /* — token threshold — */
-    SELECT min_token_search_threshold
-      INTO __min_tokens
+    SELECT min_token_search_threshold, ef_ceiling
+      INTO __min_tokens, __ef_ceiling
       FROM hivesense_app.hivesense_app_status
      WHERE id = 1;
 
@@ -467,21 +501,7 @@ BEGIN
     END IF;
 
     /* ────────────────────────────────────────────────────────────
-     *  MAIN one-shot query (three variants)
-     *
-     *  Every variant skips deleted posts (and posts of authors the observer
-     *  mutes): the exhaustive one explicitly, the ANN variants through
-     *  live_post_filter, applied only after the re-rank. The re-ranked posts
-     *  come out of a fenced subquery (OFFSET 0 keeps the filter from being
-     *  pushed into it) in final order, so the hive_posts probe runs lazily
-     *  under the LIMIT: once per returned post plus once per rejected one,
-     *  not once per ANN candidate (e.g. 8 rather than ~60 at result_limit 8).
-     *
-     *  This returns what probing every ANN candidate did: with
-     *  hnsw.iterative_scan off the index yields at most ef_search rows
-     *  whatever the filter, so the ANN LIMIT (= ef_search) never binds and
-     *  the live posts among the candidates, their best chunks and their
-     *  order are the same; the probe now only drops the dead ones later.
+     *  EXHAUSTIVE debug branch: brute force over posts_vectors
      * ────────────────────────────────────────────────────────────*/
     IF exhaustive THEN
         -- note: this branch is only used for benchmarking debugging
@@ -562,139 +582,205 @@ BEGIN
         ORDER BY sim, post_id
         LIMIT _limit;
 	RETURN;
-    ELSIF use_reduced AND red_mode = 'slice' THEN
-        -- Matryoshka slicing: ANN on posts_vectors with expression distance, rerank with full embedding
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pv.post_id,
-                       pv.chunk_number,
-                       %s                           AS ann_dist
-                  FROM hivesense_app.posts_vectors pv
-                 WHERE TRUE%s
-                 ORDER BY ann_dist, pv.post_id
-                 LIMIT %s
-            ),
-            best_chunk AS (
-                SELECT DISTINCT ON (pv.post_id)
-                       pv.post_id,
-                       pv.chunk_number,
-                       (pv.embedding <=> $1)::float4 AS sim
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id     = ann.post_id
-                   AND pv.chunk_number = ann.chunk_number
-                 ORDER BY pv.post_id, sim
-            ),
-            reranked AS (
-                SELECT post_id, chunk_number, sim
-                  FROM best_chunk
-                 ORDER BY sim, post_id
-                OFFSET 0
-            )
-            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim::real AS similarity,
-                   post_id,
-                   chunk_number
-              FROM reranked
-             WHERE TRUE%s
-             ORDER BY sim, post_id
-             LIMIT %s
+    END IF;
+
+    /* ────────────────────────────────────────────────────────────
+     *  MAIN query: an iterative index scan read through a cursor
+     *
+     *  Every variant (Matryoshka slice, PCA, full vectors) skips deleted
+     *  posts and posts of authors the observer mutes. The ANN scan alone
+     *  cannot drop them: a filter applied after a fixed pool of ef_search
+     *  chunks leaves nothing when one author owns the whole neighbourhood
+     *  and the observer mutes them. So the function's SET clause turns on
+     *  relaxed_order iterative scan, and the candidates are read in two
+     *  steps:
+     *   1. the fixed pool: ef_search index rows (or ann_candidates ones that
+     *      pass ann_candidate_filter, when a debug header lowers it).
+     *      pgvector's first batch is the same ef_search search a scan
+     *      without iteration runs. The pool is collapsed to each post's best
+     *      chunk and probed with live_post_filter lazily, in final order,
+     *      until _limit live posts are found: one hive_posts probe per
+     *      returned or rejected post, not one per ANN candidate. Where that
+     *      fills the limit, the result is exactly the fixed pool's;
+     *   2. only on a shortfall (then every post of the pool has been
+     *      probed): further rows, each new post probed once, until the live
+     *      posts number _limit. A later chunk of a post already taken can
+     *      still improve that post's similarity.
+     *  The live posts are returned in order of their best re-ranked chunk.
+     *
+     *  Cap: the author search's, 10 * max(ef_ceiling, ef_search, 100) rows,
+     *  also set as hnsw.max_scan_tuples; at the cap the posts found so far
+     *  are returned. Both pgvector settings stay inside this call (see the
+     *  author search).
+     * ────────────────────────────────────────────────────────────*/
+    __max_fetch := GREATEST(__ef_ceiling, exploratory_factor, 100) * 10;
+    PERFORM set_config('hnsw.max_scan_tuples', __max_fetch::text, true);
+    -- planned at OPEN: without a LIMIT, never let a sort of the table win
+    __seqscan := current_setting('enable_seqscan');
+    PERFORM set_config('enable_seqscan', 'off', true);
+
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka slicing: ANN on posts_vectors with expression distance,
+        -- full embedding of the same row for the re-rank
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT pv.post_id,
+                   pv.chunk_number,
+                   (TRUE%s) AS ok,
+                   (pv.embedding <=> $1)::float4::float8 AS sim
+              FROM hivesense_app.posts_vectors pv
+             ORDER BY %s
         $q$,
-          dist_red,                     -- %s  ann distance expr (expression on embedding)
           hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
-          ann_candidates,               -- %s
-          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
-          _limit                        -- %s
+          dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
 
     ELSIF use_reduced THEN
-        -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pr.post_id,
-                       pr.chunk_number,
-                       %s                           AS ann_dist
-                  FROM hivesense_app.posts_vectors_reduced pr
-                 WHERE TRUE%s
-                 ORDER BY ann_dist, pr.post_id
-                 LIMIT %s
-            ),
-            best_chunk AS (
-                SELECT DISTINCT ON (pv.post_id)
-                       pv.post_id,
-                       pv.chunk_number,
-                       (pv.embedding <=> $1)::float4 AS sim
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id     = ann.post_id
-                   AND pv.chunk_number = ann.chunk_number
-                 ORDER BY pv.post_id, sim
-            ),
-            reranked AS (
-                SELECT post_id, chunk_number, sim
-                  FROM best_chunk
-                 ORDER BY sim, post_id
-                OFFSET 0
-            )
-            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim::real AS similarity,
-                   post_id,
-                   chunk_number
-              FROM reranked
-             WHERE TRUE%s
-             ORDER BY sim, post_id
-             LIMIT %s
+        -- PCA: ANN on posts_vectors_reduced, re-rank with full embedding
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT pr.post_id,
+                   pr.chunk_number,
+                   (TRUE%s) AS ok,
+                   (SELECT (pv.embedding <=> $1)::float4::float8
+                      FROM hivesense_app.posts_vectors pv
+                     WHERE pv.post_id = pr.post_id
+                       AND pv.chunk_number = pr.chunk_number) AS sim
+              FROM hivesense_app.posts_vectors_reduced pr
+             ORDER BY %s
         $q$,
-          dist_red,                     -- %s  ann distance expr
           hivesense_app.ann_candidate_filter('pr', _exclude_post_id),  -- %s
-          ann_candidates,               -- %s
-          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
-          _limit                        -- %s
+          dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
 
     ELSE   /* ───────── full-vector path ───────── */
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pv.post_id,
-                       pv.chunk_number,
-                       %s                           AS sim
-                  FROM hivesense_app.posts_vectors pv
-                 WHERE TRUE%s
-                 ORDER BY sim, pv.post_id
-                 LIMIT %s
-            ),
-            best_chunk AS (
-                SELECT DISTINCT ON (post_id)
-                       post_id, chunk_number, sim
-                  FROM ann
-                 ORDER BY post_id, sim
-            ),
-            reranked AS (
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT pv.post_id,
+                   pv.chunk_number,
+                   (TRUE%s) AS ok,
+                   %s AS sim
+              FROM hivesense_app.posts_vectors pv
+             ORDER BY sim
+        $q$,
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
+          dist_full                     -- %s  distance expr
+        )
+        USING _embedding;
+    END IF;
+    PERFORM set_config('enable_seqscan', __seqscan, true);
+
+    -- 1. the fixed pool
+    LOOP
+        EXIT WHEN fetched >= exploratory_factor OR cardinality(pool_posts) >= ann_candidates;
+        FETCH ann_cursor INTO cand;
+        EXIT WHEN NOT FOUND;
+        fetched := fetched + 1;
+        IF cand.ok THEN
+            pool_posts  := pool_posts  || cand.post_id;
+            pool_chunks := pool_chunks || cand.chunk_number;
+            pool_sims   := pool_sims   || cand.sim;
+        END IF;
+    END LOOP;
+
+    EXECUTE format($q$
+        SELECT COALESCE(array_agg(post_id      ORDER BY sim, post_id), '{}'),
+               COALESCE(array_agg(chunk_number ORDER BY sim, post_id), '{}'),
+               COALESCE(array_agg(sim          ORDER BY sim, post_id), '{}')
+          FROM (
+            SELECT post_id, chunk_number, sim
+              FROM (
                 SELECT post_id, chunk_number, sim
-                  FROM best_chunk
+                  FROM (
+                    SELECT DISTINCT ON (c.post_id)
+                           c.post_id, c.chunk_number, c.sim
+                      FROM unnest($1, $2, $3) AS c(post_id, chunk_number, sim)
+                     ORDER BY c.post_id, c.sim
+                  ) best_chunk
                  ORDER BY sim, post_id
                 OFFSET 0
-            )
-            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim::real  AS similarity,
-                   post_id,
-                   chunk_number
-              FROM reranked
+              ) reranked
              WHERE TRUE%s
              ORDER BY sim, post_id
              LIMIT %s
-        $q$,
-          dist_full,                  -- %s
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
-          ann_candidates,             -- %s
-          hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
-          _limit                      -- %s
-        )
-        USING _embedding;
+          ) top
+    $q$,
+      hivesense_app.live_post_filter('reranked', _observer_id),  -- %s
+      _limit                        -- %s
+    )
+    INTO live_posts, live_chunks, live_sims
+    USING pool_posts, pool_chunks, pool_sims;
 
+    -- 2. a shortfall: every pool post is probed, so the rest are dead. Each
+    -- round takes as many new posts as are still missing and probes them in
+    -- one statement: the same posts a probe per post would reach, since none
+    -- of them can complete the list before the last, with one plan of the
+    -- mute lookup instead of one per post.
+    IF cardinality(live_posts) < _limit THEN
+        SELECT COALESCE(array_agg(DISTINCT p), '{}')
+          INTO dead_posts
+          FROM unnest(pool_posts) AS p
+         WHERE p <> ALL(live_posts);
+
+        probe := format('SELECT COALESCE(array_agg(c.post_id), ''{}'') FROM unnest($1) AS c(post_id) WHERE TRUE%s',
+                        hivesense_app.live_post_filter('c', _observer_id));
+        LOOP
+            need := _limit - cardinality(live_posts);
+            new_posts  := '{}';
+            new_chunks := '{}';
+            new_sims   := '{}';
+            LOOP
+                EXIT WHEN cardinality(new_posts) >= need OR fetched >= __max_fetch;
+                FETCH ann_cursor INTO cand;
+                EXIT WHEN NOT FOUND;
+                fetched := fetched + 1;
+                CONTINUE WHEN NOT cand.ok;
+
+                i := array_position(live_posts, cand.post_id);
+                IF i IS NOT NULL THEN
+                    IF cand.sim < live_sims[i] THEN
+                        live_sims[i]   := cand.sim;
+                        live_chunks[i] := cand.chunk_number;
+                    END IF;
+                    CONTINUE;
+                END IF;
+                i := array_position(new_posts, cand.post_id);
+                IF i IS NOT NULL THEN
+                    IF cand.sim < new_sims[i] THEN
+                        new_sims[i]   := cand.sim;
+                        new_chunks[i] := cand.chunk_number;
+                    END IF;
+                ELSIF cand.post_id <> ALL(dead_posts) THEN
+                    new_posts  := new_posts  || cand.post_id;
+                    new_chunks := new_chunks || cand.chunk_number;
+                    new_sims   := new_sims   || cand.sim;
+                END IF;
+            END LOOP;
+            EXIT WHEN cardinality(new_posts) = 0;
+
+            EXECUTE probe INTO probed_live USING new_posts;
+            FOR i IN 1 .. cardinality(new_posts) LOOP
+                IF new_posts[i] = ANY(probed_live) THEN
+                    live_posts  := live_posts  || new_posts[i];
+                    live_chunks := live_chunks || new_chunks[i];
+                    live_sims   := live_sims   || new_sims[i];
+                ELSE
+                    dead_posts  := dead_posts  || new_posts[i];
+                END IF;
+            END LOOP;
+            -- fewer than needed: the index or the cap ran out
+            EXIT WHEN cardinality(new_posts) < need;
+        END LOOP;
     END IF;
+    CLOSE ann_cursor;
+
+    RETURN QUERY
+    SELECT (row_number() OVER (ORDER BY c.sim, c.post_id))::int AS similarity_order,
+           c.sim::real AS similarity,
+           c.post_id,
+           c.chunk_number
+      FROM unnest(live_posts, live_chunks, live_sims) AS c(post_id, chunk_number, sim)
+     ORDER BY c.sim, c.post_id
+     LIMIT _limit;
 END;
 $$;
 
@@ -799,15 +885,6 @@ CREATE TYPE contributors_result AS (
    similarity REAL
 );
 
-
--- The SET clause below names pgvector settings, which a non-superuser may
--- attach only once the library has defined them in this session: reading a
--- vector value loads it.
-DO $$
-BEGIN
-    PERFORM '[1]'::public.vector;
-END
-$$;
 
 CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(
     _embedding   vector,      -- full-size query embedding
