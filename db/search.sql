@@ -800,6 +800,15 @@ CREATE TYPE contributors_result AS (
 );
 
 
+-- The SET clause below names pgvector settings, which a non-superuser may
+-- attach only once the library has defined them in this session: reading a
+-- vector value loads it.
+DO $$
+BEGIN
+    PERFORM '[1]'::public.vector;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(
     _embedding   vector,      -- full-size query embedding
     _limit       integer DEFAULT 1,
@@ -811,6 +820,8 @@ COST 100
 STABLE
 PARALLEL SAFE
 ROWS 1000
+SET hnsw.iterative_scan = relaxed_order
+SET hnsw.max_scan_tuples = 20000
 AS $BODY$
 DECLARE
     /* ───────── flags & dims ───────── */
@@ -840,6 +851,17 @@ DECLARE
     author_scores  jsonb := '{}'::jsonb;  -- track best score per author
     authors_found  INT    := 0;
     __min_search_tokens   INT;
+    __ef_ceiling          INT;
+
+    /* ------ iterative ANN scan ------ */
+    ann_cursor    refcursor;
+    cand          record;
+    __max_fetch   int;          -- cap on rows read from the cursor
+    __seqscan     text;         -- caller's enable_seqscan
+    fetched       int     := 0;
+    pool_authors  int[]    := '{}';  -- live candidates: author ...
+    pool_sims     float8[] := '{}';  --   ... and re-ranked distance
+    found_authors int[]    := '{}';
 
     /* ------ for exhaustive ------ */
     post_ids      int[];    -- candidate post_ids
@@ -878,8 +900,8 @@ BEGIN
     PERFORM set_config('hnsw.ef_search', exploratory_factor::text, true);
 
     /* — token threshold — */
-    SELECT min_token_search_threshold
-      INTO __min_search_tokens
+    SELECT min_token_search_threshold, ef_ceiling
+      INTO __min_search_tokens, __ef_ceiling
       FROM hivesense_app.hivesense_app_status
      WHERE id = 1;
 
@@ -983,147 +1005,138 @@ BEGIN
         ORDER BY score DESC, author_id
         LIMIT _limit;
         RETURN;
+    END IF;
 
-    ELSIF use_reduced AND red_mode = 'slice' THEN
-        -- Matryoshka slicing: ANN on posts_vectors with expression distance
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pv.post_id,
-                       pv.chunk_number,
-                       %s AS ann_dist
-                  FROM hivesense_app.posts_vectors pv
-                 WHERE TRUE%s
-                 ORDER BY ann_dist, pv.post_id
-                 LIMIT %s
-            ),
-            reranked AS (
-                SELECT hp.author_id,
-                       ann.post_id,
-                       (pv.embedding <=> $1)::float4 AS sim
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id = ann.post_id
-                   AND pv.chunk_number = ann.chunk_number
-                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
-            ),
-            ranked AS (
-                SELECT author_id,
-                       sim,
-                       row_number() OVER (ORDER BY sim) AS rn
-                  FROM reranked
-            ),
-            author_best AS (
-                SELECT author_id,
-                       MIN(sim) AS best_sim,
-                       SUM(1.0 / sqrt(rn)) AS score
-                  FROM ranked
-                 GROUP BY author_id
-            )
-            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
-                   author_id,
-                   best_sim::real AS similarity
-              FROM author_best
-             ORDER BY score DESC, author_id
-             LIMIT %s
+    /* ────────────────────────────────────────────────────────────
+     *  ANN candidates: an iterative index scan read through a cursor
+     *
+     *  One author can own most of the nearest chunks, so a pool sized
+     *  like the post search's (ef_search chunks) can collapse to a single
+     *  author. The function's SET clause turns on relaxed_order iterative
+     *  scan, and the cursor reads until both hold:
+     *   - the fixed pool is taken: ef_search index rows (or ann_candidates
+     *     live ones, when a debug header lowers it). pgvector's first batch
+     *     is the same ef_search search a scan without iteration runs, so
+     *     where that pool already holds _limit authors the pool, and the
+     *     result, are the ones a one-shot LIMIT ann_candidates query gives;
+     *   - the live candidates cover _limit distinct authors.
+     *  Liveness, mutes and the token threshold are computed per row (the
+     *  same predicates as the posts search) and count toward the authors.
+     *
+     *  Cap: 10 * max(ef_ceiling, ef_search, 100) rows, 5,000 at the default
+     *  ceiling of 500 -- ten chunks per author at the largest result_limit
+     *  (100), never fewer than 1,000 so a tiny configured ceiling still
+     *  leaves room to find distinct authors, and never below the fixed pool. The same value is hnsw.max_scan_tuples,
+     *  which pgvector counts in visited graph elements, so the graph walk
+     *  stops near it too (the scan then hands out the candidates it already
+     *  holds). Measured for "landscape photography" at ef 100: 109 rows on
+     *  hbt5 (5 ms), 46 on shed14 (3 ms), where a fixed pool of 500 took
+     *  804 ms and still depended on how far one author's posts reach. At the
+     *  cap the authors found so far are returned.
+     *
+     *  Both pgvector settings stay inside this call: they are named in the
+     *  function's SET clause, which restores them at exit even after a local
+     *  change below, so a posts search later in the same transaction still
+     *  runs without iterative scan.
+     * ────────────────────────────────────────────────────────────*/
+    __max_fetch := GREATEST(__ef_ceiling, exploratory_factor, 100) * 10;
+    PERFORM set_config('hnsw.max_scan_tuples', __max_fetch::text, true);
+    -- planned at OPEN: without a LIMIT, never let a sort of the table win
+    __seqscan := current_setting('enable_seqscan');
+    PERFORM set_config('enable_seqscan', 'off', true);
+
+    IF use_reduced AND red_mode = 'slice' THEN
+        -- Matryoshka slicing: ANN on posts_vectors with expression distance,
+        -- full embedding of the same row for the re-rank
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT (SELECT hp.author_id FROM hivemind_app.hive_posts hp
+                     WHERE hp.id = pv.post_id) AS author_id,
+                   (TRUE%s) AS live,
+                   (pv.embedding <=> $1)::float4::float8 AS sim
+              FROM hivesense_app.posts_vectors pv
+             ORDER BY %s
         $q$,
-          dist_red,                     -- %s  ann distance expr
           hivesense_app.ann_candidate_filter('pv', NULL)
             || hivesense_app.live_post_filter('pv', _observer_id),  -- %s
-          ann_candidates,               -- %s
-          _limit                        -- %s
+          dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
 
     ELSIF use_reduced THEN
-        -- PCA: ANN on posts_vectors_reduced, rerank with full embedding
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pr.post_id,
-                       pr.chunk_number,
-                       %s AS ann_dist
-                  FROM hivesense_app.posts_vectors_reduced pr
-                 WHERE TRUE%s
-                 ORDER BY ann_dist, pr.post_id
-                 LIMIT %s
-            ),
-            reranked AS (
-                SELECT hp.author_id,
-                       ann.post_id,
-                       (pv.embedding <=> $1)::float4 AS sim
-                  FROM ann
-                  JOIN hivesense_app.posts_vectors pv
-                    ON pv.post_id = ann.post_id
-                   AND pv.chunk_number = ann.chunk_number
-                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
-            ),
-            ranked AS (
-                SELECT author_id,
-                       sim,
-                       row_number() OVER (ORDER BY sim) AS rn
-                  FROM reranked
-            ),
-            author_best AS (
-                SELECT author_id,
-                       MIN(sim) AS best_sim,
-                       SUM(1.0 / sqrt(rn)) AS score
-                  FROM ranked
-                 GROUP BY author_id
-            )
-            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
-                   author_id,
-                   best_sim::real AS similarity
-              FROM author_best
-             ORDER BY score DESC, author_id
-             LIMIT %s
+        -- PCA: ANN on posts_vectors_reduced, re-rank with full embedding
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT (SELECT hp.author_id FROM hivemind_app.hive_posts hp
+                     WHERE hp.id = pr.post_id) AS author_id,
+                   (TRUE%s) AS live,
+                   (SELECT (pv.embedding <=> $1)::float4::float8
+                      FROM hivesense_app.posts_vectors pv
+                     WHERE pv.post_id = pr.post_id
+                       AND pv.chunk_number = pr.chunk_number) AS sim
+              FROM hivesense_app.posts_vectors_reduced pr
+             ORDER BY %s
         $q$,
-          dist_red,                     -- %s  ann distance expr
           hivesense_app.ann_candidate_filter('pr', NULL)
             || hivesense_app.live_post_filter('pr', _observer_id),  -- %s
-          ann_candidates,               -- %s
-          _limit                        -- %s
+          dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
 
     ELSE   /* ───────── full-vector path ───────── */
-        RETURN QUERY EXECUTE format($q$
-            WITH ann AS (
-                SELECT pv.post_id,
-                       pv.chunk_number,
-                       %s AS sim
-                  FROM hivesense_app.posts_vectors pv
-                 WHERE TRUE%s
-                 ORDER BY sim, pv.post_id
-                 LIMIT %s
-            ),
-            ranked AS (
-                SELECT hp.author_id,
-                       ann.sim,
-                       row_number() OVER (ORDER BY ann.sim) AS rn
-                  FROM ann
-                  JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
-            ),
-            author_best AS (
-                SELECT author_id,
-                       MIN(sim) AS best_sim,
-                       SUM(1.0 / sqrt(rn)) AS score
-                  FROM ranked
-                 GROUP BY author_id
-            )
-            SELECT ((row_number() OVER (ORDER BY score DESC, author_id))::int) AS rank,
-                   author_id,
-                   best_sim::real AS similarity
-              FROM author_best
-             ORDER BY score DESC, author_id
-             LIMIT %s
+        OPEN ann_cursor NO SCROLL FOR EXECUTE format($q$
+            SELECT (SELECT hp.author_id FROM hivemind_app.hive_posts hp
+                     WHERE hp.id = pv.post_id) AS author_id,
+                   (TRUE%s) AS live,
+                   %s AS sim
+              FROM hivesense_app.posts_vectors pv
+             ORDER BY sim
         $q$,
-          dist_full,                    -- %s  distance expr
           hivesense_app.ann_candidate_filter('pv', NULL)
             || hivesense_app.live_post_filter('pv', _observer_id),  -- %s
-          ann_candidates,               -- %s
-          _limit                        -- %s
+          dist_full                     -- %s  distance expr
         )
-        USING _embedding;
+        USING _embedding, query_red;
     END IF;
+    PERFORM set_config('enable_seqscan', __seqscan, true);
+
+    LOOP
+        FETCH ann_cursor INTO cand;
+        EXIT WHEN NOT FOUND;
+        fetched := fetched + 1;
+
+        IF cand.live THEN
+            pool_authors := pool_authors || cand.author_id;
+            pool_sims    := pool_sims    || cand.sim;
+            IF NOT cand.author_id = ANY(found_authors) THEN
+                found_authors := found_authors || cand.author_id;
+            END IF;
+        END IF;
+
+        EXIT WHEN (fetched >= exploratory_factor OR cardinality(pool_sims) >= ann_candidates)
+              AND cardinality(found_authors) >= _limit;
+        EXIT WHEN fetched >= __max_fetch;
+    END LOOP;
+    CLOSE ann_cursor;
+
+    RETURN QUERY
+    WITH ranked AS (
+        SELECT c.author_id,
+               c.sim,
+               row_number() OVER (ORDER BY c.sim) AS rn
+          FROM unnest(pool_authors, pool_sims) AS c(author_id, sim)
+    ),
+    author_best AS (
+        SELECT ranked.author_id,
+               MIN(ranked.sim) AS best_sim,
+               SUM(1.0 / sqrt(ranked.rn)) AS score
+          FROM ranked
+         GROUP BY ranked.author_id
+    )
+    SELECT (row_number() OVER (ORDER BY ab.score DESC, ab.author_id))::int AS rank,
+           ab.author_id,
+           ab.best_sim::real AS similarity
+      FROM author_best ab
+     ORDER BY ab.score DESC, ab.author_id
+     LIMIT _limit;
 END;
 $BODY$;
 

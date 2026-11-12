@@ -1147,6 +1147,193 @@ else
   fail "HEAD then GET of ${head_path} on one connection: '$(echo "$head_then_get" | tr '\n' ' ')', expected '200 0 200 0'"
 fi
 
+# ─── 14. author search fills result_limit (#116) ───────────────────────
+# One author can own most of the nearest chunks, so the author search keeps
+# reading its index past the ef_search pool until the live, unmuted candidates
+# cover result_limit authors. The pool-of-one squeeze (ef_floor = ef_ceiling
+# = 1, rolled back) leaves a fixed pool one chunk, i.e. at most one author.
+pool_of_one="UPDATE hivesense_app.hivesense_app_status SET ef_floor = 1, ef_ceiling = 1 WHERE id = 1"
+min_tokens="(SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1)"
+# Authors with live embedded posts the search may count.
+live_authors=$(query_database "
+  SELECT count(DISTINCT hp.author_id)
+    FROM hivemind_app.hive_posts hp
+    JOIN hivesense_app.posts_vectors pv ON pv.post_id = hp.id
+    JOIN hivesense_app.post_data pd     ON pd.post_id = hp.id
+   WHERE hp.counter_deleted = 0 AND pd.number_of_tokens >= ${min_tokens}")
+# rank-ordered author ids of the author search for embedding $1 and limit $2
+contributors() {
+  echo "SELECT string_agg(author_id::text, ',' ORDER BY rank)
+          FROM hivesense_app.find_thematic_contributors_with_embedding(${1}, ${2})"
+}
+count_ids() {
+  if [ -z "$1" ]; then echo 0; else echo "$1" | tr ',' '\n' | sort -u | wc -l | tr -d ' '; fi
+}
+
+sizing=$(query_database_rolled_back "$pool_of_one" "SELECT ef_search FROM hivesense_app.ann_search_size(10)")
+if [ "$sizing" != "1" ]; then
+  fail "could not squeeze the ANN pool to one chunk (ef_search '${sizing}', expected 1)"
+elif ! is_number "$live_authors"; then
+  fail "could not count the authors with live embedded posts ('${live_authors}')"
+else
+  for limit in 5 10; do
+    if [ "$live_authors" -lt "$limit" ]; then
+      echo "skip: only ${live_authors} authors with live embedded posts, fewer than ${limit}"
+      continue
+    fi
+    got=$(query_database_rolled_back "$pool_of_one" "$(contributors "$ref_embedding" "$limit")")
+    if [ "$(count_ids "$got")" = "$limit" ]; then
+      pass "author search from a one-chunk pool returns ${limit} distinct authors"
+    else
+      fail "author search from a one-chunk pool with limit ${limit} returned '${got}', expected ${limit} distinct authors"
+    fi
+  done
+fi
+
+# Where the ef_search pool already holds result_limit authors, the result is
+# exactly what the one-shot fixed-pool query gave: same authors, same order.
+# The oracle is that query (CI stores and indexes full-precision vectors).
+fixed_pool_oracle=$(cat <<'SQL'
+CREATE FUNCTION pg_temp.fixed_pool_authors(_e public.vector, _limit int) RETURNS text
+LANGUAGE plpgsql AS $f$
+DECLARE
+    mode text := hivesense_app.reduction_mode();
+    d    int  := hivesense_app.reduced_dims();
+    ef   int  := (SELECT ef_search FROM hivesense_app.ann_search_size(_limit));
+    res  text;
+BEGIN
+    PERFORM set_config('hnsw.ef_search', ef::text, true);
+    EXECUTE format($q$
+        WITH ann AS (
+            SELECT c.post_id, c.chunk_number, %1$s AS d
+              FROM %2$s c
+             WHERE TRUE%3$s
+             ORDER BY d
+             LIMIT %4$s
+        ),
+        ranked AS (
+            SELECT hp.author_id, row_number() OVER (ORDER BY %5$s) AS rn
+              FROM ann
+              JOIN hivesense_app.posts_vectors pv
+                ON pv.post_id = ann.post_id AND pv.chunk_number = ann.chunk_number
+              JOIN hivemind_app.hive_posts hp ON hp.id = ann.post_id
+        ),
+        author_best AS (
+            SELECT author_id, SUM(1.0 / sqrt(rn)) AS score FROM ranked GROUP BY author_id
+        )
+        SELECT string_agg(author_id::text, ',' ORDER BY score DESC, author_id)
+          FROM (SELECT * FROM author_best ORDER BY score DESC, author_id LIMIT %6$s) top
+    $q$,
+      CASE mode
+        WHEN 'pca'   THEN 'reduced_embedding <=> $2'
+        WHEN 'slice' THEN format('public.subvector(embedding, 1, %1$s)::public.vector(%1$s) <=> $2', d)
+        ELSE hivesense_app.distance_clause(1)
+      END,
+      CASE mode WHEN 'pca' THEN 'hivesense_app.posts_vectors_reduced' ELSE 'hivesense_app.posts_vectors' END,
+      hivesense_app.ann_candidate_filter('c', NULL) || hivesense_app.live_post_filter('c', 0),
+      ef,
+      CASE mode WHEN 'none' THEN 'ann.d' ELSE '(pv.embedding <=> $1)::float4' END,
+      _limit)
+    INTO res
+    USING _e,
+          CASE mode
+            WHEN 'pca'   THEN hivesense_app.reduce_embedding(_e)
+            WHEN 'slice' THEN public.subvector(_e, 1, d)
+          END;
+    RETURN res;
+END;
+$f$
+SQL
+)
+compared=0
+for topic in blockchain "introduce yourself" bitcoin mining; do
+  got=$(query_database_rolled_back "$fixed_pool_oracle" "
+    WITH q AS MATERIALIZED (
+      SELECT hivesense_app.hivesense_embed(query_prefix || '${topic}') AS e
+        FROM hivesense_app.hivesense_app_status WHERE id = 1)
+    SELECT pg_temp.fixed_pool_authors(q.e, 5) || '/' || ($(contributors q.e 5))
+      FROM q")
+  expected=${got%/*}
+  if [ -z "$got" ] || [ "$got" = "$expected" ]; then
+    fail "author search vs fixed-pool oracle for '${topic}': no answer ('${got}')"
+  elif [ "$(count_ids "$expected")" != "5" ]; then
+    echo "skip: the fixed pool holds only '${expected}' for '${topic}', fewer than 5 authors"
+  elif [ "${got#*/}" = "$expected" ]; then
+    compared=$((compared+1))
+    pass "author search for '${topic}' equals the fixed-pool result where that is complete: ${expected}"
+  else
+    fail "author search for '${topic}' returned '${got#*/}', the fixed pool '${expected}'"
+  fi
+done
+if [ "$compared" -eq 0 ]; then
+  fail "no topic's fixed pool held 5 authors, so the unchanged-results check compared nothing"
+fi
+
+# The iterative scan stays inside the call: a posts search later in the same
+# transaction runs without it and answers as a fresh call does.
+posts_ids="SELECT string_agg(post_id::text, ',' ORDER BY similarity_order)
+             FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 10)"
+fresh=$(query_database "$posts_ids")
+got=$(query_database_rolled_back \
+  "DO \$\$ BEGIN PERFORM count(*) FROM hivesense_app.find_thematic_contributors_with_embedding(${ref_embedding}, 10); END \$\$" \
+  "SELECT current_setting('hnsw.iterative_scan') || '/' || (${posts_ids})")
+if [ -n "$fresh" ] && [ "$got" = "off/${fresh}" ]; then
+  pass "a posts search after an author search in one transaction runs without iterative scan and is unchanged"
+else
+  fail "posts search after an author search in one transaction: '${got}', expected 'off/${fresh}'"
+fi
+
+# Chunks of deleted posts never count toward the limit: with every post of
+# the reference post's own top author deleted, the one-chunk pool still
+# fills the limit, without that author.
+top_author=$(query_database "SELECT author_id FROM hivesense_app.find_thematic_contributors_with_embedding(${ref_embedding}, 5) WHERE rank = 1")
+if ! is_number "$top_author" || ! is_number "$live_authors"; then
+  fail "author search returned no top author to delete ('${top_author}')"
+elif [ "$live_authors" -le 5 ]; then
+  echo "skip: only ${live_authors} authors with live embedded posts, too few to drop one and still fill 5"
+else
+  got=$(query_database_rolled_back \
+    "${pool_of_one}; UPDATE hivemind_app.hive_posts SET counter_deleted = 1 WHERE author_id = ${top_author} AND depth = 0" \
+    "$(contributors "$ref_embedding" 5)")
+  case ",${got}," in
+    *",${top_author},"*)
+      fail "author search returned author ${top_author} with all their posts deleted: '${got}'" ;;
+    *)
+      if [ "$(count_ids "$got")" = "5" ]; then
+        pass "author search skips deleted posts' chunks and still returns 5 authors without ${top_author}"
+      else
+        fail "author search with author ${top_author}'s posts deleted returned '${got}', expected 5 other authors"
+      fi ;;
+  esac
+fi
+
+# Authors the observer mutes are neither counted nor returned, even when one
+# of them wrote the query's own nearest chunk.
+if [ -n "$muted_pair" ]; then
+  unmuted_authors=$(query_database "
+    SELECT count(DISTINCT hp.author_id)
+      FROM hivemind_app.hive_posts hp
+      JOIN hivesense_app.posts_vectors pv ON pv.post_id = hp.id
+      JOIN hivesense_app.post_data pd     ON pd.post_id = hp.id
+     WHERE hp.counter_deleted = 0 AND pd.number_of_tokens >= ${min_tokens}
+       AND NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+                        WHERE m.observer_id = ${observer} AND m.muted_id = hp.author_id)")
+  if ! is_number "$unmuted_authors" || [ "$unmuted_authors" -lt 5 ]; then
+    echo "skip: only '${unmuted_authors}' authors observer ${observer} does not mute"
+  else
+    got=$(query_database_rolled_back "$pool_of_one" "
+      SELECT count(DISTINCT r.author_id) || ',' || count(m.muted_id)
+        FROM hivesense_app.find_thematic_contributors_with_embedding(${muted_embedding}, 5, _observer_id => ${observer}) r
+        LEFT JOIN hivemind_app.muted_accounts_by_id_view m
+          ON m.observer_id = ${observer} AND m.muted_id = r.author_id")
+    if [ "$got" = "5,0" ]; then
+      pass "author search for observer ${observer} returns 5 authors, none it mutes"
+    else
+      fail "author search for observer ${observer}: distinct,muted = '${got}', expected 5,0"
+    fi
+  fi
+fi
+
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
   echo "${FAILURES} search test(s) failed (mode: ${MODE})" >&2
