@@ -39,8 +39,9 @@ LANGUAGE plpgsql STABLE
 AS
 $$
 BEGIN
-  -- Long cache: the version only changes on deployment.
-  PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=86400"}]', true);
+  -- Short cache: the answer changes on every deployment, which is exactly when
+  -- operators read it to confirm the deploy; one indexed read is cheap to repeat.
+  PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=60"}]', true);
 
   -- `version` resolves via PGRST_DB_EXTRA_SEARCH_PATH (hivesense_app); the table
   -- is populated at install time by SET_VERSION() (see install_app.sh). COALESCE

@@ -28,16 +28,22 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.message import Message
+from typing import Any, Callable, Optional, Union
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STARTUP_TIMEOUT_S = 60
 
+Request = tuple[str, str, Optional[Any]]
+Check = Callable[[int, Any], None]
+CheckEntry = Union[tuple[str, Request, Check], tuple[str, Request, Check, dict[str, str]]]
 
-def get(path):
+
+def get(path: str) -> Request:
     return ("GET", path, None)
 
 
-def http_json(kind, *keys):
+def http_json(kind: type, *keys: str) -> Check:
     def check(status, body) -> None:
         assert status == 200, f"HTTP {status}"
         assert isinstance(body, kind), f"expected {kind.__name__}, got {body!r}"
@@ -63,12 +69,13 @@ def http_error(code, message_part=""):
     return check
 
 
-# name, request, check(status, decoded body). `{sync_uuid}` in a path is replaced
-# by the primary chain's uuid, read from /rpc/get_sync_settings.
+# name, request, check(status, decoded body)[, expected response headers]. `{sync_uuid}`
+# in a path is replaced by the primary chain's uuid, read from /rpc/get_sync_settings.
 UNKNOWN_UUID = "00000000-0000-0000-0000-000000000000"
-CHECKS = [
+CHECKS: list[CheckEntry] = [
     ("root", get("/"), http_json(dict, "openapi", "paths")),
-    ("get_hivesense_version", get("/rpc/get_hivesense_version"), http_json(str)),
+    ("get_hivesense_version", get("/rpc/get_hivesense_version"), http_json(str),
+     {"Cache-Control": "public, max-age=60"}),
     ("get_hivesense_sync_status", get("/rpc/get_hivesense_sync_status"), http_is({"last_block_num": 0, "last_block_time": None})),
     ("get_sync_settings", get("/rpc/get_sync_settings"), http_json(dict, "sync_uuid", "llm", "embedding_dimensionality")),
     ("get_sync_chains", get("/rpc/get_sync_chains"), http_json(list, "sync_uuid", "base_url", "llm")),
@@ -134,7 +141,7 @@ def one_upsert_per_embedded_post(status, body) -> None:
     assert all(op.get("op") == "delete" and not op.get("embeddings") for op in others), f"unexpected operations: {others}"
 
 
-EMBEDDED_CHECKS = [
+EMBEDDED_CHECKS: list[CheckEntry] = [
     ("posts_search.pasta", search("posts_search", q="a recipe for cooking pasta with homemade tomato sauce"),
      ranked([SAUCE, PASTA], [WITNESS, HIKING])),
     ("posts_search.hiking", search("posts_search", q="hiking a mountain trail to the summit"),
@@ -163,20 +170,26 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def call(base, request):
+def call(base: str, request: Request) -> tuple[int, Any, str, Message]:
     method, path, payload = request
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            status, raw = resp.status, resp.read()
+            status, raw, headers = resp.status, resp.read(), resp.headers
     except urllib.error.HTTPError as err:
-        status, raw = err.code, err.read()
+        status, raw, headers = err.code, err.read(), err.headers
     text = raw.decode("utf-8", "replace")
     try:
-        return status, json.loads(text) if text.strip() else None, text
+        return status, json.loads(text) if text.strip() else None, text, headers
     except ValueError:
-        return status, None, text
+        return status, None, text, headers
+
+
+def expect_headers(expected: dict[str, str], headers: Message) -> None:
+    for name, value in expected.items():
+        actual = headers.get(name)
+        assert actual == value, f"{name}: got {actual!r}, expected {value!r}"
 
 
 def wait_until_serving(base, proc, log_path):
@@ -215,12 +228,14 @@ def main(out, check_set):
             wait_until_serving(base, proc, log_path)
             settings = call(base, get("/rpc/get_sync_settings"))[1]
             sync_uuid = settings.get("sync_uuid") if isinstance(settings, dict) else None
-            for name, (method, path, payload), check in checks:
+            for name, (method, path, payload), check, *expected_headers in checks:
                 request = (method, path.replace("{sync_uuid}", str(sync_uuid)), payload)
                 t0 = time.monotonic()
-                status, body, text = call(base, request)
+                status, body, text, headers = call(base, request)
                 try:
                     check(status, body)
+                    for expected in expected_headers:
+                        expect_headers(expected, headers)
                     verdict, message = "pass", ""
                     print(f"ok   {name}")
                 except AssertionError as err:
