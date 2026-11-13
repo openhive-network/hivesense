@@ -81,6 +81,29 @@ Terms: `S_O` = the old node's `max_visible_sync_seq` at the freeze, `U_old` its
    All three should be 0. Nonzero values mean the two hivemind versions index
    different post sets: ops for posts an old-hivemind downstream cannot resolve
    make `MISSING_POST_ACTION=exit` syncers halt. Decide before continuing.
+
+   A deleted-then-recreated permlink has two `hive_posts` rows on the old
+   node, and old nodes kept the vectors of the deleted one, so the dump can
+   carry several old posts' chunk sets (and `post_data` rows) under one name.
+   Every old post wrote all its chunks under one `sync_seq` of its own, so the
+   resolve keeps, per name, the rows with the highest `sync_seq` (the newest
+   old post, all of its chunks) and drops the rest; `legacy_post_data` keeps
+   the row with the highest `last_vectors_block` (then `number_of_tokens`).
+   The live post here is then diffed against the newest old vectors. This is
+   safe: the old chain never sent a delete for the dropped twins, so
+   old-hivemind downstreams keep their stale rows either way, and nothing the
+   merge sends refers to them.
+
+   | metric | meaning |
+   |---|---|
+   | `old_names_with_several_old_posts` | names whose raw vector rows carry more than one `sync_seq` (collapsed to the highest) |
+   | `old_twin_vector_rows_dropped` | raw vector rows those names lost; `old_vector_rows_resolved` is `old_vector_rows` minus this, minus the rows of unresolved posts |
+   | `old_names_with_partial_chunk_sets` | of those names, ones where some `sync_seq` group lacks chunk 0, i.e. the rows were not written one whole post per `sync_seq` (also raised as a NOTICE) |
+
+   The last should be 0. Nonzero is a data error on the old node: the kept
+   group may be a fragment of a post, and the diff compares the post here
+   against that fragment. Inspect those names in `legacy_vectors_raw` before
+   continuing.
 5. **Diff:**
    ```
    SELECT * FROM hivesense_app.rebase_diff();          -- default max cosine distance 0.001

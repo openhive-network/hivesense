@@ -10,7 +10,9 @@
 # The dump phase first marks a few embedded posts deleted in hivemind (the
 # regeneration drops them: 'gone'), removes the old vectors of a few others
 # (the regeneration embeds them: 'new') and purges a few deleted posts on the
-# old chain (delete marker only: left alone). The rebase phase loads the dump,
+# old chain (delete marker only: left alone). After the dump it injects the
+# vectors and post data of a recreated permlink's deleted twin under a live
+# post's name, plus a duplicate delete marker. The rebase phase loads the dump,
 # runs every rebase step, checks the reports against what the regeneration must
 # produce (exactly the arranged posts gained or lost, every post whose chunk
 # count changed re-sent), and confirms the public endpoints now serve the old
@@ -152,6 +154,37 @@ case "$PHASE" in
         JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
         GROUP BY ha.name, hpd.permlink" | sed '/^$/d' | sort > "$DIR/old_chunk_counts"
     echo "dumped: $(cat "$DIR/old_posts_with_vectors") posts, $(cat "$DIR/old_chunks") chunks"
+
+    # A deleted-then-recreated permlink whose deleted twin still had vectors
+    # (old nodes kept them): the dump writes both hive_posts rows' chunk sets
+    # and post_data rows under one name. The block log has no such post, so
+    # inject the twin into the dump: one chunk more than the live post, under
+    # sync_seq 0 (below every real one), and a post_data row with an older
+    # last_vectors_block but more tokens. Also duplicate a delete marker row.
+    # The live chain is untouched, so old_chunks still counts the live chunks.
+    twin=$(cut -d'|' -f1 "$DIR/old_chunk_counts" | grep -vxF -f "$DIR/arranged_posts" | head -n 1)
+    [ -n "$twin" ] || { echo "ERROR: no embedded post left for the recreated-permlink twin" >&2; exit 1; }
+    twin_author=${twin%%/*}
+    twin_permlink=${twin#*/}
+    live_chunks=$(awk -F"|" -v n="$twin" '$1 == n { print $2 }' "$DIR/old_chunk_counts")
+    chunk0=$(awk -F, -v a="$twin_author" -v p="$twin_permlink" '$1 == a && $2 == p && $3 == "0"' "$DIR/old_vectors.csv")
+    post_data=$(awk -F, -v a="$twin_author" -v p="$twin_permlink" '$1 == a && $2 == p' "$DIR/old_post_data.csv")
+    if [ -z "$chunk0" ] || [ -z "$post_data" ] || [ "$(wc -l < "$DIR/old_deleted.csv")" -lt 2 ]; then
+      echo "ERROR: dump lacks the rows to build the twin of $twin (or any delete marker)" >&2
+      exit 1
+    fi
+    twin_rows=$((live_chunks + 1))
+    i=0
+    while [ "$i" -lt "$twin_rows" ]; do
+      echo "$chunk0" | sed "s/^\([^,]*,[^,]*\),0,\(.*\),[0-9]*\$/\1,$i,\2,0/" >> "$DIR/old_vectors.csv"
+      i=$((i + 1))
+    done
+    echo "$post_data" | awk -F, -v OFS=, '{ $3 = $3 + 1000; $4 = 0; print }' >> "$DIR/old_post_data.csv"
+    tail -n 1 "$DIR/old_deleted.csv" >> "$DIR/old_deleted.csv"
+    echo "$twin" > "$DIR/twin_post"
+    echo "$twin_rows" > "$DIR/twin_rows"
+    echo "$post_data" | cut -d, -f4 > "$DIR/twin_live_block"
+    echo "recreated-permlink twin: $twin ($twin_rows twin rows next to $live_chunks live chunks)"
     exit 0
     ;;
   rebase) ;;
@@ -180,10 +213,32 @@ expect_eq "posts marked deleted still deleted in hivemind" "$(query_database "SE
 
 "${ROOT}/scripts/legacy_chain/load_old_chain.sh" --dir="$DIR" --psql="$PSQL_CMD" || { fail "load_old_chain.sh"; exit 1; }
 
-show "SELECT * FROM hivesense_app.rebase_resolve(${FREEZE_BLOCK});"
+$PSQL_CMD -v ON_ERROR_STOP=on -q -A -t -F' ' -c "SET ROLE hivesense_owner;" \
+  -c "SELECT * FROM hivesense_app.rebase_resolve(${FREEZE_BLOCK});" > "$DIR/resolve_report" \
+  || { cat "$DIR/resolve_report"; fail "rebase_resolve()"; exit 1; }
+cat "$DIR/resolve_report"
+report() { sed -n "s/^$1 //p" "$DIR/resolve_report"; }
 expect_eq "old posts unresolved" "$(query_database "SELECT count(*) FROM hivesense_app.legacy_unresolved")" 0
 expect_eq "old vector rows resolved" \
   "$(query_database "SELECT count(*) FROM hivesense_app.legacy_vectors")" "$(cat "$DIR/old_chunks")"
+# the injected recreated-permlink twin is collapsed to the live post's chunks
+TWIN=$(cat "$DIR/twin_post")
+TWIN_ROWS=$(cat "$DIR/twin_rows")
+TWIN_NAME_JOIN="JOIN hivemind_app.hive_posts hp ON hp.id = t.post_id
+    JOIN hivemind_app.hive_accounts ha ON ha.id = hp.author_id
+    JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id
+   WHERE $POST_NAME = '$TWIN'"
+expect_eq "report old_names_with_several_old_posts" "$(report old_names_with_several_old_posts)" 1
+expect_eq "report old_twin_vector_rows_dropped" "$(report old_twin_vector_rows_dropped)" "$TWIN_ROWS"
+expect_eq "report old_names_with_partial_chunk_sets" "$(report old_names_with_partial_chunk_sets)" 0
+expect_eq "report old_vector_rows_resolved" "$(report old_vector_rows_resolved)" \
+  "$(($(report old_vector_rows) - TWIN_ROWS))"
+expect_eq "twin $TWIN chunks in legacy_vectors" \
+  "$(query_database "SELECT count(*) || '|' || count(*) FILTER (WHERE t.sync_seq = 0) FROM hivesense_app.legacy_vectors t $TWIN_NAME_JOIN")" \
+  "$(awk -F"|" -v n="$TWIN" '$1 == n { print $2 }' "$DIR/old_chunk_counts")|0"
+expect_eq "twin $TWIN last_vectors_block in legacy_post_data" \
+  "$(query_database "SELECT t.last_vectors_block FROM hivesense_app.legacy_post_data t $TWIN_NAME_JOIN")" \
+  "$(cat "$DIR/twin_live_block")"
 
 show "SELECT * FROM hivesense_app.rebase_diff();"
 show "SELECT * FROM hivesense_app.legacy_diff_histogram;"

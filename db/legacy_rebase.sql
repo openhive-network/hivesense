@@ -146,6 +146,9 @@ SET search_path = hivesense_app, public
 AS $$
 DECLARE
     __vec_type TEXT;
+    __names_with_several_old_posts BIGINT;
+    __twin_vector_rows_dropped BIGINT;
+    __names_with_partial_chunk_sets BIGINT;
 BEGIN
     PERFORM rebase_phase_is('staging');
     UPDATE legacy_rebase_state SET freeze_block = _freeze_block WHERE id = 1;
@@ -199,10 +202,47 @@ BEGIN
             sync_seq     INT NOT NULL,
             PRIMARY KEY (post_id, chunk_number)
         )$q$, __vec_type);
+
+    -- A name can carry the chunk sets of several old posts: the old node kept
+    -- the vectors of a deleted post when its permlink was recreated (both
+    -- hive_posts rows embedded). Every old post wrote all its chunks under one
+    -- sync_seq of its own, so a (name, sync_seq) group is one old post; keep
+    -- the newest (highest sync_seq) whole and drop the twins. Downstreams keep
+    -- the twins' rows either way: the old chain never deleted them. A group
+    -- without chunk 0 is a fragment, not a post: the rows of that name were
+    -- not written one post per sync_seq.
+    DROP TABLE IF EXISTS tmp_vector_groups, tmp_kept_groups;
+    CREATE TEMP TABLE tmp_vector_groups ON COMMIT DROP AS
+    SELECT author, permlink, sync_seq, count(*) AS n_rows, bool_or(chunk_number = 0) AS has_chunk_zero
+      FROM legacy_vectors_raw
+     GROUP BY author, permlink, sync_seq;
+    CREATE TEMP TABLE tmp_kept_groups ON COMMIT DROP AS
+    SELECT DISTINCT ON (author, permlink) author, permlink, sync_seq
+      FROM tmp_vector_groups
+     ORDER BY author, permlink, sync_seq DESC;
+
+    SELECT count(*) FILTER (WHERE n_groups > 1),
+           COALESCE(sum(n_rows - kept_rows), 0),
+           count(*) FILTER (WHERE n_groups > 1 AND NOT all_have_chunk_zero)
+      INTO __names_with_several_old_posts, __twin_vector_rows_dropped, __names_with_partial_chunk_sets
+      FROM (
+        SELECT g.author, g.permlink, count(*) AS n_groups, sum(g.n_rows) AS n_rows,
+               sum(g.n_rows) FILTER (WHERE g.sync_seq = k.sync_seq) AS kept_rows,
+               bool_and(g.has_chunk_zero) AS all_have_chunk_zero
+          FROM tmp_vector_groups g
+          JOIN tmp_kept_groups k USING (author, permlink)
+         GROUP BY g.author, g.permlink
+      ) per_name;
+    IF __names_with_partial_chunk_sets > 0 THEN
+        RAISE NOTICE '% old post name(s) have vector rows under several sync_seq values that are not whole chunk sets; kept each name''s highest sync_seq rows only',
+            __names_with_partial_chunk_sets;
+    END IF;
+
     EXECUTE format($q$
         INSERT INTO legacy_vectors (post_id, chunk_number, embedding, sync_seq)
         SELECT lp.post_id, r.chunk_number, r.embedding::%s, r.sync_seq
           FROM legacy_vectors_raw r
+          JOIN tmp_kept_groups k USING (author, permlink, sync_seq)
           JOIN legacy_posts lp USING (author, permlink)
          WHERE lp.post_id IS NOT NULL$q$, __vec_type);
 
@@ -215,18 +255,21 @@ BEGIN
     SELECT lp.post_id, r.sync_seq
       FROM legacy_deleted_raw r
       JOIN legacy_posts lp USING (author, permlink)
-     WHERE lp.post_id IS NOT NULL;
+     WHERE lp.post_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
 
     CREATE TABLE legacy_post_data (
         post_id            INT PRIMARY KEY,
         number_of_tokens   INT NOT NULL,
         last_vectors_block INT NOT NULL
     );
+    -- one row per post: a recreated permlink's deleted twin has its own row
     INSERT INTO legacy_post_data (post_id, number_of_tokens, last_vectors_block)
-    SELECT lp.post_id, r.number_of_tokens, r.last_vectors_block
+    SELECT DISTINCT ON (lp.post_id) lp.post_id, r.number_of_tokens, r.last_vectors_block
       FROM legacy_post_data_raw r
       JOIN legacy_posts lp USING (author, permlink)
-     WHERE lp.post_id IS NOT NULL;
+     WHERE lp.post_id IS NOT NULL
+     ORDER BY lp.post_id, r.last_vectors_block DESC, r.number_of_tokens DESC;
 
     PERFORM rebase_set_phase('resolved');
 
@@ -234,6 +277,15 @@ BEGIN
     SELECT 'old_vector_rows'::TEXT, count(*) FROM legacy_vectors_raw
     UNION ALL
     SELECT 'old_vector_rows_resolved', count(*) FROM legacy_vectors
+    UNION ALL
+    -- names carrying several old posts' chunk sets (recreated permlinks whose
+    -- deleted twin kept vectors), and the twins' raw rows left out
+    SELECT 'old_names_with_several_old_posts', __names_with_several_old_posts
+    UNION ALL
+    SELECT 'old_twin_vector_rows_dropped', __twin_vector_rows_dropped
+    UNION ALL
+    -- nonzero: of those, names whose sync_seq groups are not whole chunk sets
+    SELECT 'old_names_with_partial_chunk_sets', __names_with_partial_chunk_sets
     UNION ALL
     SELECT 'old_posts_with_vectors', count(DISTINCT (author, permlink)) FROM legacy_vectors_raw
     UNION ALL
