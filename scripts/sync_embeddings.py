@@ -5,7 +5,7 @@ import logging
 import requests
 import json
 import asyncio
-from requests.exceptions import RequestException
+from requests.exceptions import ChunkedEncodingError, ContentDecodingError, RequestException
 import psycopg
 from psycopg.rows import dict_row
 from datetime import datetime, timezone
@@ -24,6 +24,8 @@ CHAINS_URL = f"{API_URL}/sync-chains"
 EMBEDS_URL = f"{API_URL}/embedding-updates"
 
 BATCH = 1000
+# Smallest page the syncer shrinks to while replies arrive truncated
+MIN_PAGE_SIZE = 10
 RETRY_SLEEP = 3
 MAX_BACKOFF = 60
 # How many times (1s apart) to re-check hivemind for a post that isn't there yet
@@ -679,6 +681,61 @@ def ensure_context_detached(conn) -> None:
     conn.commit()
 
 
+def reduced_page_size(page_size: int) -> int:
+    """Page size to request after a truncated reply: half, at least MIN_PAGE_SIZE."""
+    return max(page_size // 2, MIN_PAGE_SIZE)
+
+
+def recovered_page_size(page_size: int) -> int:
+    """Page size to request after a complete reply: double, at most BATCH."""
+    return min(page_size * 2, BATCH)
+
+
+def fetch_ops(after_seq: int, sync_uuid: str, page_size: int) -> tuple[requests.Response, list[dict[str, Any]], int]:
+    """Fetch the page of ops after after_seq, retrying until one arrives whole.
+
+    Returns the response, its ops and the page size to request next. A reply
+    whose body arrives truncated or unreadable halves the page size: a broken
+    proxy on the upstream (e.g. one spooling to a full disk) may cut only large
+    replies, and resending the same page would never get through. Each complete
+    page doubles it back toward BATCH. Other failures retry at the same size.
+    """
+    backoff = RETRY_SLEEP
+
+    def shrink(reason: str) -> None:
+        nonlocal page_size
+        smaller = reduced_page_size(page_size)
+        if smaller != page_size:
+            logging.warning("page_size %d -> %d after %s", page_size, smaller, reason)
+            page_size = smaller
+
+    while True:
+        try:
+            params: dict[str, str | int] = {"after_seq": after_seq, "page_size": page_size, "sync_uuid": sync_uuid}
+            response = requests.get(EMBEDS_URL, params=params, timeout=60)
+            if not response.ok:
+                logging.warning("Embedding-updates API returned %s; retrying in %s s",
+                                response.status_code, backoff)
+            else:
+                try:
+                    ops = response.json()
+                except (ValueError, json.JSONDecodeError) as e:
+                    logging.warning("Invalid JSON from embedding-updates: %s; retrying in %s s", e, backoff)
+                    shrink("an unreadable reply")
+                else:
+                    larger = recovered_page_size(page_size)
+                    if larger != page_size:
+                        logging.info("page_size %d -> %d after a complete reply", page_size, larger)
+                    return response, ops, larger
+        except (ChunkedEncodingError, ContentDecodingError) as e:
+            logging.warning("Error fetching embeddings: %s; retrying in %s s", e, backoff)
+            shrink("a truncated reply")
+        except RequestException as e:
+            logging.warning("Error fetching embeddings: %s; retrying in %s s", e, backoff)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)
+
+
 def main() -> None:
     # keep a copy of the log in the datadir when asked to (haf_api_node sets
     # LOG_FILE to a file under logs/apps, which survives docker compose down)
@@ -713,6 +770,7 @@ def main() -> None:
 
     last_seen_current_block_num = None
     last_seen_upstream_skips = None
+    page_size = BATCH
     while True:
         conn = ensure_connection_alive(conn)
         ensure_context_detached(conn)
@@ -723,34 +781,7 @@ def main() -> None:
         # we may sleep just below, so rollback to avoid holding any locks
         conn.rollback()
 
-        # fetch ops
-        backoff = RETRY_SLEEP
-        while True:
-            try:
-                response = requests.get(
-                    EMBEDS_URL,
-                    params={"after_seq": after_seq, "page_size": BATCH, "sync_uuid": sync_uuid},
-                    timeout=60
-                )
-                if not response.ok:
-                    logging.warning("Embedding-updates API returned %s; retrying in %s s",
-                                     response.status_code, backoff)
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, MAX_BACKOFF)
-                    continue
-                response.raise_for_status()
-                try:
-                    ops = response.json()
-                except (ValueError, json.JSONDecodeError) as e:
-                    logging.warning("Invalid JSON from embedding-updates: %s; retrying in %s s", e, backoff)
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, MAX_BACKOFF)
-                    continue
-                break
-            except RequestException as e:
-                logging.warning("Error fetching embeddings: %s; retrying in %s s", e, backoff)
-                time.sleep(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF)
+        response, ops, page_size = fetch_ops(after_seq, sync_uuid, page_size)
 
         # Make sure the DB handle is still alive after the (potentially long) HTTP loop above
         conn = ensure_connection_alive(conn)

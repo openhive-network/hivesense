@@ -45,6 +45,11 @@ http {
                     }
 
                     proxy_pass  $postgrest_upstream;  # my PostREST is  here!
+                    # Stream what exceeds the memory buffers to the client
+                    # instead of spooling it to proxy_temp: with a full or
+                    # failing disk, spooling truncates exactly the large
+                    # replies (e.g. ~18 MB /embedding-updates pages).
+                    proxy_max_temp_file_size 0;
 
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
