@@ -18,6 +18,8 @@ SET ROLE hivesense_owner;
       - Supports body truncation for preview mode
       - Respects observer mute lists and blacklists
       - Returns null for non-existent posts while preserving order
+      - Posts carry no embedded *active_votes* list; *observer_vote* holds the
+        vote of the observer on the post (null without an observer or vote)
 
       This endpoint is typically used after calling /posts/search or
       /posts/{author}/{permlink}/similar, which return full data for only
@@ -157,13 +159,10 @@ BEGIN
             ri.ordinality,
             CASE 
                 WHEN ri.post_id IS NOT NULL AND ri.post_id != 0 AND fpv.id IS NOT NULL THEN
-                    hivemind_postgrest_utilities.create_bridge_post_object(
+                    hivesense_app.full_post_object(
                         __observer_id,
                         fpv,
-                        __truncate,
-                        NULL,
-                        fpv.is_pinned,
-                        TRUE
+                        __truncate
                     )::JSON
                 ELSE
                     NULL::JSON
@@ -196,7 +195,9 @@ $$;
       
       For larger batches, use the POST /posts/by-ids endpoint instead.
       
-      The posts parameter should be a URL-encoded JSON array.
+      The posts parameter should be a URL-encoded JSON array. Posts have the
+      same vote-free shape as in /posts/by-ids: no *active_votes* list, and
+      *observer_vote* with the vote of the observer (null without an observer or vote).
       
       Example:
       GET /posts/by-ids-query?posts=[{"author":"user1","permlink":"post1"}]&truncate=500

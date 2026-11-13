@@ -10,6 +10,8 @@
       default 100, max 1000) are stub entries containing only *author* and
       *permlink*.  Paging is now done entirely on the client side.
       Deleted posts are never returned.
+      Full posts carry no embedded *active_votes* list; *observer_vote*
+      holds the vote of the observer on the post (null without an observer or vote).
     operationId: hivesense_endpoints.posts_search
     parameters:
       - in: query
@@ -198,13 +200,10 @@ BEGIN
           JOIN LATERAL (SELECT fv.*, fv.source AS blacklists
                         FROM hivemind_app.get_full_post_view_by_id(lim.post_id, __observer_id) fv) fpv ON TRUE
           JOIN LATERAL (
-                SELECT hivemind_postgrest_utilities.create_bridge_post_object(
+                SELECT hivesense_app.full_post_object(
                            __observer_id,
                            fpv.*,
-                           "truncate",
-                           NULL,
-                           fpv.is_pinned,
-                           TRUE
+                           "truncate"
                        ) AS obj
           ) hbpo ON TRUE
     ),
