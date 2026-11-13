@@ -13,6 +13,11 @@
 #   old_root_posts.csv  author,permlink   (every live root post; consistency check)
 #   old_status.txt      sync_uuid|max_visible_sync_seq|skipped_ops|current_block
 #
+# old_vectors.csv is deliberately UNORDERED: sorting it would make PostgreSQL
+# materialise every projected row (embedding text included, ~11 KB each) in temp
+# space on the old node before the first byte streams out. The loader matches
+# rows by (author, permlink, chunk_number), so do not add an ORDER BY back.
+#
 # Usage:
 #   dump_old_chain.sh --dir=/path/out [--psql="psql postgresql://haf_admin@haf/haf_block_log"]
 #   dump_old_chain.sh --dir=/path/out --psql="docker compose exec -T haf psql -U haf_admin -d haf_block_log"
@@ -29,7 +34,7 @@ for arg in "$@"; do
     --dir=*)   DIR="${arg#*=}" ;;
     --psql=*)  PSQL="${arg#*=}" ;;
     --skip-root-posts) ROOT_POSTS=0 ;;
-    --help|-h) sed -n '2,20p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -65,7 +70,7 @@ NAME_JOIN="JOIN hivemind_app.hive_posts hp ON hp.id = t.post_id
            JOIN hivemind_app.hive_permlink_data hpd ON hpd.id = hp.permlink_id"
 
 run_copy "SELECT ha.name AS author, hpd.permlink, t.chunk_number, t.embedding::text AS embedding, t.sync_seq
-            FROM hivesense_app.posts_vectors t $NAME_JOIN ORDER BY t.post_id, t.chunk_number" \
+            FROM hivesense_app.posts_vectors t $NAME_JOIN" \
          "$DIR/old_vectors.csv"
 run_copy "SELECT ha.name AS author, hpd.permlink, t.sync_seq
             FROM hivesense_app.deleted_embeddings t $NAME_JOIN ORDER BY t.sync_seq" \
