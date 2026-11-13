@@ -276,6 +276,79 @@ BEGIN
 END;
 $$;
 
+-- The maintenance_work_mem an HNSW build should SET: desired_maintenance_work_mem_gb
+-- when both system memory (desired + 30 GB) and /dev/shm (desired + 4 GB, where a
+-- parallel build keeps its graph) can hold it, else the current setting.
+CREATE OR REPLACE FUNCTION hivesense_app.index_build_maintenance_work_mem()
+RETURNS TEXT
+LANGUAGE plpgsql VOLATILE
+AS
+$$
+DECLARE
+    __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
+                                  FROM   hivesense_app.hivesense_app_status
+                                  LIMIT  1);
+    __current_maintenance_work_mem TEXT := CURRENT_SETTING('maintenance_work_mem');
+    __system_memory_gb NUMERIC;
+    __memory_check_result TEXT;
+    __shm_size_gb NUMERIC;
+    __can_use_system_mem BOOLEAN := FALSE;
+    __can_use_shm BOOLEAN := FALSE;
+BEGIN
+    -- Check system memory availability
+    BEGIN
+        -- Read /proc/meminfo to get total memory using SECURITY DEFINER wrapper
+        SELECT SPLIT_PART(hivesense_app.read_proc_meminfo(), ' kB', 1) INTO __memory_check_result;
+        SELECT SPLIT_PART(__memory_check_result, 'MemTotal:', 2) INTO __memory_check_result;
+        SELECT TRIM(__memory_check_result)::BIGINT / 1024 / 1024 INTO __system_memory_gb;
+
+        RAISE NOTICE 'System total memory: % GB', ROUND(__system_memory_gb, 1);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Could not determine system memory: %. Using conservative settings.', SQLERRM;
+        __system_memory_gb := 0;
+    END;
+
+    -- Check shared memory (/dev/shm) availability
+    BEGIN
+        __shm_size_gb := hivesense_app.get_shm_size_gb();
+        IF __shm_size_gb IS NOT NULL THEN
+            RAISE NOTICE 'Shared memory (/dev/shm) size: % GB', __shm_size_gb;
+        ELSE
+            RAISE NOTICE 'Could not determine shared memory size. Using conservative settings.';
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Error checking shared memory: %. Using conservative settings.', SQLERRM;
+        __shm_size_gb := NULL;
+    END;
+
+    -- Check if system memory is sufficient
+    IF __system_memory_gb >= (__desired_work_mem_gb + 30) THEN
+        __can_use_system_mem := TRUE;
+    END IF;
+
+    -- Check if shared memory is sufficient (shm_size >= maintenance_work_mem + 4GB)
+    IF __shm_size_gb IS NOT NULL AND __shm_size_gb >= (__desired_work_mem_gb + 4) THEN
+        __can_use_shm := TRUE;
+    END IF;
+
+    -- Determine appropriate maintenance_work_mem based on BOTH system memory and shared memory
+    IF __can_use_system_mem AND __can_use_shm THEN
+        RAISE NOTICE 'Both system memory (% GB) and shared memory (% GB) are sufficient. Setting maintenance_work_mem to %GB',
+                    ROUND(__system_memory_gb, 1), __shm_size_gb, __desired_work_mem_gb;
+        RETURN __desired_work_mem_gb || 'GB';
+    END IF;
+
+    IF NOT __can_use_system_mem THEN
+        RAISE NOTICE 'System memory insufficient (% GB < % GB + 30). Using default maintenance_work_mem: %',
+                    ROUND(__system_memory_gb, 1), __desired_work_mem_gb, __current_maintenance_work_mem;
+    ELSIF NOT __can_use_shm THEN
+        RAISE NOTICE 'Shared memory insufficient (% GB < % GB + 4). Using default maintenance_work_mem: %',
+                    __shm_size_gb, __desired_work_mem_gb, __current_maintenance_work_mem;
+    END IF;
+    RETURN __current_maintenance_work_mem;
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE ENSURE_INDEXES_ARE_CREATED()
 LANGUAGE plpgsql
 AS
@@ -299,9 +372,6 @@ DECLARE
                THEN hivesense_app.reduced_dims()
           ELSE hivesense_app.embedding_dims()
          END;  -- for slice mode, reduced_dims is the index dimension
-    __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
-                                  FROM   hivesense_app.hivesense_app_status
-                                  LIMIT  1);
 BEGIN
     -- Check if index already exists
     SELECT hivesense_app.get_hnsw_index_name() INTO __index_name;
@@ -343,40 +413,8 @@ BEGIN
     DECLARE
         __max_parallel_maintenance_workers INT;
         __original_maintenance_workers INT;
-        __system_memory_gb NUMERIC;
-        __memory_check_result TEXT;
         __new_maintenance_work_mem TEXT;
-    DECLARE
-        __shm_size_gb NUMERIC;
-        __can_use_system_mem BOOLEAN := FALSE;
-        __can_use_shm BOOLEAN := FALSE;
     BEGIN
-        -- Check system memory availability
-        BEGIN
-            -- Read /proc/meminfo to get total memory using SECURITY DEFINER wrapper
-            SELECT SPLIT_PART(hivesense_app.read_proc_meminfo(), ' kB', 1) INTO __memory_check_result;
-            SELECT SPLIT_PART(__memory_check_result, 'MemTotal:', 2) INTO __memory_check_result;
-            SELECT TRIM(__memory_check_result)::BIGINT / 1024 / 1024 INTO __system_memory_gb;
-
-            RAISE NOTICE 'System total memory: % GB', ROUND(__system_memory_gb, 1);
-        EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'Could not determine system memory: %. Using conservative settings.', SQLERRM;
-            __system_memory_gb := 0;
-        END;
-
-        -- Check shared memory (/dev/shm) availability
-        BEGIN
-            __shm_size_gb := hivesense_app.get_shm_size_gb();
-            IF __shm_size_gb IS NOT NULL THEN
-                RAISE NOTICE 'Shared memory (/dev/shm) size: % GB', __shm_size_gb;
-            ELSE
-                RAISE NOTICE 'Could not determine shared memory size. Using conservative settings.';
-            END IF;
-        EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'Error checking shared memory: %. Using conservative settings.', SQLERRM;
-            __shm_size_gb := NULL;
-        END;
-
         -- Get available worker settings
         SELECT CURRENT_SETTING('max_parallel_workers')::INT INTO __max_parallel_workers;
         SELECT CURRENT_SETTING('maintenance_work_mem') INTO __current_maintenance_work_mem;
@@ -390,32 +428,8 @@ BEGIN
         -- Use minimum of 32 and max_parallel_workers for our target
         __max_parallel_maintenance_workers := LEAST(32, __max_parallel_workers);
 
-        -- Check if system memory is sufficient
-        IF __system_memory_gb >= (__desired_work_mem_gb + 30) THEN
-            __can_use_system_mem := TRUE;
-        END IF;
+        __new_maintenance_work_mem := hivesense_app.index_build_maintenance_work_mem();
 
-        -- Check if shared memory is sufficient (shm_size >= maintenance_work_mem + 4GB)
-        IF __shm_size_gb IS NOT NULL AND __shm_size_gb >= (__desired_work_mem_gb + 4) THEN
-            __can_use_shm := TRUE;
-        END IF;
-
-        -- Determine appropriate maintenance_work_mem based on BOTH system memory and shared memory
-        IF __can_use_system_mem AND __can_use_shm THEN
-            __new_maintenance_work_mem := __desired_work_mem_gb || 'GB';
-            RAISE NOTICE 'Both system memory (% GB) and shared memory (% GB) are sufficient. Setting maintenance_work_mem to %GB',
-                        ROUND(__system_memory_gb, 1), __shm_size_gb, __desired_work_mem_gb;
-        ELSE
-            __new_maintenance_work_mem := __current_maintenance_work_mem;
-            IF NOT __can_use_system_mem THEN
-                RAISE NOTICE 'System memory insufficient (% GB < % GB + 30). Using default maintenance_work_mem: %',
-                            ROUND(__system_memory_gb, 1), __desired_work_mem_gb, __new_maintenance_work_mem;
-            ELSIF NOT __can_use_shm THEN
-                RAISE NOTICE 'Shared memory insufficient (% GB < % GB + 4). Using default maintenance_work_mem: %',
-                            __shm_size_gb, __desired_work_mem_gb, __new_maintenance_work_mem;
-            END IF;
-        END IF;
-        
         -- Set maintenance_work_mem based on memory check
         EXECUTE FORMAT('SET maintenance_work_mem TO %L', __new_maintenance_work_mem);
         

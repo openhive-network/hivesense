@@ -540,7 +540,6 @@ AS $$
 DECLARE
     __idx_name TEXT := get_hnsw_index_name() || '_merged';
     __t0       TIMESTAMPTZ;
-    __desired_gb INT := (SELECT desired_maintenance_work_mem_gb FROM hivesense_app_status WHERE id = 1);
 BEGIN
     PERFORM rebase_phase_is('tables_built');
 
@@ -562,13 +561,11 @@ BEGIN
     CREATE INDEX deleted_embeddings_merged_sync_seq_post_id_idx
         ON deleted_embeddings_merged (sync_seq, post_id);
 
-    -- same knobs ensure_indexes_are_created() turns for the regular build
+    -- same knobs, and the same memory decision, as ensure_indexes_are_created()
     BEGIN
         EXECUTE format('SET max_parallel_maintenance_workers TO %s',
                        LEAST(32, current_setting('max_parallel_workers')::INT));
-        IF __desired_gb IS NOT NULL AND __desired_gb > 0 THEN
-            EXECUTE format('SET maintenance_work_mem TO %L', __desired_gb || 'GB');
-        END IF;
+        EXECUTE format('SET maintenance_work_mem TO %L', index_build_maintenance_work_mem());
         EXECUTE 'SET work_mem TO ''512MB''';
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE 'Could not raise index build settings: %', SQLERRM;
