@@ -227,6 +227,7 @@ expect_cache_control "/authors/search" "/authors/search?topic=blockchain&result_
 expect_cache_control "/posts/search error response" "/posts/search?q=hive&result_limit=0" "[45]??" ""
 expect_cache_control "/posts/{author}/{permlink}/similar error response" "/posts/${sample_post}/similar?result_limit=0" "[45]??" ""
 expect_cache_control "/sync-status" "/sync-status" 200 "public, max-age=0"
+expect_cache_control "/version" "/version" 200 "public, max-age=60"
 
 # ─── 6. internal search functions ──────────────────────────────────────
 # Reference embedding for the check below (store_halfvec is off in CI)
