@@ -61,6 +61,9 @@ Terms: `S_O` = the old node's `max_visible_sync_seq` at the freeze, `U_old` its
    Refuses to run while a block-processing session is connected. Writes
    `old_vectors.csv` (the big one), `old_deleted.csv`, `old_post_data.csv`,
    `old_root_posts.csv` and `old_status.txt` (`U_old|S_O|skipped|block`).
+   `old_vectors.csv` is unordered: it streams straight from the scan and needs
+   no temp space on the old node (a sort would spill the whole file, embeddings
+   included, to temp first). Nothing downstream reads its order.
 4. **Load and resolve** (new node):
    ```
    scripts/legacy_chain/load_old_chain.sh --dir=/data/old_chain --psql="..."
