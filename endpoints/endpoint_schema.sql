@@ -75,7 +75,7 @@ DO $__$
           "AI"
         ],
         "summary": "Full semantic search results in a single call",
-        "description": "Returns an ordered list of posts most similar to a given query.\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*.  Paging is now done entirely on the client side.\nDeleted posts are never returned.\n",
+        "description": "Returns an ordered list of posts most similar to a given query.\nThe first **N** results (default 10, max 50) are returned as full\nbridge-post JSON objects; the remaining results (up to **posts_limit**,\ndefault 100, max 1000) are stub entries containing only *author* and\n*permlink*.  Paging is now done entirely on the client side.\nDeleted posts are never returned.\nFull posts carry no embedded *active_votes* list; *observer_vote*\nholds the vote of the observer on the post (null without an observer or vote).\n",
         "operationId": "hivesense_endpoints.posts_search",
         "parameters": [
           {
@@ -350,7 +350,7 @@ DO $__$
           "AI"
         ],
         "summary": "Fetch full post details for multiple posts by their IDs",
-        "description": "Retrieves complete post information for a batch of posts identified by\ntheir author/permlink pairs. This endpoint is designed to work with the\nnew paging model where search results return mostly stub entries, and\nclients fetch full details as needed for display.\n\nKey features:\n- Accepts up to 50 post identifiers in a single request\n- Returns posts in the same order as requested\n- Supports body truncation for preview mode\n- Respects observer mute lists and blacklists\n- Returns null for non-existent posts while preserving order\n\nThis endpoint is typically used after calling /posts/search or\n/posts/{author}/{permlink}/similar, which return full data for only\nthe first N posts. When the user scrolls or pages through results,\nthe client calls this endpoint with the next batch of author/permlink\npairs to get their full details.\n\nExample workflow:\n1. Call /posts/search with result_limit=1000, full_posts=10\n2. Display first 10 posts immediately (already have full data)\n3. When user scrolls to post 11, call this endpoint with posts 11-20\n4. Continue fetching batches as user scrolls\n",
+        "description": "Retrieves complete post information for a batch of posts identified by\ntheir author/permlink pairs. This endpoint is designed to work with the\nnew paging model where search results return mostly stub entries, and\nclients fetch full details as needed for display.\n\nKey features:\n- Accepts up to 50 post identifiers in a single request\n- Returns posts in the same order as requested\n- Supports body truncation for preview mode\n- Respects observer mute lists and blacklists\n- Returns null for non-existent posts while preserving order\n- Posts carry no embedded *active_votes* list; *observer_vote* holds the\n  vote of the observer on the post (null without an observer or vote)\n\nThis endpoint is typically used after calling /posts/search or\n/posts/{author}/{permlink}/similar, which return full data for only\nthe first N posts. When the user scrolls or pages through results,\nthe client calls this endpoint with the next batch of author/permlink\npairs to get their full details.\n\nExample workflow:\n1. Call /posts/search with result_limit=1000, full_posts=10\n2. Display first 10 posts immediately (already have full data)\n3. When user scrolls to post 11, call this endpoint with posts 11-20\n4. Continue fetching batches as user scrolls\n",
         "operationId": "hivesense_endpoints.posts_by_ids",
         "requestBody": {
           "required": true,
@@ -437,7 +437,7 @@ DO $__$
           "AI"
         ],
         "summary": "Fetch full post details for multiple posts (GET variant)",
-        "description": "GET variant of /posts/by-ids that accepts post identifiers as query\nparameters. Limited to fetching fewer posts due to URL length constraints.\n\nFor larger batches, use the POST /posts/by-ids endpoint instead.\n\nThe posts parameter should be a URL-encoded JSON array.\n\nExample:\nGET /posts/by-ids-query?posts=[{\"author\":\"user1\",\"permlink\":\"post1\"}]&truncate=500\n",
+        "description": "GET variant of /posts/by-ids that accepts post identifiers as query\nparameters. Limited to fetching fewer posts due to URL length constraints.\n\nFor larger batches, use the POST /posts/by-ids endpoint instead.\n\nThe posts parameter should be a URL-encoded JSON array. Posts have the\nsame vote-free shape as in /posts/by-ids: no *active_votes* list, and\n*observer_vote* with the vote of the observer (null without an observer or vote).\n\nExample:\nGET /posts/by-ids-query?posts=[{\"author\":\"user1\",\"permlink\":\"post1\"}]&truncate=500\n",
         "operationId": "hivesense_endpoints.posts_by_ids_query",
         "parameters": [
           {

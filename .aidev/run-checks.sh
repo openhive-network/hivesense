@@ -53,13 +53,15 @@
 #                     .aidev/hivesense_smoke.py (one junit case per call), then
 #                     (rolled back) a deletion of an embedded seeded post in block
 #                     processing and its delete op in embedding_updates, and
-#                     posts_similar's full posts with and without hivemind's
+#                     the full posts of posts_similar, posts_search and
+#                     posts_by_ids(_query) with and without hivemind's
 #                     _votes_mode (the vote-free call); finally
 #                     reinstall as `install` does, so the steps after it see that state
 #   - votes-mode      on the stack's second HAF (HIVESENSE_TEST_VOTES_MODE_DB_HOST,
 #                     default `haf-votes-mode`), whose hivemind has
 #                     create_bridge_post_object's _votes_mode: install, seed and
-#                     embed as embed-search, then posts_similar's full posts must
+#                     embed as embed-search, then the full posts of
+#                     posts_similar, posts_search and posts_by_ids(_query) must
 #                     carry no active_votes, the observer's vote as observer_vote,
 #                     and otherwise equal hivemind's seven-argument output
 #   - embed-slice     embed-search in CI's slice configuration
@@ -892,24 +894,46 @@ end
 rollback;"
 }
 
-# In a rolled-back transaction: posts_similar's full posts on the stack's
+# A temp view of the full posts, for the observer aidev-witness, of every
+# endpoint that returns them: posts_similar for the sauce post, posts_search for
+# pasta (the sauce and pasta posts, in either order) and posts_by_ids(_query)
+# for the pasta and sauce posts. Each select from it calls the endpoints anew.
+FULL_POSTS_VIEW="
+create temp view full_posts as
+select * from (values
+    ('posts_similar', 3,
+     hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb),
+    ('posts_search', 2,
+     hivesense_endpoints.posts_search('a recipe for cooking pasta with homemade tomato sauce', 0, 2, 2, 'aidev-witness')::jsonb),
+    ('posts_by_ids', 2,
+     hivesense_endpoints.posts_by_ids('[{\"author\": \"aidev-cook\", \"permlink\": \"fresh-egg-pasta-with-tomato-basil-sauce\"},
+                                        {\"author\": \"aidev-chef\", \"permlink\": \"slow-simmered-tomato-sauce-for-pasta\"}]', 0, 'aidev-witness')::jsonb),
+    ('posts_by_ids_query', 2,
+     hivesense_endpoints.posts_by_ids_query('[{\"author\": \"aidev-cook\", \"permlink\": \"fresh-egg-pasta-with-tomato-basil-sauce\"},
+                                              {\"author\": \"aidev-chef\", \"permlink\": \"slow-simmered-tomato-sauce-for-pasta\"}]', 0, 'aidev-witness')::jsonb)
+) v(endpoint, full_count, posts);"
+
+# In a rolled-back transaction: the full posts of FULL_POSTS_VIEW on the stack's
 # hivemind (no _votes_mode yet) embed active_votes; then hivemind's
 # create_bridge_post_object is swapped for a stub of the nine-argument one,
-# which records the mode it is called with, and the same call must ask for
+# which records the mode it is called with, and the same calls must ask for
 # vote-free posts (_votes_mode 1, _top_votes 0) for the observer and return the
-# same posts, in the same order, with nothing else changed.
+# same posts, in the same order, with nothing else changed (posts_search's two
+# equally relevant posts are compared in either order).
 similar_votes_mode_checks() {
     psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "
 begin;
-create temp table embedded_votes on commit drop as
-select hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb as posts;
+$FULL_POSTS_VIEW
+create temp table embedded_votes on commit drop as select * from full_posts;
 do \$\$
 declare
-    __posts jsonb := (select posts from embedded_votes);
+    __row record;
 begin
-    assert jsonb_array_length(__posts) = 3, format('full similar posts: %s', __posts);
-    assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote') from jsonb_array_elements(__posts) p),
-        format('full similar posts without _votes_mode lack active_votes: %s', __posts);
+    for __row in select * from embedded_votes loop
+        assert jsonb_array_length(__row.posts) = __row.full_count, format('full %s posts: %s', __row.endpoint, __row.posts);
+        assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote') from jsonb_array_elements(__row.posts) p),
+            format('full %s posts without _votes_mode lack active_votes: %s', __row.endpoint, __row.posts);
+    end loop;
 end
 \$\$;
 alter function hivemind_postgrest_utilities.create_bridge_post_object(integer, record, integer, text[], boolean, boolean, jsonb)
@@ -927,18 +951,27 @@ end
 \$f\$;
 do \$\$
 declare
-    __before   jsonb := (select jsonb_agg(p - 'active_votes' order by o)
-                           from embedded_votes, jsonb_array_elements(posts) with ordinality e(p, o));
-    __posts    jsonb := hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb;
     __observer int := (select id from hivemind_app.hive_accounts where name = 'aidev-witness');
+    __row      record;
+    __before   jsonb;
+    __checked  int := 0;
 begin
-    assert (select bool_and(not p ? 'active_votes' and p->>'votes_mode' = '1' and p->>'top_votes' = '0'
-                            and (p->>'observer_id')::int = __observer)
-              from jsonb_array_elements(__posts) p),
-        format('full similar posts with _votes_mode are not vote-free for observer %s: %s', __observer, __posts);
-    assert (select jsonb_agg(p - 'votes_mode' - 'top_votes' - 'observer_id' order by o)
-              from jsonb_array_elements(__posts) with ordinality e(p, o)) = __before,
-        format('vote-free similar posts %s differ from %s beyond active_votes', __posts, __before);
+    for __row in select * from full_posts loop
+        __before := (select jsonb_agg(p - 'active_votes'
+                                      order by case when ev.endpoint = 'posts_search' then p->>'permlink' end, o)
+                       from embedded_votes ev, jsonb_array_elements(ev.posts) with ordinality e(p, o)
+                      where ev.endpoint = __row.endpoint);
+        assert (select bool_and(not p ? 'active_votes' and p->>'votes_mode' = '1' and p->>'top_votes' = '0'
+                                and (p->>'observer_id')::int = __observer)
+                  from jsonb_array_elements(__row.posts) p),
+            format('full %s posts with _votes_mode are not vote-free for observer %s: %s', __row.endpoint, __observer, __row.posts);
+        assert (select jsonb_agg(p - 'votes_mode' - 'top_votes' - 'observer_id'
+                                 order by case when __row.endpoint = 'posts_search' then p->>'permlink' end, o)
+                  from jsonb_array_elements(__row.posts) with ordinality e(p, o)) = __before,
+            format('vote-free %s posts %s differ from %s beyond active_votes', __row.endpoint, __row.posts, __before);
+        __checked := __checked + 1;
+    end loop;
+    assert __checked = 4, format('checked the full posts of %s endpoints, expected 4', __checked);
     raise notice 'similar votes mode checks: PASS';
 end
 \$\$;
@@ -953,10 +986,11 @@ embed_search() {
 VOTES_MODE_DB_HOST="${HIVESENSE_TEST_VOTES_MODE_DB_HOST:-haf-votes-mode}"
 
 # In a rolled-back transaction on the HAF whose hivemind is real, not a stub:
-# the observer (aidev-witness) has voted on the sauce post's best match (900105).
-# posts_similar's full posts must carry no active_votes, observer_vote with that
-# vote's rshares and percent (null on the posts the observer did not vote on),
-# and be otherwise equal, in the same order, to what hivemind's seven-argument
+# the observer (aidev-witness) has voted on the pasta post (900105), the sauce
+# post's best match. The full posts of every endpoint in FULL_POSTS_VIEW must
+# carry no active_votes, observer_vote with that vote's rshares and percent on
+# the pasta post (null on the posts the observer did not vote on), and be
+# otherwise equal, in the same order, to what hivemind's seven-argument
 # create_bridge_post_object (its default votes mode) builds for the same posts,
 # whose active_votes hold the observer's vote.
 similar_vote_free_checks() {
@@ -967,43 +1001,56 @@ insert into hivemind_app.hive_votes
     (post_id, voter_id, author_id, permlink_id, weight, rshares, vote_percent, last_update, block_num, is_effective)
 values (900105, 9101, 9105, 900105, 1000, 123456789, 7500, '2026-01-01 00:06:00', 106, true);
 set local session_replication_role = origin;
+$FULL_POSTS_VIEW
 do \$\$
 declare
     __observer   int := (select id from hivemind_app.hive_accounts where name = 'aidev-witness');
-    __posts      jsonb := hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3, 'aidev-witness')::jsonb;
+    __voted      text := 'fresh-egg-pasta-with-tomato-basil-sauce';
+    __row        record;
+    __posts      jsonb;
     __seven_args jsonb;
+    __checked    int := 0;
 begin
-    select jsonb_agg(hivemind_postgrest_utilities.create_bridge_post_object(__observer, fpv, 0, null, fpv.is_pinned, true)
-                     order by e.o)
-      into __seven_args
-      from jsonb_array_elements(__posts) with ordinality e(p, o)
-      join hivemind_app.hive_accounts ha on ha.name = e.p->>'author'
-      join hivemind_app.hive_permlink_data hpd on hpd.permlink = e.p->>'permlink'
-      join hivemind_app.hive_posts hp on hp.author_id = ha.id and hp.permlink_id = hpd.id
-     cross join lateral (select fv.*, fv.source as blacklists
-                           from hivemind_app.get_full_post_view_by_id(hp.id, __observer) fv) fpv;
-    assert jsonb_array_length(__posts) = 3 and jsonb_array_length(__seven_args) = 3
-           and __posts->0->>'permlink' = 'fresh-egg-pasta-with-tomato-basil-sauce',
-        format('full similar posts: %s', __posts);
-    assert (select bool_and(not p ? 'active_votes' and p ? 'observer_vote') from jsonb_array_elements(__posts) p),
-        format('full similar posts are not vote-free: %s', __posts);
-    assert __posts->0->'observer_vote' = '{\"rshares\": 123456789, \"percent\": 7500}'::jsonb,
-        format('observer_vote of the post the observer voted on: %s', __posts->0->'observer_vote');
-    assert (select bool_and(p->'observer_vote' = 'null'::jsonb) from jsonb_array_elements(__posts - 0) p),
-        format('observer_vote of the posts the observer did not vote on: %s', __posts);
-    assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote') from jsonb_array_elements(__seven_args) p)
-           and jsonb_path_exists(__seven_args->0->'active_votes', '\$[*] ? (@.voter == \"aidev-witness\")'),
-        format('the seven-argument posts do not embed the observer''s vote in active_votes: %s', __seven_args);
-    assert (select jsonb_agg(p - 'observer_vote' order by o) from jsonb_array_elements(__posts) with ordinality e(p, o))
-           = (select jsonb_agg(p - 'active_votes' order by o) from jsonb_array_elements(__seven_args) with ordinality e(p, o)),
-        format('vote-free similar posts %s differ from the seven-argument posts %s beyond the votes', __posts, __seven_args);
+    for __row in select * from full_posts loop
+        __posts := __row.posts;
+        select jsonb_agg(hivemind_postgrest_utilities.create_bridge_post_object(__observer, fpv, 0, null, fpv.is_pinned, true)
+                         order by e.o)
+          into __seven_args
+          from jsonb_array_elements(__posts) with ordinality e(p, o)
+          join hivemind_app.hive_accounts ha on ha.name = e.p->>'author'
+          join hivemind_app.hive_permlink_data hpd on hpd.permlink = e.p->>'permlink'
+          join hivemind_app.hive_posts hp on hp.author_id = ha.id and hp.permlink_id = hpd.id
+         cross join lateral (select fv.*, fv.source as blacklists
+                               from hivemind_app.get_full_post_view_by_id(hp.id, __observer) fv) fpv;
+        assert jsonb_array_length(__posts) = __row.full_count and jsonb_array_length(__seven_args) = __row.full_count
+               and jsonb_path_exists(__posts, '\$[*] ? (@.permlink == \$voted)', jsonb_build_object('voted', __voted))
+               and (__row.endpoint <> 'posts_similar' or __posts->0->>'permlink' = __voted),
+            format('full %s posts: %s', __row.endpoint, __posts);
+        assert (select bool_and(not p ? 'active_votes' and p ? 'observer_vote') from jsonb_array_elements(__posts) p),
+            format('full %s posts are not vote-free: %s', __row.endpoint, __posts);
+        assert (select bool_and(case when p->>'permlink' = __voted
+                                     then p->'observer_vote' = '{\"rshares\": 123456789, \"percent\": 7500}'::jsonb
+                                     else p->'observer_vote' = 'null'::jsonb end)
+                  from jsonb_array_elements(__posts) p),
+            format('observer_vote of the full %s posts (only %s voted on): %s', __row.endpoint, __voted, __posts);
+        assert (select bool_and(p ? 'active_votes' and not p ? 'observer_vote'
+                                and (p->>'permlink' <> __voted
+                                     or jsonb_path_exists(p->'active_votes', '\$[*] ? (@.voter == \"aidev-witness\")')))
+                  from jsonb_array_elements(__seven_args) p),
+            format('the seven-argument %s posts do not embed the observer''s vote in active_votes: %s', __row.endpoint, __seven_args);
+        assert (select jsonb_agg(p - 'observer_vote' order by o) from jsonb_array_elements(__posts) with ordinality e(p, o))
+               = (select jsonb_agg(p - 'active_votes' order by o) from jsonb_array_elements(__seven_args) with ordinality e(p, o)),
+            format('vote-free %s posts %s differ from the seven-argument posts %s beyond the votes', __row.endpoint, __posts, __seven_args);
+        __checked := __checked + 1;
+    end loop;
+    assert __checked = 4, format('checked the full posts of %s endpoints, expected 4', __checked);
     raise notice 'similar vote-free checks: PASS';
 end
 \$\$;
 rollback;"
 }
 
-# posts_similar against a hivemind that has _votes_mode: the stack's second HAF
+# The full-post endpoints against a hivemind that has _votes_mode: the stack's second HAF
 # (haf-votes-mode), installed and embedded as embed-search does it on `haf`. It
 # installs first: uninstall_app.sh fails on a database hivesense never had.
 votes_mode() (
