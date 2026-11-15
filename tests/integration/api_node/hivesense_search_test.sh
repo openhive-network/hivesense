@@ -368,9 +368,12 @@ else
   # -- a naive version passes the check above -- so, inside the rolled-back
   # transaction, every hive_posts index containing author_id is dropped,
   # seq scans and sorts are penalised, and pgvector's iterative scan is
-  # capped at one tuple (with iterative scan the index would walk this whole
-  # small graph and answer exactly again). The author branch stays exact (it
-  # just scans hive_posts for the ids); the ANN path cannot.
+  # turned off (with iterative scan the index would walk this whole small
+  # graph and answer exactly again). The search sets iterative scan in its
+  # own SET clause, which overrides any session value, so it is turned off
+  # on the function itself (ALTER FUNCTION, undone by the rollback); the
+  # index then yields only the ef_search = 1 pool. The author branch stays
+  # exact (it just scans hive_posts for the ids); the ANN path cannot.
   force_ann="UPDATE hivesense_app.hivesense_app_status SET ef_floor = 1, ef_ceiling = 1 WHERE id = 1;
     DO \$\$
     DECLARE r record;
@@ -388,9 +391,10 @@ else
         END IF;
       END LOOP;
     END \$\$;
+    ALTER FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(public.vector, int, int, int, int, int, int)
+      SET hnsw.iterative_scan = off;
     SET LOCAL enable_seqscan = off;
-    SET LOCAL enable_sort = off;
-    SET LOCAL hnsw.max_scan_tuples = 1"
+    SET LOCAL enable_sort = off"
 
   # The forcing has to work, or the check proves nothing: under it the
   # unfiltered search must come back with at most one post.
@@ -655,9 +659,10 @@ else
         END IF;
       END LOOP;
     END \$\$;
+    ALTER FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(public.vector, int, int, int, int, int, int)
+      SET hnsw.iterative_scan = off;
     SET LOCAL enable_seqscan = off;
-    SET LOCAL enable_sort = off;
-    SET LOCAL hnsw.max_scan_tuples = 1"
+    SET LOCAL enable_sort = off"
   forced=$(query_database_rolled_back "$force_window" \
     "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 5)")
   if ! is_number "$forced" || [ "$forced" -gt 1 ]; then
