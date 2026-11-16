@@ -75,15 +75,13 @@ END;
 $$;
 
 /* WHERE-clause fragment (starting with AND) restricting the ANN candidates
- * of table alias _alias: the excluded post, the post_data lookup only when
- * a token threshold can remove a row, and the tag (#90) when one is given.
- * Liveness is checked separately, by live_post_filter. */
-DROP FUNCTION IF EXISTS hivesense_app.ann_candidate_filter(text, int);
+ * of table alias _alias: the excluded post, and the post_data lookup only when
+ * a token threshold can remove a row. Liveness is checked separately, by
+ * live_post_filter. */
 DROP FUNCTION IF EXISTS hivesense_app.ann_candidate_filter(text, int, int);
 CREATE OR REPLACE FUNCTION hivesense_app.ann_candidate_filter(
     _alias           text,
-    _exclude_post_id int,
-    _tag_id          int DEFAULT NULL
+    _exclude_post_id int
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -107,13 +105,6 @@ BEGIN
 
     IF _exclude_post_id IS NOT NULL THEN
         __filter := __filter || format(' AND %I.post_id <> %s', _alias, _exclude_post_id);
-    END IF;
-
-    IF _tag_id IS NOT NULL THEN
-        __filter := __filter || format(
-          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt'
-          ' WHERE pt.post_id = %1$I.post_id AND pt.tag_id = %2$s)',
-          _alias, _tag_id);
     END IF;
 
     RETURN __filter;
@@ -179,9 +170,55 @@ BEGIN
 END;
 $$;
 
+/* WHERE-clause fragment (starting with AND) for the iterative scan of a tag
+ * too big to rank exactly (#90): keeps the rows of alias _alias whose post
+ * carries _tag_id (when given), is live, is not by an author _observer_id
+ * mutes, and passes _hp_filter (post_filter_clause on hive_posts hp). Each
+ * check is a scalar subquery with LIMIT 1, not EXISTS: the scan's cursor is
+ * planned for the whole table, and the planner then turns an EXISTS into a
+ * hashed subplan built over every matching row -- measured 31-65 s for a
+ * hive_posts probe on testapi, where one index probe per row read costs
+ * well under a second. The tag probe (index only) runs first, so rows of
+ * other tags never reach hive_posts. */
+DROP FUNCTION IF EXISTS hivesense_app.filter_scan_clause(text, int, int, text);
+CREATE OR REPLACE FUNCTION hivesense_app.filter_scan_clause(
+    _alias       text,
+    _observer_id int,
+    _tag_id      int,
+    _hp_filter   text
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __filter text := '';
+BEGIN
+    IF _tag_id IS NOT NULL THEN
+        __filter := format(
+          ' AND COALESCE((SELECT true FROM hivemind_app.hive_post_tags pt'
+          ' WHERE pt.post_id = %1$I.post_id AND pt.tag_id = %2$s LIMIT 1), false)',
+          _alias, _tag_id);
+    END IF;
+    IF NOT hivesense_app.is_anonymous_observer(_observer_id) AND EXISTS (
+           SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
+            WHERE m.observer_id = _observer_id) THEN
+        _hp_filter := format(
+          ' AND NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m'
+          ' WHERE m.observer_id = %s AND m.muted_id = hp.author_id)', _observer_id)
+          || _hp_filter;
+    END IF;
+    RETURN __filter || format(
+      ' AND COALESCE((SELECT true FROM hivemind_app.hive_posts hp'
+      ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0%2$s LIMIT 1), false)',
+      _alias, _hp_filter);
+END;
+$$;
+
 /* WHERE-clause fragment (starting with AND) keeping only the hive_posts rows
  * of alias _alias that carry the tag, are in the community and are in the
  * category (#90); each NULL argument adds nothing. */
+DROP FUNCTION IF EXISTS hivesense_app.post_filter_clause(text, int, int, int);
 CREATE OR REPLACE FUNCTION hivesense_app.post_filter_clause(
     _alias        text,
     _tag_id       int,
@@ -402,8 +439,8 @@ DECLARE
     narrow_sql    text;     -- keeps the live, unmuted, matching posts of a list
     driver_tag    int;      -- tag whose index lists the candidates
     __max_exact   int;      -- max_filter_exact_posts
-    ann_tag       int;      -- set: add the vector index's posts of this tag
-    ann_posts     int[]    := '{}';
+    filter_scan   boolean := false;  -- the iterative scan adds matching posts
+    scan_posts    int[]    := '{}';
 
     /* ------ block-range (time window) filter ------ */
     has_window    boolean := _first_block IS NOT NULL OR _last_block IS NOT NULL;
@@ -520,8 +557,9 @@ BEGIN
      *  even at 100,000 index rows read. Exact ranking costs about 10 us a
      *  chunk when cached but 0.3 ms cold (33k chunks: 0.3 s vs 10 s), so a
      *  tag of more than max_filter_exact_posts posts ranks exactly only its
-     *  newest that many, plus the posts of the tag that the iterative scan
-     *  below finds nearest the query; a big tag fills the page from both.
+     *  newest that many, plus the posts passing every filter that the
+     *  iterative scan below finds nearest the query; a big tag fills the
+     *  page from both.
      *
      *  Both sit ahead of the exhaustive debug branch so that header can
      *  never silently drop a filter; these branches are already exact.
@@ -564,7 +602,7 @@ BEGIN
         END IF;
 
     ELSIF has_filter AND NOT has_window THEN
-        SELECT GREATEST(max_filter_exact_posts, 0)
+        SELECT LEAST(GREATEST(max_filter_exact_posts, 0), 2000000000)
           INTO __max_exact
           FROM hivesense_app.hivesense_app_status
          WHERE id = 1;
@@ -601,21 +639,28 @@ BEGIN
 
         -- Its newest posts, by hivemind's (tag_id, post_id DESC) index. A
         -- tag with more than __max_exact of them keeps only those, and the
-        -- iterative scan below adds the vector index's nearest posts of
-        -- the tag, so the page still fills for any query.
-        SELECT array_agg(n.post_id ORDER BY n.post_id DESC)
-          INTO exact_post_ids
-          FROM (SELECT pt.post_id
-                  FROM hivemind_app.hive_post_tags pt
-                 WHERE pt.tag_id = driver_tag
-                 ORDER BY pt.post_id DESC
-                 LIMIT __max_exact + 1) n;
-        IF exact_post_ids IS NULL THEN
-            RETURN;
-        END IF;
-        IF cardinality(exact_post_ids) > __max_exact THEN
-            exact_post_ids := exact_post_ids[1:__max_exact];
-            ann_tag := driver_tag;
+        -- iterative scan below adds the posts nearest the query that pass
+        -- every filter, so the page still fills for any query. Without a
+        -- driver (a community or category name that is no tag) the scan
+        -- alone finds them.
+        IF driver_tag IS NULL THEN
+            exact_post_ids := '{}';
+            filter_scan := true;
+        ELSE
+            SELECT array_agg(n.post_id ORDER BY n.post_id DESC)
+              INTO exact_post_ids
+              FROM (SELECT pt.post_id
+                      FROM hivemind_app.hive_post_tags pt
+                     WHERE pt.tag_id = driver_tag
+                     ORDER BY pt.post_id DESC
+                     LIMIT __max_exact + 1) n;
+            IF exact_post_ids IS NULL THEN
+                RETURN;
+            END IF;
+            IF cardinality(exact_post_ids) > __max_exact THEN
+                exact_post_ids := exact_post_ids[1:__max_exact];
+                filter_scan := true;
+            END IF;
         END IF;
     END IF;
 
@@ -629,7 +674,7 @@ BEGIN
           filter_sql);
     END IF;
 
-    IF exact_post_ids IS NOT NULL AND ann_tag IS NULL THEN
+    IF exact_post_ids IS NOT NULL AND NOT filter_scan THEN
         IF has_filter THEN
             EXECUTE narrow_sql INTO exact_post_ids USING exact_post_ids, _observer_id, __anonymous;
         END IF;
@@ -695,9 +740,10 @@ BEGIN
     END IF;
 
     /* ────────────────────────────────────────────────────────────
-     *  EXHAUSTIVE debug branch: brute force over posts_vectors
+     *  EXHAUSTIVE debug branch: brute force over posts_vectors (not for a
+     *  filter scan, #90: it would drop the filter)
      * ────────────────────────────────────────────────────────────*/
-    IF exhaustive THEN
+    IF exhaustive AND NOT filter_scan THEN
         -- note: this branch is only used for benchmarking debugging
         -- and will be very slow (20s+)
         ----------------------------------------------------------------
@@ -810,11 +856,11 @@ BEGIN
     __max_fetch := GREATEST(__ef_ceiling, exploratory_factor, 100) * 10;
     -- A big tag (#90) reads 4x as far, 20,000 rows at the default ceiling
     -- (pgvector's own default max_scan_tuples): a tag of 0.4% of the posts
-    -- has ~80 posts among them. Its rows are cheap (ids and a tag probe,
-    -- no re-rank). Measured on testapi, posts of the exact top 100 found
-    -- for an on-topic query in a 68k-post community: 28 at 1x, 37 at 4x,
-    -- 45 at 10x; warm cost 0.2-0.4 s, 0.35-0.6 s, 0.6-0.9 s.
-    IF ann_tag IS NOT NULL THEN
+    -- has ~80 posts among them. Its rows are cheap (an id and one hive_posts
+    -- probe, no re-rank). Measured on testapi, posts of the exact top 100
+    -- found for an on-topic query in a 68k-post community: 28 at 1x, 37 at
+    -- 4x, 45 at 10x; warm cost 0.2-0.4 s, 0.35-0.6 s, 0.6-0.9 s.
+    IF filter_scan THEN
         __max_fetch := __max_fetch * 4;
     END IF;
     PERFORM set_config('hnsw.max_scan_tuples', __max_fetch::text, true);
@@ -834,8 +880,11 @@ BEGIN
               FROM hivesense_app.posts_vectors pv
              ORDER BY %s
         $q$,
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, ann_tag),  -- %s
-          ann_tag IS NOT NULL,          -- %L  tag scan: ids only, no re-rank
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id)
+            || CASE WHEN filter_scan  -- a big tag (#90): only posts it may return
+                    THEN hivesense_app.filter_scan_clause('pv', _observer_id, driver_tag, filter_sql)
+                    ELSE '' END,      -- %s
+          filter_scan,                  -- %L  ids only, no re-rank
           dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
@@ -854,8 +903,11 @@ BEGIN
               FROM hivesense_app.posts_vectors_reduced pr
              ORDER BY %s
         $q$,
-          hivesense_app.ann_candidate_filter('pr', _exclude_post_id, ann_tag),  -- %s
-          ann_tag IS NOT NULL,          -- %L  tag scan: ids only, no re-rank
+          hivesense_app.ann_candidate_filter('pr', _exclude_post_id)
+            || CASE WHEN filter_scan  -- a big tag (#90): only posts it may return
+                    THEN hivesense_app.filter_scan_clause('pr', _observer_id, driver_tag, filter_sql)
+                    ELSE '' END,      -- %s
+          filter_scan,                  -- %L  ids only, no re-rank
           dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
@@ -869,34 +921,38 @@ BEGIN
               FROM hivesense_app.posts_vectors pv
              ORDER BY sim
         $q$,
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, ann_tag),  -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id)
+            || CASE WHEN filter_scan  -- a big tag (#90): only posts it may return
+                    THEN hivesense_app.filter_scan_clause('pv', _observer_id, driver_tag, filter_sql)
+                    ELSE '' END,      -- %s
           dist_full                     -- %s  distance expr
         )
         USING _embedding;
     END IF;
     PERFORM set_config('enable_seqscan', __seqscan, true);
 
-    -- A tag too big to rank exactly (#90): the scan, restricted to the tag,
-    -- lists up to _limit of its posts older than the newest ones (those are
-    -- listed already) nearest the query, within the cap; they are ranked
-    -- exactly together with the newest. It reads ids only: the slice and
-    -- PCA variants skip the full-vector distance, a read of the whole
-    -- embedding per row.
-    IF ann_tag IS NOT NULL THEN
+    -- A tag too big to rank exactly (#90): the scan, restricted to posts
+    -- that are live, unmuted and pass every filter, lists up to _limit of
+    -- them older than the newest ones (those are listed already) nearest the
+    -- query, within the cap; they are ranked exactly together with the
+    -- newest. It reads ids only: the slice and PCA variants skip the
+    -- full-vector distance, a read of the whole embedding per row.
+    IF filter_scan THEN
         i := COALESCE(exact_post_ids[cardinality(exact_post_ids)], 2147483647);  -- oldest listed
         LOOP
-            EXIT WHEN cardinality(ann_posts) >= _limit OR fetched >= __max_fetch;
+            EXIT WHEN cardinality(scan_posts) >= _limit OR fetched >= __max_fetch;
             FETCH ann_cursor INTO cand;
             EXIT WHEN NOT FOUND;
             fetched := fetched + 1;
-            IF cand.ok AND cand.post_id < i AND cand.post_id <> ALL(ann_posts) THEN
-                ann_posts := ann_posts || cand.post_id;
+            IF cand.ok AND cand.post_id < i AND cand.post_id <> ALL(scan_posts) THEN
+                scan_posts := scan_posts || cand.post_id;
             END IF;
         END LOOP;
         CLOSE ann_cursor;
 
-        exact_post_ids := exact_post_ids || ann_posts;
+        -- the newest posts still need the same checks
         EXECUTE narrow_sql INTO exact_post_ids USING exact_post_ids, _observer_id, __anonymous;
+        exact_post_ids := COALESCE(exact_post_ids, '{}') || scan_posts;
         RETURN QUERY
         SELECT * FROM hivesense_app.rank_posts_exactly(_embedding, exact_post_ids, _limit, _exclude_post_id);
         RETURN;

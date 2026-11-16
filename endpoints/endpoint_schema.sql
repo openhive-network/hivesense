@@ -169,7 +169,7 @@ DO $__$
               "type": "string",
               "default": ""
             },
-            "description": "Only return posts carrying this tag, e.g. `photography` (as hivemind stores it:\nlower case, without `#`).\n\nA tag of at most a server-configured number of posts (20000 by default) is ranked\nexactly across all of its embedded posts. A larger tag is ranked exactly across\nits newest that many posts together with those of its posts the vector index finds\nnearest the query, so the page always fills, but an older close match can be\nmissed. With `author` or `from-block`/`to-block` the ranking is exact.\nAn unknown tag returns an empty array. Combines with all other filters.\n"
+            "description": "Only return posts carrying this tag, e.g. `photography` (case and a leading `#`\nare ignored).\n\nA tag of at most a server-configured number of posts (20000 by default) is ranked\nexactly across all of its embedded posts. A larger tag is ranked exactly across\nits newest that many posts together with the matching posts the vector index finds\nnearest the query: the page fills unless matches are very sparse among them, and\nan older close match can be missed. With `author` or `from-block`/`to-block` the\nranking is exact. An unknown tag returns an empty array. Combines with all other\nfilters (every result passes all of them).\n"
           },
           {
             "in": "query",
@@ -179,7 +179,7 @@ DO $__$
               "type": "string",
               "default": ""
             },
-            "description": "Only return posts in this community, given by its name, e.g. `hive-163772`.\nRanked like `tag`, with the community name as the tag: community posts carry it\nas their category, so the rare community post without it as a tag is not found.\nAn unknown community returns an empty array.\n"
+            "description": "Only return posts in this community, given by its name, e.g. `hive-163772`.\nRanked like `tag`, with the community name as the tag (community posts carry it\nas their category); without `author` or `from-block`/`to-block`, the rare community\npost that lacks it as a tag can be missed. An unknown community returns an empty\narray.\n"
           },
           {
             "in": "query",
@@ -189,7 +189,7 @@ DO $__$
               "type": "string",
               "default": ""
             },
-            "description": "Only return posts in this category: the category hivemind stores for a post, which\nis its first tag, or its community name in a community. Ranked like `tag`, with the\ncategory as the tag; the rare post without its category among its tags is not\nfound. An unknown category returns an empty array.\n"
+            "description": "Only return posts in this category: the category hivemind stores for a post, which\nis its first tag, or its community name in a community. Ranked like `tag`, with the\ncategory as the tag; without `author` or `from-block`/`to-block`, the rare post\nthat lacks its category among its tags can be missed. An unknown category returns\nan empty array.\n"
           }
         ],
         "responses": {
