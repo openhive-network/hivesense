@@ -183,6 +183,7 @@ BEGIN
           ' WHERE m.observer_id = %s AND m.muted_id = hp.author_id)', _observer_id)
           || _hp_filter;
     END IF;
+    RETURN __filter;
     RETURN __filter || format(
       ' AND COALESCE((SELECT true FROM hivemind_app.hive_posts hp'
       ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0%2$s LIMIT 1), false)',
