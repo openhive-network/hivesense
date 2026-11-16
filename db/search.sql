@@ -576,7 +576,7 @@ BEGIN
         END IF;
 
     ELSIF has_filter AND NOT has_window THEN
-        SELECT LEAST(GREATEST(max_filter_exact_posts, 0), 2000000000)
+        SELECT 0
           INTO __max_exact
           FROM hivesense_app.hivesense_app_status
          WHERE id = 1;
