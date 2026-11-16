@@ -160,6 +160,36 @@ DO $__$
               "default": null
             },
             "description": "Only return posts created at or before this point: a block number (inclusive), or a\ntimestamp in the format YYYY-MM-DD HH:MI:SS, which HAF converts to the last block\ncreated before it (a block created exactly at that second is not included).\nWithout it, or with a timestamp after the newest block, the range runs to the\nnewest post.\n"
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": ""
+            },
+            "description": "Only return posts carrying this tag, e.g. `photography` (as hivemind stores it:\nlower case, without `#`).\n\nA tag of at most a server-configured number of posts (20000 by default) is ranked\nexactly across all of its embedded posts. A larger tag is ranked exactly across\nits newest that many posts together with those of its posts the vector index finds\nnearest the query, so the page always fills, but an older close match can be\nmissed. With `author` or `from-block`/`to-block` the ranking is exact.\nAn unknown tag returns an empty array. Combines with all other filters.\n"
+          },
+          {
+            "in": "query",
+            "name": "community",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": ""
+            },
+            "description": "Only return posts in this community, given by its name, e.g. `hive-163772`.\nRanked like `tag`, with the community name as the tag: community posts carry it\nas their category, so the rare community post without it as a tag is not found.\nAn unknown community returns an empty array.\n"
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": ""
+            },
+            "description": "Only return posts in this category: the category hivemind stores for a post, which\nis its first tag, or its community name in a community. Ranked like `tag`, with the\ncategory as the tag; the rare post without its category among its tags is not\nfound. An unknown category returns an empty array.\n"
           }
         ],
         "responses": {

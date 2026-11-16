@@ -202,6 +202,8 @@ ALTER TABLE hivesense_app_status
   DROP COLUMN IF EXISTS deleted_posts_purged;
 ALTER TABLE hivesense_app_status
   ADD COLUMN IF NOT EXISTS max_window_chunks INT NOT NULL DEFAULT 300000; -- /posts/search from-block/to-block: largest window ranked (exactly), in chunks
+ALTER TABLE hivesense_app_status
+  ADD COLUMN IF NOT EXISTS max_filter_exact_posts INT NOT NULL DEFAULT 20000; -- /posts/search tag/community/category: largest tag ranked exactly; a larger one ranks its newest this many posts plus the vector index's matches
 
 INSERT INTO hivesense_app_status
 (

@@ -75,13 +75,15 @@ END;
 $$;
 
 /* WHERE-clause fragment (starting with AND) restricting the ANN candidates
- * of table alias _alias: the excluded post, and the post_data lookup only when
- * a token threshold can remove a row. Liveness is checked separately, by
- * live_post_filter. */
+ * of table alias _alias: the excluded post, the post_data lookup only when
+ * a token threshold can remove a row, and the tag (#90) when one is given.
+ * Liveness is checked separately, by live_post_filter. */
+DROP FUNCTION IF EXISTS hivesense_app.ann_candidate_filter(text, int);
 DROP FUNCTION IF EXISTS hivesense_app.ann_candidate_filter(text, int, int);
 CREATE OR REPLACE FUNCTION hivesense_app.ann_candidate_filter(
     _alias           text,
-    _exclude_post_id int
+    _exclude_post_id int,
+    _tag_id          int DEFAULT NULL
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -105,6 +107,13 @@ BEGIN
 
     IF _exclude_post_id IS NOT NULL THEN
         __filter := __filter || format(' AND %I.post_id <> %s', _alias, _exclude_post_id);
+    END IF;
+
+    IF _tag_id IS NOT NULL THEN
+        __filter := __filter || format(
+          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt'
+          ' WHERE pt.post_id = %1$I.post_id AND pt.tag_id = %2$s)',
+          _alias, _tag_id);
     END IF;
 
     RETURN __filter;
@@ -142,6 +151,38 @@ BEGIN
       ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp'
       ' WHERE hp.id = %1$I.post_id AND hp.counter_deleted = 0)',
       _alias);
+END;
+$$;
+
+/* WHERE-clause fragment (starting with AND) keeping only the hive_posts rows
+ * of alias _alias that carry the tag, are in the community and are in the
+ * category (#90); each NULL argument adds nothing. */
+CREATE OR REPLACE FUNCTION hivesense_app.post_filter_clause(
+    _alias        text,
+    _tag_id       int,
+    _community_id int,
+    _category_id  int
+)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __filter text := '';
+BEGIN
+    IF _tag_id IS NOT NULL THEN
+        __filter := __filter || format(
+          ' AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt'
+          ' WHERE pt.post_id = %1$I.id AND pt.tag_id = %2$s)',
+          _alias, _tag_id);
+    END IF;
+    IF _community_id IS NOT NULL THEN
+        __filter := __filter || format(' AND %I.community_id = %s', _alias, _community_id);
+    END IF;
+    IF _category_id IS NOT NULL THEN
+        __filter := __filter || format(' AND %I.category_id = %s', _alias, _category_id);
+    END IF;
+    RETURN __filter;
 END;
 $$;
 
@@ -209,6 +250,68 @@ END;
 $$;
 
 /* ────────────────────────────────────────────────────────────────
+ * 1c. Exact ranking of a list of posts (author #47, tag #90)
+ *
+ *  The distance of every chunk of every listed post; each post ranks by
+ *  its best chunk. The caller passes only posts that may be returned
+ *  (live, unmuted, matching its filters); the token threshold and the
+ *  excluded post are applied here. The query orders chunks by post_id
+ *  first (for DISTINCT ON) and by distance only after that, so no plan can
+ *  serve it from an index-ordered vector scan.
+ *
+ *  The ids go in as a bound array, not a join: EXECUTE plans with the real
+ *  value, so the planner sees the true row count. Behind a CTE, prolific
+ *  commenters were misestimated at ~500k rows and the plan seq-scanned all
+ *  of posts_vectors (seconds instead of milliseconds).
+ * ────────────────────────────────────────────────────────────────*/
+CREATE OR REPLACE FUNCTION hivesense_app.rank_posts_exactly(
+    _embedding       public.vector,
+    _post_ids        int[],
+    _limit           int,
+    _exclude_post_id int
+)
+RETURNS SETOF hivesense_app.similar_post_result
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+DECLARE
+    __min_tokens int;
+BEGIN
+    SELECT min_token_search_threshold
+      INTO __min_tokens
+      FROM hivesense_app.hivesense_app_status
+     WHERE id = 1;
+
+    RETURN QUERY EXECUTE format($q$
+        WITH best_chunk AS (
+            SELECT DISTINCT ON (pv.post_id)
+                   pv.post_id,
+                   pv.chunk_number,
+                   (pv.embedding <=> $1)::float4 AS sim
+              FROM hivesense_app.posts_vectors pv
+              JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
+             WHERE pv.post_id = ANY($3)
+               AND (%L OR pd.number_of_tokens >= %s)
+               AND ($2 IS NULL OR pv.post_id <> $2)
+             ORDER BY pv.post_id, sim
+        )
+        SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
+               sim::real AS similarity,
+               post_id,
+               chunk_number
+          FROM best_chunk
+         ORDER BY sim, post_id
+         LIMIT %s
+    $q$,
+      (__min_tokens = 0),           -- %L  token filter off?
+      __min_tokens,                 -- %s
+      _limit                        -- %s
+    )
+    USING _embedding, _exclude_post_id, _post_ids;
+END;
+$$;
+
+/* ────────────────────────────────────────────────────────────────
  * 2.  One-shot nearest-posts function
  * ────────────────────────────────────────────────────────────────*/
 -- The SET clauses of this function and of the author search name pgvector
@@ -227,7 +330,10 @@ CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_s
     _observer_id     int     DEFAULT 0,
     _author_id       int     DEFAULT NULL, -- restrict to one author's posts (#47)
     _first_block     int     DEFAULT NULL, -- restrict to posts created in blocks
-    _last_block      int     DEFAULT NULL  --   [_first_block, _last_block] (#13); NULL = open end
+    _last_block      int     DEFAULT NULL, --   [_first_block, _last_block] (#13); NULL = open end
+    _tag_id          int     DEFAULT NULL, -- restrict to posts carrying this tag (#90),
+    _community_id    int     DEFAULT NULL, --   in this community
+    _category_id     int     DEFAULT NULL  --   and in this category
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -261,7 +367,17 @@ DECLARE
     /* ───────── misc ───────── */
     __min_tokens int;
     __ef_ceiling int;
-    author_post_ids int[];  -- author filter: that author's live root posts
+    exact_post_ids int[];   -- author/tag filter: the posts ranked exactly
+
+    /* ------ tag / community / category filter (#90) ------ */
+    has_filter    boolean := COALESCE(_tag_id, _community_id, _category_id) IS NOT NULL;
+    -- their predicates on hive_posts hp ('' without a filter)
+    filter_sql    text    := hivesense_app.post_filter_clause('hp', _tag_id, _community_id, _category_id);
+    narrow_sql    text;     -- keeps the live, unmuted, matching posts of a list
+    driver_tag    int;      -- tag whose index lists the candidates
+    __max_exact   int;      -- max_filter_exact_posts
+    ann_tag       int;      -- set: add the vector index's posts of this tag
+    ann_posts     int[]    := '{}';
 
     /* ------ block-range (time window) filter ------ */
     has_window    boolean := _first_block IS NOT NULL OR _last_block IS NOT NULL;
@@ -369,12 +485,20 @@ BEGIN
      *  179 embedded chunks, and still 0 rows with iterative scan, which
      *  gave up after 12-14 s at its 20,000-tuple cap.
      *  Instead: collect the author's post ids, then compute the distance
-     *  for every one of their chunks. The query orders chunks by post_id
-     *  first (for DISTINCT ON) and by distance only after that, so no plan
-     *  can serve it from an index-ordered vector scan.
+     *  for every one of their chunks (rank_posts_exactly).
      *
-     *  It sits ahead of the exhaustive debug branch so that header can
-     *  never silently drop the filter; this branch is already exact.
+     *  TAG / COMMUNITY / CATEGORY filter (#90) without an author or a
+     *  block range (those already rank exactly and just apply it too):
+     *  the same, over the posts of the tag, for the same reason -- a tag
+     *  holding 0.4% of the posts got 6 of 100 posts from "ANN + WHERE tag"
+     *  even at 100,000 index rows read. Exact ranking costs about 10 us a
+     *  chunk when cached but 0.3 ms cold (33k chunks: 0.3 s vs 10 s), so a
+     *  tag of more than max_filter_exact_posts posts ranks exactly only its
+     *  newest that many, plus the posts of the tag that the iterative scan
+     *  below finds nearest the query; a big tag fills the page from both.
+     *
+     *  Both sit ahead of the exhaustive debug branch so that header can
+     *  never silently drop a filter; these branches are already exact.
      * ────────────────────────────────────────────────────────────*/
     IF _author_id IS NOT NULL THEN
         -- A muted author yields nothing, as in the unfiltered search.
@@ -394,7 +518,7 @@ BEGIN
         -- keeps its index-only scan (block_num_created is not in that index).
         IF has_window THEN
             SELECT array_agg(hp.id)
-              INTO author_post_ids
+              INTO exact_post_ids
               FROM hivemind_app.hive_posts hp
              WHERE hp.author_id = _author_id
                AND hp.depth = 0
@@ -402,47 +526,89 @@ BEGIN
                AND hp.block_num_created BETWEEN first_blk AND last_blk;
         ELSE
             SELECT array_agg(hp.id)
-              INTO author_post_ids
+              INTO exact_post_ids
               FROM hivemind_app.hive_posts hp
              WHERE hp.author_id = _author_id
                AND hp.depth = 0
                AND hp.counter_deleted = 0;
         END IF;
 
-        IF author_post_ids IS NULL THEN
+        IF exact_post_ids IS NULL THEN
             RETURN;
         END IF;
 
-        -- The ids go in as a bound array, not a join: EXECUTE plans with the
-        -- real value, so the planner sees the true row count. Behind a CTE,
-        -- prolific commenters were misestimated at ~500k rows and the plan
-        -- seq-scanned all of posts_vectors (seconds instead of milliseconds).
-        RETURN QUERY EXECUTE format($q$
-            WITH best_chunk AS (
-                SELECT DISTINCT ON (pv.post_id)
-                       pv.post_id,
-                       pv.chunk_number,
-                       (pv.embedding <=> $1)::float4 AS sim
-                  FROM hivesense_app.posts_vectors pv
-                  JOIN hivesense_app.post_data pd ON pd.post_id = pv.post_id
-                 WHERE pv.post_id = ANY($3)
-                   AND (%L OR pd.number_of_tokens >= %s)
-                   AND ($2 IS NULL OR pv.post_id <> $2)
-                 ORDER BY pv.post_id, sim
-            )
-            SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
-                   sim::real AS similarity,
-                   post_id,
-                   chunk_number
-              FROM best_chunk
-             ORDER BY sim, post_id
-             LIMIT %s
-        $q$,
-          (__min_tokens = 0),           -- %L  token filter off?
-          __min_tokens,                 -- %s
-          _limit                        -- %s
-        )
-        USING _embedding, _exclude_post_id, author_post_ids;
+    ELSIF has_filter AND NOT has_window THEN
+        SELECT GREATEST(max_filter_exact_posts, 0)
+          INTO __max_exact
+          FROM hivesense_app.hivesense_app_status
+         WHERE id = 1;
+        -- the exhaustive debug header ranks every post of the tag exactly
+        IF exhaustive THEN
+            __max_exact := 2000000000;
+        END IF;
+
+        -- The candidates come from the smallest of the tags that every
+        -- result must carry: the tag itself, the community's name and the
+        -- category's name (as tags). Communities and categories have no
+        -- usable hivemind index, but a post carries its category, and a
+        -- community post its community's name, as a tag (measured on
+        -- testapi: 19,987 of 20,000 posts, and 15,469 of 15,481 community
+        -- posts; the rest are not found).
+        SELECT t.id
+          INTO driver_tag
+          FROM (VALUES (_tag_id),
+                       ((SELECT td.id
+                           FROM hivemind_app.hive_communities c
+                           JOIN hivemind_app.hive_tag_data td ON td.tag = c.name
+                          WHERE c.id = _community_id)),
+                       ((SELECT td.id
+                           FROM hivemind_app.hive_category_data cd
+                           JOIN hivemind_app.hive_tag_data td ON td.tag = cd.category
+                          WHERE cd.id = _category_id))) AS t(id)
+         WHERE t.id IS NOT NULL
+         ORDER BY (SELECT count(*)
+                     FROM (SELECT 1 FROM hivemind_app.hive_post_tags pt
+                            WHERE pt.tag_id = t.id
+                            LIMIT __max_exact + 1) n),
+                  t.id
+         LIMIT 1;
+
+        -- Its newest posts, by hivemind's (tag_id, post_id DESC) index. A
+        -- tag with more than __max_exact of them keeps only those, and the
+        -- iterative scan below adds the vector index's nearest posts of
+        -- the tag, so the page still fills for any query.
+        SELECT array_agg(n.post_id ORDER BY n.post_id DESC)
+          INTO exact_post_ids
+          FROM (SELECT pt.post_id
+                  FROM hivemind_app.hive_post_tags pt
+                 WHERE pt.tag_id = driver_tag
+                 ORDER BY pt.post_id DESC
+                 LIMIT __max_exact + 1) n;
+        IF exact_post_ids IS NULL THEN
+            RETURN;
+        END IF;
+        IF cardinality(exact_post_ids) > __max_exact THEN
+            exact_post_ids := exact_post_ids[1:__max_exact];
+            ann_tag := driver_tag;
+        END IF;
+    END IF;
+
+    IF has_filter THEN
+        -- keeps the listed posts that are live, unmuted and match every filter
+        narrow_sql := format(
+          'SELECT array_agg(hp.id) FROM hivemind_app.hive_posts hp'
+          ' WHERE hp.id = ANY($1) AND hp.counter_deleted = 0'
+          ' AND ($2 = 0 OR NOT EXISTS (SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m'
+          ' WHERE m.observer_id = $2 AND m.muted_id = hp.author_id))%s',
+          filter_sql);
+    END IF;
+
+    IF exact_post_ids IS NOT NULL AND ann_tag IS NULL THEN
+        IF has_filter THEN
+            EXECUTE narrow_sql INTO exact_post_ids USING exact_post_ids, _observer_id;
+        END IF;
+        RETURN QUERY
+        SELECT * FROM hivesense_app.rank_posts_exactly(_embedding, exact_post_ids, _limit, _exclude_post_id);
         RETURN;
     END IF;
 
@@ -457,7 +623,8 @@ BEGIN
      *  window (and refuses an oversized one); the query re-checks the
      *  creation block exactly. The id bounds are applied to hive_posts too,
      *  so the join cannot be driven from the block index over every comment
-     *  in the window.
+     *  in the window. A tag/community/category filter (#90) is one more
+     *  predicate on the same rows.
      * ────────────────────────────────────────────────────────────*/
     IF has_window THEN
         SELECT b.lo, b.hi INTO window_lo, window_hi
@@ -481,7 +648,7 @@ BEGIN
                    AND ($7 = 0 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
                           WHERE m.observer_id = $7
-                            AND m.muted_id    = hp.author_id))
+                            AND m.muted_id    = hp.author_id))%s
                  ORDER BY pv.post_id, sim
             )
             SELECT ((row_number() OVER (ORDER BY sim, post_id))::int) AS similarity_order,
@@ -494,6 +661,7 @@ BEGIN
         $q$,
           (__min_tokens = 0),           -- %L  token filter off?
           __min_tokens,                 -- %s
+          filter_sql,                   -- %s  tag/community/category (#90)
           _limit                        -- %s
         )
         USING _embedding, _exclude_post_id, window_lo, window_hi, first_blk, last_blk, _observer_id;
@@ -614,6 +782,15 @@ BEGIN
      *  author search).
      * ────────────────────────────────────────────────────────────*/
     __max_fetch := GREATEST(__ef_ceiling, exploratory_factor, 100) * 10;
+    -- A big tag (#90) reads 4x as far, 20,000 rows at the default ceiling
+    -- (pgvector's own default max_scan_tuples): a tag of 0.4% of the posts
+    -- has ~80 posts among them. Its rows are cheap (ids and a tag probe,
+    -- no re-rank). Measured on testapi, posts of the exact top 100 found
+    -- for an on-topic query in a 68k-post community: 28 at 1x, 37 at 4x,
+    -- 45 at 10x; warm cost 0.2-0.4 s, 0.35-0.6 s, 0.6-0.9 s.
+    IF ann_tag IS NOT NULL THEN
+        __max_fetch := __max_fetch * 4;
+    END IF;
     PERFORM set_config('hnsw.max_scan_tuples', __max_fetch::text, true);
     -- planned at OPEN: without a LIMIT, never let a sort of the table win
     __seqscan := current_setting('enable_seqscan');
@@ -626,11 +803,13 @@ BEGIN
             SELECT pv.post_id,
                    pv.chunk_number,
                    (TRUE%s) AS ok,
-                   (pv.embedding <=> $1)::float4::float8 AS sim
+                   CASE WHEN %L THEN NULL
+                        ELSE (pv.embedding <=> $1)::float4::float8 END AS sim
               FROM hivesense_app.posts_vectors pv
              ORDER BY %s
         $q$,
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, ann_tag),  -- %s
+          ann_tag IS NOT NULL,          -- %L  tag scan: ids only, no re-rank
           dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
@@ -641,14 +820,16 @@ BEGIN
             SELECT pr.post_id,
                    pr.chunk_number,
                    (TRUE%s) AS ok,
-                   (SELECT (pv.embedding <=> $1)::float4::float8
-                      FROM hivesense_app.posts_vectors pv
-                     WHERE pv.post_id = pr.post_id
-                       AND pv.chunk_number = pr.chunk_number) AS sim
+                   CASE WHEN %L THEN NULL
+                        ELSE (SELECT (pv.embedding <=> $1)::float4::float8
+                                FROM hivesense_app.posts_vectors pv
+                               WHERE pv.post_id = pr.post_id
+                                 AND pv.chunk_number = pr.chunk_number) END AS sim
               FROM hivesense_app.posts_vectors_reduced pr
              ORDER BY %s
         $q$,
-          hivesense_app.ann_candidate_filter('pr', _exclude_post_id),  -- %s
+          hivesense_app.ann_candidate_filter('pr', _exclude_post_id, ann_tag),  -- %s
+          ann_tag IS NOT NULL,          -- %L  tag scan: ids only, no re-rank
           dist_red                      -- %s  ann distance expr
         )
         USING _embedding, query_red;
@@ -662,12 +843,38 @@ BEGIN
               FROM hivesense_app.posts_vectors pv
              ORDER BY sim
         $q$,
-          hivesense_app.ann_candidate_filter('pv', _exclude_post_id),  -- %s
+          hivesense_app.ann_candidate_filter('pv', _exclude_post_id, ann_tag),  -- %s
           dist_full                     -- %s  distance expr
         )
         USING _embedding;
     END IF;
     PERFORM set_config('enable_seqscan', __seqscan, true);
+
+    -- A tag too big to rank exactly (#90): the scan, restricted to the tag,
+    -- lists up to _limit of its posts older than the newest ones (those are
+    -- listed already) nearest the query, within the cap; they are ranked
+    -- exactly together with the newest. It reads ids only: the slice and
+    -- PCA variants skip the full-vector distance, a read of the whole
+    -- embedding per row.
+    IF ann_tag IS NOT NULL THEN
+        i := COALESCE(exact_post_ids[cardinality(exact_post_ids)], 2147483647);  -- oldest listed
+        LOOP
+            EXIT WHEN cardinality(ann_posts) >= _limit OR fetched >= __max_fetch;
+            FETCH ann_cursor INTO cand;
+            EXIT WHEN NOT FOUND;
+            fetched := fetched + 1;
+            IF cand.ok AND cand.post_id < i AND cand.post_id <> ALL(ann_posts) THEN
+                ann_posts := ann_posts || cand.post_id;
+            END IF;
+        END LOOP;
+        CLOSE ann_cursor;
+
+        exact_post_ids := exact_post_ids || ann_posts;
+        EXECUTE narrow_sql INTO exact_post_ids USING exact_post_ids, _observer_id;
+        RETURN QUERY
+        SELECT * FROM hivesense_app.rank_posts_exactly(_embedding, exact_post_ids, _limit, _exclude_post_id);
+        RETURN;
+    END IF;
 
     -- 1. the fixed pool
     LOOP
@@ -797,7 +1004,10 @@ CREATE FUNCTION hivesense_app.find_nearest_posts(
     _observer_id  int   DEFAULT 0,
     _author_id    int   DEFAULT NULL,
     _first_block  int   DEFAULT NULL,
-    _last_block   int   DEFAULT NULL
+    _last_block   int   DEFAULT NULL,
+    _tag_id       int   DEFAULT NULL,
+    _community_id int   DEFAULT NULL,
+    _category_id  int   DEFAULT NULL
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -821,7 +1031,10 @@ BEGIN
                _observer_id => _observer_id,
                _author_id   => _author_id,
                _first_block => _first_block,
-               _last_block  => _last_block
+               _last_block  => _last_block,
+               _tag_id       => _tag_id,
+               _community_id => _community_id,
+               _category_id  => _category_id
            );
 END;
 $$;

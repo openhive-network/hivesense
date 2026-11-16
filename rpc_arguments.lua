@@ -8,6 +8,6 @@ return {
     ["get_sync_settings"] = {},
     ["posts_by_ids"] = {},
     ["posts_by_ids_query"] = { ["observer"] = true, ["posts"] = true, ["truncate"] = true },
-    ["posts_search"] = { ["author"] = true, ["from-block"] = true, ["full_posts"] = true, ["observer"] = true, ["q"] = true, ["result_limit"] = true, ["to-block"] = true, ["truncate"] = true },
+    ["posts_search"] = { ["author"] = true, ["category"] = true, ["community"] = true, ["from-block"] = true, ["full_posts"] = true, ["observer"] = true, ["q"] = true, ["result_limit"] = true, ["tag"] = true, ["to-block"] = true, ["truncate"] = true },
     ["posts_similar"] = { ["author"] = true, ["full_posts"] = true, ["observer"] = true, ["permlink"] = true, ["result_limit"] = true, ["truncate"] = true },
 }
