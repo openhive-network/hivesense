@@ -90,24 +90,26 @@
         required: false
         schema: {type: string, default: ''}
         description: |
-          Only return posts carrying this tag, e.g. `photography` (as hivemind stores it:
-          lower case, without `#`).
+          Only return posts carrying this tag, e.g. `photography` (case and a leading `#`
+          are ignored).
 
           A tag of at most a server-configured number of posts (20000 by default) is ranked
           exactly across all of its embedded posts. A larger tag is ranked exactly across
-          its newest that many posts together with those of its posts the vector index finds
-          nearest the query, so the page always fills, but an older close match can be
-          missed. With `author` or `from-block`/`to-block` the ranking is exact.
-          An unknown tag returns an empty array. Combines with all other filters.
+          its newest that many posts together with the matching posts the vector index finds
+          nearest the query: the page fills unless matches are very sparse among them, and
+          an older close match can be missed. With `author` or `from-block`/`to-block` the
+          ranking is exact. An unknown tag returns an empty array. Combines with all other
+          filters (every result passes all of them).
       - in: query
         name: community
         required: false
         schema: {type: string, default: ''}
         description: |
           Only return posts in this community, given by its name, e.g. `hive-163772`.
-          Ranked like `tag`, with the community name as the tag: community posts carry it
-          as their category, so the rare community post without it as a tag is not found.
-          An unknown community returns an empty array.
+          Ranked like `tag`, with the community name as the tag (community posts carry it
+          as their category); without `author` or `from-block`/`to-block`, the rare community
+          post that lacks it as a tag can be missed. An unknown community returns an empty
+          array.
       - in: query
         name: category
         required: false
@@ -115,8 +117,9 @@
         description: |
           Only return posts in this category: the category hivemind stores for a post, which
           is its first tag, or its community name in a community. Ranked like `tag`, with the
-          category as the tag; the rare post without its category among its tags is not
-          found. An unknown category returns an empty array.
+          category as the tag; without `author` or `from-block`/`to-block`, the rare post
+          that lacks its category among its tags can be missed. An unknown category returns
+          an empty array.
     responses:
       '200':
         description: JSON array of result objects
@@ -214,12 +217,13 @@ BEGIN
     END IF;
 
     /* ─── tag / community / category ⇒ ids (#90) ────────── */
-    -- hivemind stores all three in lower case. A name it does not know
-    -- matches no post, so the answer is [] without embedding the query.
+    -- hivemind stores all three in lower case, tags without '#'. A name it
+    -- does not know matches no post, so the answer is [] without embedding
+    -- the query.
     IF btrim(posts_search.tag) <> '' THEN
         SELECT td.id INTO __tag_id
           FROM hivemind_app.hive_tag_data td
-         WHERE td.tag = lower(btrim(posts_search.tag));
+         WHERE td.tag = lower(ltrim(btrim(posts_search.tag), '#'));
     END IF;
     IF btrim(posts_search.community) <> '' THEN
         SELECT hc.id INTO __community_id
@@ -229,7 +233,7 @@ BEGIN
     IF btrim(posts_search.category) <> '' THEN
         SELECT cd.id INTO __category_id
           FROM hivemind_app.hive_category_data cd
-         WHERE cd.category = lower(btrim(posts_search.category));
+         WHERE cd.category = lower(ltrim(btrim(posts_search.category), '#'));
     END IF;
     IF (btrim(posts_search.tag) <> '' AND __tag_id IS NULL)
        OR (btrim(posts_search.community) <> '' AND __community_id IS NULL)

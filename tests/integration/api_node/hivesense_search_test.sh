@@ -1579,6 +1579,45 @@ else
     fi
   done
 
+  # On this small corpus a vector-index scan with iterative scan reaches
+  # every post, so the checks above cannot tell exact ranking from the index.
+  # Squeezed to a one-row index (ef_search 1, no iterative scan; see section
+  # 9) the index yields at most one post: the exact ranking must still
+  # return every tagged post, and a big tag must still return its newest
+  # posts, which only the exact list supplies.
+  tag_force="UPDATE hivesense_app.hivesense_app_status SET ef_floor = 1, ef_ceiling = 1 WHERE id = 1;
+    ALTER FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_shot(public.vector, int, int, int, int, int, int, int, int, int)
+      SET hnsw.iterative_scan = off"
+  forced=$(query_database_rolled_back "$tag_force" \
+    "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 5)")
+  if ! is_number "$forced" || [ "$forced" -gt 1 ]; then
+    fail "could not squeeze the vector index for the tag checks (unfiltered search returned '${forced}', expected <= 1)"
+  else
+    got=$(query_database_rolled_back "$tag_force" "$(tag_rows "1000, _tag_id => ${test_tag_id}")")
+    if [ "$got" = "${tag_oracle}/${tag_oracle}/0" ]; then
+      pass "tag filter returns all ${tag_oracle} tagged posts with the vector index squeezed to one row"
+    else
+      fail "tag filter with a one-row vector index: count/distinct/untagged = '${got}', expected ${tag_oracle}/${tag_oracle}/0 -- it is going through the vector index"
+    fi
+
+    # newest searchable posts among the tag's 3 newest: they / missing from the result
+    got=$(query_database_rolled_back \
+      "${tag_force}; UPDATE hivesense_app.hivesense_app_status SET max_filter_exact_posts = 3 WHERE id = 1" \
+      "WITH r AS MATERIALIZED (
+         SELECT post_id FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 8, _tag_id => ${test_tag_id})),
+       e AS (
+         SELECT hp.id FROM (SELECT pt.post_id FROM hivemind_app.hive_post_tags pt
+                             WHERE pt.tag_id = ${test_tag_id} ORDER BY pt.post_id DESC LIMIT 3) n
+           JOIN hivemind_app.hive_posts hp ON hp.id = n.post_id
+          WHERE ${searchable})
+       SELECT (SELECT count(*) FROM e) || '/' || (SELECT count(*) FROM e WHERE e.id NOT IN (SELECT post_id FROM r))")
+    if [ "${got%/*}" != "0" ] && [ "${got#*/}" = "0" ]; then
+      pass "a big tag returns its newest posts (${got%/*}) with the vector index squeezed to one row"
+    else
+      fail "big tag with a one-row vector index: newest searchable/missing = '${got}', expected N/0 with N >= 1"
+    fi
+  fi
+
   # Deleted and muted posts disappear, as in the unfiltered search: the best
   # match is deleted, and its author muted by an observer.
   top_post=${top3%%,*}
@@ -1617,19 +1656,24 @@ else
     fail "tag filter: no top post to delete ('${top3}')"
   fi
 
-  # Combined with an author: that author's posts with the tag.
+  # Combined with an author: that author's posts with the tag. The author
+  # also has posts without it, so a dropped tag predicate shows.
   tag_author_id=$(query_database "
     SELECT hp.author_id FROM hivemind_app.hive_posts hp
      WHERE ${searchable}
-       AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.post_id = hp.id AND pt.tag_id = ${test_tag_id})
-     GROUP BY hp.author_id ORDER BY count(*) DESC, hp.author_id LIMIT 1")
+     GROUP BY hp.author_id
+    HAVING count(*) FILTER (WHERE EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.post_id = hp.id AND pt.tag_id = ${test_tag_id})) >= 1
+       AND count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.post_id = hp.id AND pt.tag_id = ${test_tag_id})) >= 1
+     ORDER BY count(*) FILTER (WHERE EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.post_id = hp.id AND pt.tag_id = ${test_tag_id})) DESC, hp.author_id
+     LIMIT 1")
   author_tag_oracle=$(query_database "
     SELECT count(*) FROM hivemind_app.hive_posts hp
      WHERE ${searchable} AND hp.author_id = ${tag_author_id:-0}
        AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.post_id = hp.id AND pt.tag_id = ${test_tag_id})")
   author_all=$(query_database "SELECT count(*) FROM hivemind_app.hive_posts hp WHERE ${searchable} AND hp.author_id = ${tag_author_id:-0}")
   got=$(query_database "$(tag_rows "1000, _author_id => ${tag_author_id:-0}, _tag_id => ${test_tag_id}")")
-  if is_number "$author_tag_oracle" && [ "$author_tag_oracle" -ge 1 ] && [ "$got" = "${author_tag_oracle}/${author_tag_oracle}/0" ]; then
+  if is_number "$author_tag_oracle" && is_number "$author_all" && [ "$author_tag_oracle" -ge 1 ] && [ "$author_tag_oracle" -lt "$author_all" ] \
+     && [ "$got" = "${author_tag_oracle}/${author_tag_oracle}/0" ]; then
     pass "author + tag returns the ${author_tag_oracle} tagged posts of author ${tag_author_id} (of ${author_all})"
   else
     fail "author ${tag_author_id} + tag '${test_tag}': count/distinct/untagged = '${got}', expected ${author_tag_oracle}/${author_tag_oracle}/0"
@@ -1681,7 +1725,7 @@ category_oracle=$(query_database "
                    JOIN hivemind_app.hive_tag_data td ON td.id = pt.tag_id
                    JOIN hivemind_app.hive_category_data cd ON cd.category = td.tag
                   WHERE pt.post_id = hp.id AND cd.id = hp.category_id)")
-if ! is_number "$test_category_id" || [ -z "$test_category" ] || ! is_number "$category_oracle"; then
+if ! is_number "$test_category_id" || [ -z "$test_category" ] || ! is_number "$category_oracle" || [ "$category_oracle" -lt 2 ]; then
   fail "category filter: no category with 2..900 embedded posts (id '${test_category_id}', '${test_category}', posts '${category_oracle}')"
 else
   got=$(query_database "
@@ -1702,39 +1746,107 @@ else
     fail "/posts/search?category=${test_category}: ${entries} entries, expected ${category_oracle}: $(printf '%s' "$body" | head -c 300)"
   fi
 
-  # Filters combine as AND: a tag the category's posts do not carry gives [].
+  # Filters combine as AND: a tag the category's posts do not carry, though
+  # it has searchable posts of its own, gives [].
   disjoint_tag=$(query_database "
     SELECT td.id FROM hivemind_app.hive_tag_data td
      WHERE NOT EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt
                          JOIN hivemind_app.hive_posts hp ON hp.id = pt.post_id
                         WHERE pt.tag_id = td.id AND hp.category_id = ${test_category_id})
-       AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt WHERE pt.tag_id = td.id)
+       AND EXISTS (SELECT 1 FROM hivemind_app.hive_post_tags pt
+                     JOIN hivemind_app.hive_posts hp ON hp.id = pt.post_id
+                    WHERE pt.tag_id = td.id AND ${searchable})
      ORDER BY td.id LIMIT 1")
+  alone=$(query_database "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, _tag_id => ${disjoint_tag:-0})")
   got=$(query_database "SELECT count(*) FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, _tag_id => ${disjoint_tag:-0}, _category_id => ${test_category_id})")
-  if is_number "$disjoint_tag" && [ "$got" = "0" ]; then
+  if is_number "$disjoint_tag" && is_number "$alone" && [ "$alone" -gt 0 ] && [ "$got" = "0" ]; then
     pass "category + a tag none of its posts carry returns nothing"
   else
-    fail "category ${test_category_id} + disjoint tag '${disjoint_tag}' returned '${got}', expected 0"
+    fail "category ${test_category_id} + disjoint tag '${disjoint_tag}' (alone: '${alone}' posts) returned '${got}', expected 0"
   fi
 fi
 
 # Community: the CI chain predates communities, so one is made inside the
-# rolled-back transaction -- three posts moved into it and given its name as
-# a tag, as hivemind does for community posts.
-fixture_posts=$(query_database "SELECT string_agg(id::text, ',' ORDER BY id) FROM (SELECT hp.id FROM hivemind_app.hive_posts hp WHERE ${searchable} ORDER BY hp.id LIMIT 3) p")
-community_fixture="INSERT INTO hivemind_app.hive_communities (id, type_id, name, created_at, block_num) VALUES (999901, 1, 'hive-999901', now(), 1);
+# rolled-back transaction. Its posts are the test tag's 4th to 6th nearest
+# to the reference embedding, so a scan that stops at the tag's first posts
+# before checking the community finds none of them. The tag's 7th nearest
+# carries the community's name as a tag but is not in it, as any post may.
+fixture_posts=$(query_database "
+  SELECT string_agg(post_id::text, ',' ORDER BY post_id)
+    FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 6, _tag_id => ${test_tag_id:-0})
+   WHERE similarity_order > 3")
+outsider_post=$(query_database "
+  SELECT post_id FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 7, _tag_id => ${test_tag_id:-0})
+   WHERE similarity_order = 7")
+community_base="INSERT INTO hivemind_app.hive_communities (id, type_id, name, created_at, block_num) VALUES (999901, 1, 'hive-999901', now(), 1);
+  UPDATE hivemind_app.hive_posts SET community_id = 999901 WHERE id IN (${fixture_posts:-0})"
+# ... and given its name as a tag, as hivemind does for community posts
+community_fixture="${community_base};
   INSERT INTO hivemind_app.hive_tag_data (tag) VALUES ('hive-999901');
-  UPDATE hivemind_app.hive_posts SET community_id = 999901 WHERE id IN (${fixture_posts:-0});
   INSERT INTO hivemind_app.hive_post_tags (post_id, tag_id)
     SELECT p.id, td.id FROM hivemind_app.hive_posts p, hivemind_app.hive_tag_data td
-     WHERE p.id IN (${fixture_posts:-0}) AND td.tag = 'hive-999901'"
-got=$(query_database_rolled_back "$community_fixture" "
-  SELECT string_agg(post_id::text, ',' ORDER BY post_id)
-    FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 1000, _community_id => 999901)")
-if [ "$(count_ids "$fixture_posts")" = "3" ] && [ "$got" = "$fixture_posts" ]; then
-  pass "community filter returns exactly the community's posts (${got})"
+     WHERE p.id IN (${fixture_posts:-0}, ${outsider_post:-0}) AND td.tag = 'hive-999901'"
+community_ids() {
+  echo "SELECT string_agg(post_id::text, ',' ORDER BY post_id)
+          FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, ${1})"
+}
+if [ "$(count_ids "$fixture_posts")" != "3" ] || ! is_number "$outsider_post"; then
+  fail "community filter: could not pick 3 fixture posts and an outsider from tag '${test_tag}' ('${fixture_posts}', '${outsider_post}')"
 else
-  fail "community filter on fixture posts '${fixture_posts}' returned '${got}'"
+  got=$(query_database_rolled_back "$community_fixture" "$(community_ids "1000, _community_id => 999901")")
+  if [ "$got" = "$fixture_posts" ]; then
+    pass "community filter returns exactly the community's posts (${got})"
+  else
+    fail "community filter on fixture posts '${fixture_posts}' returned '${got}'"
+  fi
+
+  # The endpoint resolves the community by name.
+  body=$(query_database_rolled_back "$community_fixture"     "SELECT hivesense_endpoints.posts_search(q => 'introduce yourself', community => 'hive-999901', result_limit => 1000, full_posts => 0)")
+  entries=$(printf '%s' "$body" | grep -o '"permlink"' | wc -l | tr -d '[:space:]')
+  if [ "$entries" = "3" ]; then
+    pass "posts_search(community => 'hive-999901') returns the community's 3 posts"
+  else
+    fail "posts_search(community => 'hive-999901'): ${entries} entries, expected 3: $(printf '%s' "$body" | head -c 300)"
+  fi
+
+  # A big tag combined with the community: the scan must apply the
+  # community check itself, not after taking the tag's 3 nearest posts.
+  got=$(query_database_rolled_back \
+    "${community_fixture}; UPDATE hivesense_app.hivesense_app_status SET max_filter_exact_posts = 0 WHERE id = 1" \
+    "$(community_ids "3, _tag_id => ${test_tag_id:-0}, _community_id => 999901")")
+  if [ "$got" = "$fixture_posts" ]; then
+    pass "a big tag + community returns the community's 3 posts, not the tag's nearest"
+  else
+    fail "big tag '${test_tag}' + community on fixture posts '${fixture_posts}' returned '${got}'"
+  fi
+
+  # A community whose name no post carries as a tag: the scan alone finds it.
+  got=$(query_database_rolled_back "$community_base" "$(community_ids "3, _community_id => 999901")")
+  if [ "$got" = "$fixture_posts" ]; then
+    pass "community filter without the name as a tag still finds the community's posts"
+  else
+    fail "community without its tag on fixture posts '${fixture_posts}' returned '${got}'"
+  fi
+fi
+
+# A big tag with an observer who mutes its best match's author: the scan
+# skips that author's posts itself, so the page still fills.
+if is_number "$top_author" && is_number "$tag_observer"; then
+  got=$(query_database_rolled_back \
+    "INSERT INTO hivemind_app.muted (follower, following, block_num) VALUES (${tag_observer}, ${top_author}, 1);
+     UPDATE hivesense_app.hivesense_app_status SET max_filter_exact_posts = 0 WHERE id = 1" \
+    "SELECT count(DISTINCT r.post_id) || '/' || count(*) FILTER (WHERE hp.author_id = ${top_author})
+       FROM hivesense_app.find_nearest_posts_with_embedding_one_shot(${ref_embedding}, 8, _observer_id => ${tag_observer}, _tag_id => ${test_tag_id}) r
+       JOIN hivemind_app.hive_posts hp ON hp.id = r.post_id")
+  expected_fill=8
+  if is_number "$unmuted" && [ "$unmuted" -lt 8 ]; then expected_fill=$unmuted; fi
+  if [ "$got" = "${expected_fill}/0" ]; then
+    pass "a big tag fills ${expected_fill} posts for an observer muting author ${top_author}"
+  else
+    fail "big tag '${test_tag}', observer ${tag_observer} muting ${top_author}: distinct/muted = '${got}', expected ${expected_fill}/0"
+  fi
+else
+  fail "big tag + mute check could not be set up (author '${top_author}', observer '${tag_observer}')"
 fi
 
 # A name hivemind does not know is an empty result, not an error, and costs
@@ -1747,8 +1859,16 @@ for param in tag=hivesense-no-such-tag community=hive-999999999 category=hivesen
     fail "/posts/search?${param} (unknown) returned '$(printf '%s' "$body" | head -c 300)', expected []"
   fi
 done
-# An operator-prefixed value is the argument, not a PostgREST filter.
-expect_app_answer "/posts/search?tag=not.bitcoin" "/posts/search?q=hive&tag=not.bitcoin&result_limit=5" "[]"
+# Its [] is a success the edge may cache, like any other answer.
+expect_cache_control "/posts/search?tag=(unknown)" "/posts/search?q=hive&tag=hivesense-no-such-tag" 200 "public, max-age=60"
+# An operator-prefixed value is the argument (an unknown tag, so exactly []),
+# not a PostgREST filter.
+body=$(http_body "$REWRITER_URL" "/posts/search?q=hive&tag=not.bitcoin&result_limit=5" | tr -d '[:space:]')
+if [ "$body" = "[]" ]; then
+  pass "/posts/search?tag=not.bitcoin reaches the function as an unknown tag"
+else
+  fail "/posts/search?tag=not.bitcoin answered '$(printf '%s' "$body" | head -c 300)', expected []"
+fi
 
 # ─── summary ───────────────────────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
