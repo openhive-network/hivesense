@@ -213,9 +213,6 @@ BEGIN
           ' WHERE pt.post_id = %1$I.id AND pt.tag_id = %2$s)',
           _alias, _tag_id);
     END IF;
-    IF _community_id IS NOT NULL THEN
-        __filter := __filter || format(' AND %I.community_id = %s', _alias, _community_id);
-    END IF;
     IF _category_id IS NOT NULL THEN
         __filter := __filter || format(' AND %I.category_id = %s', _alias, _category_id);
     END IF;
