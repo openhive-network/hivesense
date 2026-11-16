@@ -85,6 +85,38 @@
           created before it (a block created exactly at that second is not included).
           Without it, or with a timestamp after the newest block, the range runs to the
           newest post.
+      - in: query
+        name: tag
+        required: false
+        schema: {type: string, default: ''}
+        description: |
+          Only return posts carrying this tag, e.g. `photography` (as hivemind stores it:
+          lower case, without `#`).
+
+          A tag of at most a server-configured number of posts (20000 by default) is ranked
+          exactly across all of its embedded posts. A larger tag is ranked exactly across
+          its newest that many posts together with those of its posts the vector index finds
+          nearest the query, so the page always fills, but an older close match can be
+          missed. With `author` or `from-block`/`to-block` the ranking is exact.
+          An unknown tag returns an empty array. Combines with all other filters.
+      - in: query
+        name: community
+        required: false
+        schema: {type: string, default: ''}
+        description: |
+          Only return posts in this community, given by its name, e.g. `hive-163772`.
+          Ranked like `tag`, with the community name as the tag: community posts carry it
+          as their category, so the rare community post without it as a tag is not found.
+          An unknown community returns an empty array.
+      - in: query
+        name: category
+        required: false
+        schema: {type: string, default: ''}
+        description: |
+          Only return posts in this category: the category hivemind stores for a post, which
+          is its first tag, or its community name in a community. Ranked like `tag`, with the
+          category as the tag; the rare post without its category among its tags is not
+          found. An unknown category returns an empty array.
     responses:
       '200':
         description: JSON array of result objects
@@ -103,7 +135,10 @@ CREATE OR REPLACE FUNCTION hivesense_endpoints.posts_search(
     "observer" TEXT = '',
     "author" TEXT = '',
     "from-block" TEXT = NULL,
-    "to-block" TEXT = NULL
+    "to-block" TEXT = NULL,
+    "tag" TEXT = '',
+    "community" TEXT = '',
+    "category" TEXT = ''
 )
 RETURNS JSON 
 -- openapi-generated-code-end
@@ -117,6 +152,9 @@ DECLARE
     __last_block  INT := NULL;
     __span        BIGINT;
     __max_span    CONSTANT INT := 5270400;  -- 183 days of 3-second blocks
+    __tag_id       INT := NULL;
+    __community_id INT := NULL;
+    __category_id  INT := NULL;
     __result      JSON;
 BEGIN
     /* ─── validate parameters ───────────────────────────── */
@@ -175,6 +213,31 @@ BEGIN
         END IF;
     END IF;
 
+    /* ─── tag / community / category ⇒ ids (#90) ────────── */
+    -- hivemind stores all three in lower case. A name it does not know
+    -- matches no post, so the answer is [] without embedding the query.
+    IF btrim(posts_search.tag) <> '' THEN
+        SELECT td.id INTO __tag_id
+          FROM hivemind_app.hive_tag_data td
+         WHERE td.tag = lower(btrim(posts_search.tag));
+    END IF;
+    IF btrim(posts_search.community) <> '' THEN
+        SELECT hc.id INTO __community_id
+          FROM hivemind_app.hive_communities hc
+         WHERE hc.name = lower(btrim(posts_search.community));
+    END IF;
+    IF btrim(posts_search.category) <> '' THEN
+        SELECT cd.id INTO __category_id
+          FROM hivemind_app.hive_category_data cd
+         WHERE cd.category = lower(btrim(posts_search.category));
+    END IF;
+    IF (btrim(posts_search.tag) <> '' AND __tag_id IS NULL)
+       OR (btrim(posts_search.community) <> '' AND __community_id IS NULL)
+       OR (btrim(posts_search.category) <> '' AND __category_id IS NULL) THEN
+        PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=60"}]', true);
+        RETURN '[]'::JSON;
+    END IF;
+
     /* ─── CORE query once; slice in SQL, not PL/pgSQL —— */
     WITH ranked AS (
         SELECT *
@@ -184,7 +247,10 @@ BEGIN
                    __observer_id,
                    __author_id,
                    __first_block,
-                   __last_block
+                   __last_block,
+                   __tag_id,
+                   __community_id,
+                   __category_id
                )
     ),
 
