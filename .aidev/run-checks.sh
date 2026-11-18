@@ -55,7 +55,9 @@
 #                     processing and its delete op in embedding_updates, and
 #                     the full posts of posts_similar, posts_search and
 #                     posts_by_ids(_query) with and without hivemind's
-#                     _votes_mode (the vote-free call); finally
+#                     _votes_mode (the vote-free call), and the anonymous calls
+#                     of every endpoint that takes an observer with hivemind's
+#                     "no account" id stubbed to -1 and to NULL; finally
 #                     reinstall as `install` does, so the steps after it see that state
 #   - votes-mode      on the stack's second HAF (HIVESENSE_TEST_VOTES_MODE_DB_HOST,
 #                     default `haf-votes-mode`), whose hivemind has
@@ -978,9 +980,136 @@ end
 rollback;"
 }
 
+# In a rolled-back transaction: the anonymous calls of every endpoint that takes
+# an observer, on the stack's hivemind; then hivemind's "no account" id becomes
+# -1 and then NULL (find_account_id('', false) swapped for a stub, hivemind#490)
+# while account 0 becomes a real account that mutes aidev-cook, the author of the
+# sauce post's best match. The anonymous calls must pass that sentinel, not 0, to
+# create_bridge_post_object (stubbed to record its observer) and return what
+# they returned before: account 0's mute must not reach anonymous readers,
+# although it does apply to observer 0.
+anonymous_observer_checks() {
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "
+begin;
+create temp view anonymous_calls as
+select * from (values
+    ('posts_similar',
+     hivesense_endpoints.posts_similar('aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 0, 3, 3)::jsonb),
+    ('posts_search',
+     hivesense_endpoints.posts_search('a recipe for cooking pasta with homemade tomato sauce', 0, 2, 2)::jsonb),
+    ('posts_by_ids',
+     hivesense_endpoints.posts_by_ids('[{\"author\": \"aidev-cook\", \"permlink\": \"fresh-egg-pasta-with-tomato-basil-sauce\"},
+                                        {\"author\": \"aidev-chef\", \"permlink\": \"slow-simmered-tomato-sauce-for-pasta\"}]', 0)::jsonb),
+    ('posts_by_ids_query',
+     hivesense_endpoints.posts_by_ids_query('[{\"author\": \"aidev-cook\", \"permlink\": \"fresh-egg-pasta-with-tomato-basil-sauce\"},
+                                              {\"author\": \"aidev-chef\", \"permlink\": \"slow-simmered-tomato-sauce-for-pasta\"}]', 0)::jsonb),
+    ('authors_search',
+     hivesense_endpoints.authors_search('a recipe for cooking pasta with homemade tomato sauce', 3)::jsonb)
+) v(endpoint, response);
+create temp table anonymous_before on commit drop as select * from anonymous_calls;
+do \$\$
+begin
+    assert (select bool_and(jsonb_path_exists(response, '\$[*] ? (@.author == \"aidev-cook\" || @ == \"aidev-cook\")'))
+              from anonymous_before),
+        format('anonymous calls without aidev-cook: %s', (select jsonb_object_agg(endpoint, response) from anonymous_before));
+end
+\$\$;
+alter function hivemind_postgrest_utilities.create_bridge_post_object(integer, record, integer, text[], boolean, boolean, jsonb)
+    rename to create_bridge_post_object_keyspace;
+create function hivemind_postgrest_utilities.create_bridge_post_object(
+    _observer_id integer, _row record, _truncate_body_len integer, _reblogged_by text[], _set_is_pinned_field boolean,
+    _update_reblogs_field boolean, _replies jsonb default null)
+returns jsonb language plpgsql stable as \$f\$
+begin
+    return hivemind_postgrest_utilities.create_bridge_post_object_keyspace(
+               _observer_id, _row, _truncate_body_len, _reblogged_by, _set_is_pinned_field, _update_reblogs_field, _replies)
+           || jsonb_build_object('observer_id', _observer_id);
+end
+\$f\$;
+do \$d\$
+declare
+    __proc      regprocedure;
+    __arguments text;
+    __result    text;
+begin
+    select p.oid, pg_get_function_identity_arguments(p.oid), pg_get_function_result(p.oid)
+      into strict __proc, __arguments, __result
+      from pg_proc p
+     where p.pronamespace = 'hivemind_postgrest_utilities'::regnamespace and p.proname = 'find_account_id';
+    execute format('alter function %s rename to find_account_id_keyspace', __proc);
+    execute format(\$s\$
+        create function hivemind_postgrest_utilities.find_account_id(%s)
+        returns %s language plpgsql stable as \$f\$
+        begin
+            if \$1 = '' then
+                return nullif(current_setting('aidev.no_account'), 'null')::integer;
+            end if;
+            return hivemind_postgrest_utilities.find_account_id_keyspace(\$1, \$2);
+        end
+        \$f\$\$s\$, __arguments, __result);
+end
+\$d\$;
+do \$\$
+declare
+    __columns text;
+begin
+    alter table hivemind_app.muted_accounts_by_id_view rename to muted_accounts_by_id_view_keyspace;
+    select string_agg(case a.attname when 'observer_id' then '0' when 'muted_id' then '9105' else 'null' end
+                      || '::' || format_type(a.atttypid, a.atttypmod), ', ' order by a.attnum)
+      into __columns
+      from pg_attribute a
+     where a.attrelid = 'hivemind_app.muted_accounts_by_id_view_keyspace'::regclass and a.attnum > 0 and not a.attisdropped;
+    execute format('create view hivemind_app.muted_accounts_by_id_view as'
+                   ' select * from hivemind_app.muted_accounts_by_id_view_keyspace union all select %s', __columns);
+end
+\$\$;
+do \$\$
+declare
+    __no_account text;
+    __sentinel   int;
+    __row        record;
+    __before     jsonb;
+    __checked    int := 0;
+begin
+    foreach __no_account in array array['-1', 'null'] loop
+        perform set_config('aidev.no_account', __no_account, true);
+        __sentinel := nullif(__no_account, 'null')::int;
+        assert hivesense_app.is_anonymous_observer(__sentinel) and not hivesense_app.is_anonymous_observer(0),
+            format('anonymous observer for no-account id %s: %s', __no_account, hivesense_app.anonymous_observer_id());
+        assert not exists (select 1 from hivesense_app.find_nearest_posts_to_post(
+                               'aidev-chef', 'slow-simmered-tomato-sauce-for-pasta', 3, 0) where post_id = 900105),
+            'observer 0 sees the post of aidev-cook, which it mutes';
+        for __row in select * from anonymous_calls loop
+            __before := (select response from anonymous_before where endpoint = __row.endpoint);
+            if __row.endpoint = 'authors_search' then
+                assert __row.response = __before,
+                    format('no-account id %s: anonymous authors %s, expected %s', __no_account, __row.response, __before);
+            else
+                assert (select bool_and(p ? 'observer_id' and (p->>'observer_id')::int is not distinct from __sentinel)
+                          from jsonb_array_elements(__row.response) p),
+                    format('no-account id %s: anonymous full %s posts asked hivemind for another observer: %s',
+                           __no_account, __row.endpoint, __row.response);
+                assert (select jsonb_agg(p - 'observer_id'
+                                         order by case when __row.endpoint = 'posts_search' then p->>'permlink' end, o)
+                          from jsonb_array_elements(__row.response) with ordinality e(p, o))
+                       = (select jsonb_agg(p order by case when __row.endpoint = 'posts_search' then p->>'permlink' end, o)
+                            from jsonb_array_elements(__before) with ordinality e(p, o)),
+                    format('no-account id %s: anonymous %s posts %s differ from %s', __no_account, __row.endpoint,
+                           __row.response, __before);
+            end if;
+            __checked := __checked + 1;
+        end loop;
+    end loop;
+    assert __checked = 10, format('checked %s anonymous calls, expected 10', __checked);
+    raise notice 'anonymous observer checks: PASS';
+end
+\$\$;
+rollback;"
+}
+
 embed_search() {
     embed_seeded_posts "$EMBEDDING_MODEL" && search_checks embed-search && deleted_post_checks && similar_refill_checks \
-        && similar_votes_mode_checks
+        && similar_votes_mode_checks && anonymous_observer_checks
 }
 
 VOTES_MODE_DB_HOST="${HIVESENSE_TEST_VOTES_MODE_DB_HOST:-haf-votes-mode}"

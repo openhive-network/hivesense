@@ -76,7 +76,7 @@ AS
 $$
 DECLARE
     __result JSON;
-    __observer_id INT := 0;
+    __observer_id INT := hivesense_app.anonymous_observer_id();
     __query_prefix TEXT;
 BEGIN
     IF observer != '' THEN

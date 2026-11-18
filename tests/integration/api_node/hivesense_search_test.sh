@@ -276,11 +276,11 @@ done
 # remove a row.
 deleted_filter=" AND EXISTS (SELECT 1 FROM hivemind_app.hive_posts hp WHERE hp.id = pv.post_id AND hp.counter_deleted = 0)"
 # compared in SQL: query_database strips whitespace from what it prints
-same=$(query_database "SELECT hivesense_app.live_post_filter('pv', 0) = '${deleted_filter}'")
+same=$(query_database "SELECT hivesense_app.live_post_filter('pv', hivesense_app.anonymous_observer_id()) = '${deleted_filter}'")
 if [ "$same" = "t" ]; then
   pass "anonymous search filters deleted posts only"
 else
-  fail "anonymous search filters '$(query_database "SELECT hivesense_app.live_post_filter('pv', 0)")', expected '${deleted_filter}' (whitespace aside)"
+  fail "anonymous search filters '$(query_database "SELECT hivesense_app.live_post_filter('pv', hivesense_app.anonymous_observer_id())")', expected '${deleted_filter}' (whitespace aside)"
 fi
 token_threshold=$(query_database "SELECT min_token_search_threshold FROM hivesense_app.hivesense_app_status WHERE id = 1")
 if [ "$token_threshold" = "0" ]; then
