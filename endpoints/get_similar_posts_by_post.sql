@@ -135,7 +135,7 @@ RETURNS JSON
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
-    __observer_id INT := 0;
+    __observer_id INT := hivesense_app.anonymous_observer_id();
     __result      JSON;
 BEGIN
     /* validate args */

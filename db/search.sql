@@ -111,6 +111,31 @@ BEGIN
 END;
 $$;
 
+/* hivemind's "no account" id, which an anonymous request passes as its
+ * observer. It is hivemind's to define (0, -1 or NULL by version) and 0 can be
+ * a real account, so never compare an observer id with a literal. The call is
+ * in a plpgsql body so the parameter defaults below do not depend on
+ * hivemind's schema, which hivemind may drop and recreate. */
+CREATE OR REPLACE FUNCTION hivesense_app.anonymous_observer_id()
+RETURNS int
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+BEGIN
+    RETURN hivemind_postgrest_utilities.find_account_id('', false);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION hivesense_app.is_anonymous_observer(_observer_id int)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+AS $$
+BEGIN
+    RETURN _observer_id IS NOT DISTINCT FROM hivesense_app.anonymous_observer_id();
+END;
+$$;
+
 /* WHERE-clause fragment (starting with AND) keeping only the rows of table
  * alias _alias whose post is live: one hive_posts probe per row. A deleted
  * post keeps its embeddings, but hivemind's full-post view returns no row for
@@ -127,7 +152,7 @@ LANGUAGE plpgsql
 STABLE PARALLEL SAFE
 AS $$
 BEGIN
-    IF _observer_id <> 0 AND EXISTS (
+    IF NOT hivesense_app.is_anonymous_observer(_observer_id) AND EXISTS (
            SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
             WHERE m.observer_id = _observer_id) THEN
         RETURN format(
@@ -224,7 +249,7 @@ CREATE OR REPLACE FUNCTION hivesense_app.find_nearest_posts_with_embedding_one_s
     _embedding       public.vector,      -- full-size query embedding (768-d)
     _limit           int     DEFAULT 1000,
     _exclude_post_id int     DEFAULT NULL,
-    _observer_id     int     DEFAULT 0,
+    _observer_id     int     DEFAULT hivesense_app.anonymous_observer_id(),
     _author_id       int     DEFAULT NULL, -- restrict to one author's posts (#47)
     _first_block     int     DEFAULT NULL, -- restrict to posts created in blocks
     _last_block      int     DEFAULT NULL  --   [_first_block, _last_block] (#13); NULL = open end
@@ -262,6 +287,7 @@ DECLARE
     __min_tokens int;
     __ef_ceiling int;
     author_post_ids int[];  -- author filter: that author's live root posts
+    __anonymous  boolean := hivesense_app.is_anonymous_observer(_observer_id);
 
     /* ------ block-range (time window) filter ------ */
     has_window    boolean := _first_block IS NOT NULL OR _last_block IS NOT NULL;
@@ -378,7 +404,7 @@ BEGIN
      * ────────────────────────────────────────────────────────────*/
     IF _author_id IS NOT NULL THEN
         -- A muted author yields nothing, as in the unfiltered search.
-        IF _observer_id <> 0 AND EXISTS (
+        IF NOT __anonymous AND EXISTS (
                SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
                 WHERE m.observer_id = _observer_id
                   AND m.muted_id    = _author_id) THEN
@@ -478,7 +504,7 @@ BEGIN
                    AND hp.counter_deleted = 0
                    AND (%L OR pd.number_of_tokens >= %s)
                    AND ($2 IS NULL OR pv.post_id <> $2)
-                   AND ($7 = 0 OR NOT EXISTS (
+                   AND ($8 OR NOT EXISTS (
                          SELECT 1 FROM hivemind_app.muted_accounts_by_id_view m
                           WHERE m.observer_id = $7
                             AND m.muted_id    = hp.author_id))
@@ -496,7 +522,7 @@ BEGIN
           __min_tokens,                 -- %s
           _limit                        -- %s
         )
-        USING _embedding, _exclude_post_id, window_lo, window_hi, first_blk, last_blk, _observer_id;
+        USING _embedding, _exclude_post_id, window_lo, window_hi, first_blk, last_blk, _observer_id, __anonymous;
         RETURN;
     END IF;
 
@@ -558,7 +584,7 @@ BEGIN
              WHERE (__min_tokens = 0 OR pd.number_of_tokens >= __min_tokens)
                AND hp.counter_deleted = 0
                AND (_exclude_post_id IS NULL OR b.post_id <> _exclude_post_id)
-               AND (_observer_id = 0 OR NOT EXISTS (
+               AND (__anonymous OR NOT EXISTS (
                      SELECT 1
                        FROM hivemind_app.muted_accounts_by_id_view m
                       WHERE m.observer_id = _observer_id
@@ -794,7 +820,7 @@ DROP FUNCTION IF EXISTS hivesense_app.find_nearest_posts;
 CREATE FUNCTION hivesense_app.find_nearest_posts(
     _query        text,
     _limit        int   DEFAULT 1000,
-    _observer_id  int   DEFAULT 0,
+    _observer_id  int   DEFAULT hivesense_app.anonymous_observer_id(),
     _author_id    int   DEFAULT NULL,
     _first_block  int   DEFAULT NULL,
     _last_block   int   DEFAULT NULL
@@ -832,7 +858,7 @@ CREATE FUNCTION hivesense_app.find_nearest_posts_to_post(
     _author      text,
     _permlink    text,
     _limit       int  DEFAULT 1000,
-    _observer_id int  DEFAULT 0
+    _observer_id int  DEFAULT hivesense_app.anonymous_observer_id()
 )
 RETURNS SETOF hivesense_app.similar_post_result
 LANGUAGE plpgsql
@@ -889,7 +915,7 @@ CREATE TYPE contributors_result AS (
 CREATE OR REPLACE FUNCTION hivesense_app.find_thematic_contributors_with_embedding(
     _embedding   vector,      -- full-size query embedding
     _limit       integer DEFAULT 1,
-    _observer_id integer DEFAULT 0
+    _observer_id integer DEFAULT hivesense_app.anonymous_observer_id()
 )
 RETURNS SETOF hivesense_app.contributors_result
 LANGUAGE plpgsql
@@ -929,6 +955,7 @@ DECLARE
     authors_found  INT    := 0;
     __min_search_tokens   INT;
     __ef_ceiling          INT;
+    __anonymous           BOOLEAN := hivesense_app.is_anonymous_observer(_observer_id);
 
     /* ------ iterative ANN scan ------ */
     ann_cursor    refcursor;
@@ -1054,7 +1081,7 @@ BEGIN
               FROM candidates c
               JOIN hivesense_app.post_data pd ON pd.post_id = c.post_id
              WHERE (__min_search_tokens = 0 OR pd.number_of_tokens >= __min_search_tokens)
-               AND (_observer_id = 0 OR NOT EXISTS (
+               AND (__anonymous OR NOT EXISTS (
                      SELECT 1
                        FROM hivemind_app.muted_accounts_by_id_view m
                       WHERE m.observer_id = _observer_id
