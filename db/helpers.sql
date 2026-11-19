@@ -349,11 +349,49 @@ BEGIN
 END;
 $$;
 
+-- Why an index build must not start yet, or NULL once it may. The HNSW build is
+-- one statement that holds its snapshot, and so the database's xmin horizon, for
+-- up to hours; run while hivemind finalizes its massive sync or catches up after
+-- downtime, it keeps hivemind's vacuums from removing dead rows and stalls its
+-- CREATE INDEX CONCURRENTLY steps. hivemind has finished its first finalization
+-- once hive_state.last_completed_block_num leaves its seed value 1
+-- (SEED_LAST_COMPLETED_BLOCK, hivemind's hive/db/schema.py), and is live once its
+-- context is within 100 blocks of HAF's head.
+CREATE OR REPLACE FUNCTION hivesense_app.index_build_wait_reason()
+RETURNS TEXT
+LANGUAGE plpgsql
+STABLE
+AS
+$$
+DECLARE
+    __last_completed_block INT := (SELECT last_completed_block_num FROM hivemind_app.hive_state LIMIT 1);
+    __hivemind_block INT := hive.app_get_current_block_num('hivemind_app');
+    __head_block INT := (SELECT consistent_block FROM hafd.hive_state);
+BEGIN
+    IF COALESCE(__last_completed_block, 1) <= 1 THEN
+        RETURN FORMAT('hivemind has not completed its first massive-sync finalization (hive_state.last_completed_block_num = %s)',
+                      COALESCE(__last_completed_block::TEXT, 'no row'));
+    END IF;
+    IF __hivemind_block < __head_block - 100 THEN
+        RETURN FORMAT('hivemind is at block %s, %s blocks behind HAF''s head block %s',
+                      __hivemind_block, __head_block - __hivemind_block, __head_block);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Builds the HNSW index unless it exists, after waiting for hivemind to be live
+-- (index_build_wait_reason()). Commits between its steps, so it must be called
+-- outside an explicit transaction block (autocommit, or from a procedure itself
+-- called that way): the build then runs in a transaction of its own.
 CREATE OR REPLACE PROCEDURE ENSURE_INDEXES_ARE_CREATED()
 LANGUAGE plpgsql
 AS
 $$
 DECLARE
+    __wait_reason TEXT;
+    __wait_started TIMESTAMPTZ;
+    __last_wait_notice TIMESTAMPTZ;
     __max_parallel_workers INT;
     __current_maintenance_work_mem TEXT;
     __original_maintenance_work_mem TEXT;
@@ -391,6 +429,26 @@ BEGIN
         -- 
         -- RAISE NOTICE 'HNSW index already exists (size: %). Skipping creation.', __creation_time_info;
         RETURN;
+    END IF;
+
+    -- Each wait step commits, so no transaction (or snapshot) outlives one poll.
+    LOOP
+        __wait_reason := hivesense_app.index_build_wait_reason();
+        EXIT WHEN __wait_reason IS NULL;
+        IF __wait_started IS NULL THEN
+            __wait_started := CLOCK_TIMESTAMP();
+        END IF;
+        IF __last_wait_notice IS NULL OR CLOCK_TIMESTAMP() - __last_wait_notice >= INTERVAL '5 minutes' THEN
+            RAISE NOTICE 'Waiting to build the HNSW index (for %): %',
+                         DATE_TRUNC('second', CLOCK_TIMESTAMP() - __wait_started), __wait_reason;
+            __last_wait_notice := CLOCK_TIMESTAMP();
+        END IF;
+        COMMIT;
+        PERFORM PG_SLEEP(10);
+    END LOOP;
+    IF __wait_started IS NOT NULL THEN
+        RAISE NOTICE 'hivemind is live: building the HNSW index after waiting %',
+                     DATE_TRUNC('second', CLOCK_TIMESTAMP() - __wait_started);
     END IF;
 
     -- Get table size and row count before index creation (use correct table based on configuration)
@@ -458,6 +516,10 @@ BEGIN
         RAISE NOTICE 'Creating HNSW index (could not determine worker count)';
     END;
 
+    -- The build gets a transaction of its own (the settings above are session-level
+    -- and survive the COMMIT)
+    COMMIT;
+
     -- Record start time
     __start_time := CLOCK_TIMESTAMP();
     RAISE NOTICE 'Starting HNSW index creation at %', __start_time;
@@ -496,6 +558,7 @@ BEGIN
 
             RAISE NOTICE 'Index creation succeeded with fallback settings';
     END;
+    COMMIT;
     
     -- Get the index size
     SELECT PG_RELATION_SIZE(oid) 

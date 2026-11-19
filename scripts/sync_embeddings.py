@@ -646,14 +646,14 @@ def apply_op(cur, op, post_id) -> None:
 
 async def create_indexes_with_live_notices(dsn) -> None:
     """Run index creation in async mode with live notice output."""
-    async with await psycopg.AsyncConnection.connect(dsn) as aconn:
+    # autocommit: the procedure commits between its steps, which it cannot do
+    # inside an explicit transaction block
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as aconn:
         # Register notice handler for async connection
         aconn.add_notice_handler(notice_processor)
 
         async with aconn.cursor() as acur:
             await acur.execute("CALL hivesense_app.ensure_indexes_are_created()")
-
-        await aconn.commit()
 
 
 def ensure_context_detached(conn) -> None:
@@ -934,6 +934,9 @@ def main() -> None:
                             "Latest block %s is recent (%.1fs old); creating indexes",
                             max_block, age.total_seconds()
                         )
+                        # don't leave this connection's transaction open
+                        # through the wait for hivemind and the build
+                        conn.commit()
                         # Use async function for index creation with live notices
                         asyncio.run(create_indexes_with_live_notices(DB_DSN))
 

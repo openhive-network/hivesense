@@ -23,7 +23,11 @@ Re-processing a post is idempotent - store_post_embeddings replaces its
 vectors under a fresh sync_seq, exactly like an edit.
 
 At the massive -> live transition the HNSW index build
-(hivesense_app.ensure_indexes_are_created) is triggered once.
+(hivesense_app.ensure_indexes_are_created) is started once, on a connection of
+its own in a background thread: the procedure waits for hivemind to be live and
+commits between its steps, neither of which it can do inside the driver's
+transaction. Ranges keep being processed meanwhile (their inserts wait while the
+index is being built); a failed build is raised by the next range.
 
 Configuration (model, server, api style, batch size, parallelism, request
 timeouts) comes from hivesense_app.hivesense_app_status, read once per process.
@@ -35,12 +39,14 @@ import os
 import socket
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import psycopg2
+from psycopg2.extensions import make_dsn
 from psycopg2.extras import execute_values
 
 log = logging.getLogger("hivesense")
@@ -57,7 +63,7 @@ if not logging.getLogger().handlers:
     logging.getLogger().setLevel(logging.INFO)
 
 _CONFIG = None
-_INDEXES_ENSURED = False
+_INDEX_BUILD: Future[None] | None = None
 
 INITIAL_RETRY_DELAY = 5
 MAX_RETRY_DELAY = 120
@@ -230,9 +236,42 @@ def _embed_one(cfg: dict[str, Any], batch: list[tuple[int, int, str]], label: st
     return [(c[0], c[1], "[" + ",".join(map(str, v)) + "]") for c, v in zip(batch, vecs)]
 
 
+class _NoticeLog:
+    """psycopg2 connection.notices replacement: logs each server notice as it
+    arrives instead of keeping it in a list."""
+
+    def append(self, notice: str) -> None:
+        log.info("%s", notice.strip())
+
+
+def _build_indexes(dsn: str) -> None:
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.autocommit = True
+        conn.notices = _NoticeLog()
+        with conn.cursor() as cur:
+            cur.execute("CALL hivesense_app.ensure_indexes_are_created()")
+    finally:
+        conn.close()
+    log.info("HNSW indexes ensured")
+
+
+def _start_index_build(conn: psycopg2.extensions.connection) -> Future[None]:
+    """Run ensure_indexes_are_created in a background thread, on a new
+    autocommit connection with the driver connection's parameters."""
+    params = conn.info.dsn_parameters
+    if conn.info.password is not None:
+        params["password"] = conn.info.password
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hnsw-build")
+    try:
+        return executor.submit(_build_indexes, make_dsn(**params))
+    finally:
+        executor.shutdown(wait=False)
+
+
 def process_blocks(conn, first_block, last_block) -> None:
     """Entry point called by haf_app_driver.py inside its transaction."""
-    global _INDEXES_ENSURED
+    global _INDEX_BUILD
     cfg = _load_config(conn)
     cur = conn.cursor()
     # hivemind's pg_search BM25 index on hive_post_data makes paradedb emit
@@ -246,17 +285,18 @@ def process_blocks(conn, first_block, last_block) -> None:
     # massive sync tolerates redoing the range after a crash; skip the WAL flush wait
     cur.execute("SET LOCAL synchronous_commit = %s", ("off" if stage == "MASSIVE_PROCESSING" else "on",))
 
-    if not _INDEXES_ENSURED:
+    if _INDEX_BUILD is None:
         # Build the HNSW indexes at the massive -> live transition, or as soon as
         # this range reaches HAF's synced head (covers a --stop-at-block run that
         # ends inside the massive stage - the legacy scheduler built them on its
         # block-limit exit); never while hived still replays.
         cur.execute("SELECT hivesense_app.massive_sync_finished('hivesense_app', %s)", (last_block,))
         if cur.fetchone()[0]:
-            log.info("caught up (stage %s, block %s): ensuring HNSW indexes exist "
-                     "(may take a while the first time)", stage, last_block)
-            cur.execute("CALL hivesense_app.ensure_indexes_are_created()")
-            _INDEXES_ENSURED = True
+            log.info("caught up (stage %s, block %s): ensuring HNSW indexes exist in the background "
+                     "(waits for hivemind to be live; may take a while the first time)", stage, last_block)
+            _INDEX_BUILD = _start_index_build(conn)
+    elif _INDEX_BUILD.done():
+        _INDEX_BUILD.result()  # re-raises the build's error
 
     cur.execute("SELECT hivesense_app.posts_in_range(%s, %s)", (first_block, last_block))
     post_ids = cur.fetchone()[0]
