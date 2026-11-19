@@ -800,8 +800,61 @@ embed_seeded_posts() {
         return 1
     fi
     echo "embedded the seeded posts with $model: $got"
-    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "call hivesense_app.ensure_indexes_are_created()"
+    build_index_once_hivemind_finalized
 }
+
+# The stack's hivemind is set up but never synced. ensure_indexes_are_created()
+# with hivemind's context at HAF's head but its finalization marker
+# (hive_state.last_completed_block_num) at its seed 1: it must say it waits,
+# commit between its polls (its xact_start stays younger than its 10 s poll) and
+# build nothing; once the marker moves past 1 it builds. hivemind's marker and
+# context block are put back afterwards, pass or fail.
+build_index_once_hivemind_finalized() (
+    local saved head log="$out/index_build_wait.log" pid name built young rc=0
+    saved="$(query "select (select last_completed_block_num from hivemind_app.hive_state) || ',' || current_block_num
+                      from hafd.contexts where name = 'hivemind_app'")" || exit 1
+    if [ "$(query "select count(*) from hivemind_app.hive_state")" != 1 ] || [ -z "$saved" ]; then
+        echo "FAIL: expected one hivemind_app.hive_state row and a hivemind_app context"
+        exit 1
+    fi
+    head="$(query "select coalesce(consistent_block, 0) from hafd.hive_state")" || exit 1
+    restore_hivemind_state() {
+        query "update hivemind_app.hive_state set last_completed_block_num = ${saved%,*};
+               update hafd.contexts set current_block_num = ${saved#*,} where name = 'hivemind_app'" > /dev/null
+    }
+    trap 'restore_hivemind_state || exit 1' EXIT
+    query "update hivemind_app.hive_state set last_completed_block_num = 1;
+           update hafd.contexts set current_block_num = $head where name = 'hivemind_app'" > /dev/null || exit 1
+
+    psql "$ADMIN_URL" -v ON_ERROR_STOP=on -c "call hivesense_app.ensure_indexes_are_created()" > "$log" 2>&1 &
+    pid=$!
+    sleep 20
+    name="$(query "select hivesense_app.get_hnsw_index_name()")" || exit 1
+    built="$(query "select to_regclass('hivesense_app.$name') is not null")" || exit 1
+    young="$(query "select bool_and(xact_start > now() - interval '12 seconds') from pg_stat_activity
+                     where query ilike 'call hivesense_app.ensure_indexes_are_created()%'")" || exit 1
+    if ! grep -qF "Waiting to build the HNSW index" "$log" || ! grep -qF "hivemind has not completed its first massive-sync finalization" "$log"; then
+        echo "FAIL: with hivemind's finalization marker at 1, ensure_indexes_are_created() did not log that it waits"
+        rc=1
+    elif [ "$built" != f ]; then
+        echo "FAIL: ensure_indexes_are_created() built the HNSW index before hivemind's first finalization"
+        rc=1
+    elif [ "$young" != t ]; then
+        echo "FAIL: waiting ensure_indexes_are_created() holds a transaction older than its poll (xact_start not reset: '$young')"
+        rc=1
+    else
+        echo "ok: ensure_indexes_are_created() waits for hivemind's first finalization, committing between polls"
+    fi
+
+    query "update hivemind_app.hive_state set last_completed_block_num = greatest($head, 2)" > /dev/null || exit 1
+    wait "$pid" || { cat "$log"; echo "FAIL: ensure_indexes_are_created() failed"; exit 1; }
+    cat "$log"
+    if ! grep -qF "hivemind is live: building the HNSW index after waiting" "$log"; then
+        echo "FAIL: ensure_indexes_are_created() did not report building once hivemind was live"
+        rc=1
+    fi
+    exit "$rc"
+)
 
 check_hnsw_index() {
     local name exists
