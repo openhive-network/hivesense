@@ -48,7 +48,9 @@
 #                     dims, the stack's `ollama`; token threshold 200), seed
 #                     .aidev/seed_posts.sql, embed the seeded posts with
 #                     generate_embeddings_for_posts, check what posts_vectors
-#                     holds, build the HNSW index and check it exists, then the
+#                     holds, build the HNSW index and check it exists and logged its
+#                     memory estimate, index_build_maintenance_work_mem()'s
+#                     choice for a small graph (rolled back), then the
 #                     embedding-backed calls of
 #                     .aidev/hivesense_smoke.py (one junit case per call), then
 #                     (rolled back) a deletion of an embedded seeded post in block
@@ -853,6 +855,10 @@ build_index_once_hivemind_finalized() (
         echo "FAIL: ensure_indexes_are_created() did not report building once hivemind was live"
         rc=1
     fi
+    if ! grep -qF "HNSW graph of " "$log"; then
+        echo "FAIL: ensure_indexes_are_created() did not log the graph's memory estimate and limits"
+        rc=1
+    fi
     exit "$rc"
 )
 
@@ -868,11 +874,33 @@ check_hnsw_index() {
     echo "ok: HNSW index hivesense_app.$name exists"
 }
 
+# index_build_maintenance_work_mem() under a 1MB maintenance_work_mem (rolled
+# back): the graph of 1000 vectors gets its estimate plus 10 % in MB, an empty
+# graph fits 1MB, and a desired_maintenance_work_mem_gb of 0 keeps 1MB.
+check_index_build_memory() {
+    local got want
+    got="$(psql "$ADMIN_URL" -v ON_ERROR_STOP=on -Atq \
+        -c "begin" -c "set local maintenance_work_mem = '1MB'" -c "set local client_min_messages = warning" \
+        -c "select hivesense_app.index_build_maintenance_work_mem(1000)
+                   = ceil(hivesense_app.hnsw_graph_bytes(1000) * 1.1 / 1048576) || 'MB'" \
+        -c "select hivesense_app.index_build_maintenance_work_mem(0)" \
+        -c "update hivesense_app.hivesense_app_status set desired_maintenance_work_mem_gb = 0" \
+        -c "select hivesense_app.index_build_maintenance_work_mem(1000)" \
+        -c "rollback" | tr '\n' ' ')" || return 1
+    want="t 1MB 1MB "
+    if [ "$got" != "$want" ]; then
+        echo "FAIL: index_build_maintenance_work_mem() under 1MB for 1000 vectors, 0 vectors, a 0 GB cap: '$got', expected '$want'"
+        return 1
+    fi
+    echo "ok: index_build_maintenance_work_mem() sets the graph's estimate when it fits, keeps the setting otherwise"
+}
+
 # search_checks CHECK_SET: the index check, then CHECK_SET of
 # .aidev/hivesense_smoke.py; each runs whichever fails.
 search_checks() {
     local rc=0
     check_hnsw_index || rc=1
+    check_index_build_memory || rc=1
     python3 .aidev/hivesense_smoke.py "$out" "$1" || rc=1
     return "$rc"
 }

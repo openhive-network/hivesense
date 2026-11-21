@@ -201,6 +201,10 @@ rebase procedure and the `/sync-chains` endpoint.
 For searching among vectorized posts, an HNSW index is used. This index requires a large amount of shared memory 
 to be available to the PostgreSQL server. Therefore, the HAF container must be configured
 with at least 8 GB of shared memory, which can be set using the --shm-size option when running the container.
+The index build sets `maintenance_work_mem` to its graph's estimated size (plus 10%) when that fits within
+`--maintenance-work-mem` (GB), a quarter of RAM and 90% of `/dev/shm`; otherwise it keeps the server's setting
+and the build spills to disk, which is much slower. A mainnet-size graph needs more than 8 GB of `/dev/shm`;
+the build's log names the size it needs.
 
 ### Vectorization
 

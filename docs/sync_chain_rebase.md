@@ -128,14 +128,17 @@ Terms: `S_O` = the old node's `max_visible_sync_seq` at the freeze, `U_old` its
    Builds `posts_vectors_merged`, `deleted_embeddings_merged`,
    `post_data_merged` next to the live tables; the live tables keep serving.
    The HNSW build sizes `maintenance_work_mem` exactly as the regular index
-   build does: it uses `desired_maintenance_work_mem_gb` (in
-   `hivesense_app_status`, default 28) only when the HAF container has at
-   least that plus 30 GB of RAM and a `/dev/shm` of at least that plus 4 GB
-   (a parallel build keeps its graph there), and otherwise keeps the server's
-   setting; a NOTICE says which. With haf_api_node's default 8 GB
-   `HAF_SHM_SIZE` it keeps the default, which is slower but fits. For a faster
-   build, raise `HAF_SHM_SIZE` in haf_api_node's `.env` (e.g. `32g` for the
-   default 28 GB) and recreate the HAF container before this step. If the
+   build does: it estimates the graph's memory from the merged row count, the
+   index's dimensions and element type and `hnsw_m`, and sets that plus 10 %
+   when it is above the server's setting and within every limit:
+   `desired_maintenance_work_mem_gb` (in `hivesense_app_status`, default 28),
+   a quarter of the HAF container's RAM and 90 % of its `/dev/shm` (a
+   parallel build keeps its graph there). Otherwise it keeps the server's
+   setting, and the build spills to disk; NOTICEs give the estimate, the
+   limits and the choice. With haf_api_node's default 8 GB `HAF_SHM_SIZE` a
+   mainnet-size graph does not fit. For a faster build, raise `HAF_SHM_SIZE`
+   in haf_api_node's `.env` to at least the size the NOTICE names and recreate
+   the HAF container before this step. If the
    build fails, it rolls back as a whole, the phase stays `tables_built` and
    `rebase_build_indexes()` can be run again.
 7. **Swap** (block processor must be stopped, the function checks):
