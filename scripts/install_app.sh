@@ -62,7 +62,7 @@ print_help () {
     echo "  --min-token-threshold=INT             Don't generate embeddings for posts with fewer than this number of tokens"
     echo "  --min-token-search-threshold=INT      Don't return search results for posts with fewer than this number of tokens"
     echo "  --max-embeddings-per-post             Maximum embeddings to generate for each post (defaults to 0 = unlimited)"
-    echo "  --maintenance-work-mem                Desired setting of maintenance_work_mem to use while creating the HNSW index"
+    echo "  --maintenance-work-mem                Largest maintenance_work_mem (GB) the HNSW build may set for its graph (default 28)"
     echo "  --ef-floor=NUMBER                     Smallest hnsw.ef_search (and ANN candidate pool) of a search (default 60)"
     echo "  --ef-multiplier=NUMBER                hnsw.ef_search per requested result, before clamping to floor/ceiling (default 10)"
     echo "  --ef-ceiling=NUMBER                   Largest hnsw.ef_search of a search, at most 1000 (default 500)"

@@ -230,6 +230,37 @@ BEGIN
 END;
 $$;
 
+-- The memory pgvector's HNSW build needs to keep the graph of _rows vectors of
+-- this configuration's index (hnsw_index_statement()) in maintenance_work_mem,
+-- per element as pgvector (0.8) counts it: the element (128 bytes), its
+-- neighbour-list pointers, a 2*m-entry layer-0 list (16 bytes per entry), on
+-- average 1/(m-1) upper m-entry lists, and the indexed value (8-byte header).
+CREATE OR REPLACE FUNCTION hivesense_app.hnsw_graph_bytes(_rows BIGINT)
+RETURNS BIGINT LANGUAGE plpgsql STABLE AS
+$$
+DECLARE
+    use_reduced boolean := hivesense_app.use_reduced_embeddings();
+    red_mode    text    := hivesense_app.reduction_mode();
+    dim         int     := CASE WHEN use_reduced
+                                THEN hivesense_app.reduced_dims()
+                                ELSE hivesense_app.embedding_dims()
+                           END;
+    half        boolean := hivesense_app.use_halfvec_index();
+    store       boolean := hivesense_app.store_halfvec_embeddings();
+    m           int     := (SELECT hnsw_m FROM hivesense_app.hivesense_app_status LIMIT 1);
+    value_bytes int     := 8 + dim * CASE WHEN store OR (half AND NOT (use_reduced AND red_mode = 'slice'))
+                                          THEN 2 ELSE 4 END;
+    element_bytes numeric;
+BEGIN
+    element_bytes := 128
+                   + 8 + 8.0 / (m - 1)
+                   + 8 + 16 * 2 * m
+                   + (8 + 16 * m)::numeric / (m - 1)
+                   + (value_bytes + 7) / 8 * 8;
+    RETURN CEIL(_rows * element_bytes)::BIGINT;
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE CREATE_HNSW_INDEX()
 LANGUAGE plpgsql
 AS $$
@@ -276,74 +307,83 @@ BEGIN
 END;
 $$;
 
--- The maintenance_work_mem an HNSW build should SET: desired_maintenance_work_mem_gb
--- when both system memory (desired + 30 GB) and /dev/shm (desired + 4 GB, where a
--- parallel build keeps its graph) can hold it, else the current setting.
-CREATE OR REPLACE FUNCTION hivesense_app.index_build_maintenance_work_mem()
+-- The maintenance_work_mem an HNSW build over _rows vectors should SET: the
+-- graph's estimate (hnsw_graph_bytes()) plus 10 %, when that is above the
+-- current setting and within every limit: desired_maintenance_work_mem_gb, a
+-- quarter of system memory and, with posix dynamic shared memory (where a
+-- parallel build keeps its graph), 90 % of /dev/shm. Otherwise the current
+-- setting. NOTICEs give the estimate, the limits and the choice.
+DROP FUNCTION IF EXISTS hivesense_app.index_build_maintenance_work_mem();
+CREATE OR REPLACE FUNCTION hivesense_app.index_build_maintenance_work_mem(_rows BIGINT)
 RETURNS TEXT
 LANGUAGE plpgsql VOLATILE
 AS
 $$
 DECLARE
-    __desired_work_mem_gb INT := (SELECT desired_maintenance_work_mem_gb
-                                  FROM   hivesense_app.hivesense_app_status
-                                  LIMIT  1);
+    __cap_bytes BIGINT := (SELECT desired_maintenance_work_mem_gb
+                           FROM   hivesense_app.hivesense_app_status
+                           LIMIT  1)::BIGINT * 1024 * 1024 * 1024;
     __current_maintenance_work_mem TEXT := CURRENT_SETTING('maintenance_work_mem');
-    __system_memory_gb NUMERIC;
+    __current_bytes BIGINT := PG_SIZE_BYTES(__current_maintenance_work_mem);
+    __graph_bytes BIGINT := hivesense_app.hnsw_graph_bytes(_rows);
+    __wanted_bytes BIGINT;
     __memory_check_result TEXT;
+    __system_memory_bytes BIGINT := 0;
     __shm_size_gb NUMERIC;
-    __can_use_system_mem BOOLEAN := FALSE;
-    __can_use_shm BOOLEAN := FALSE;
+    __ram_limit_bytes BIGINT;
+    __shm_limit_bytes BIGINT;
+    __shm_limit TEXT;
 BEGIN
-    -- Check system memory availability
+    -- rounded up to whole MB, the unit it is set in
+    __wanted_bytes := CEIL(__graph_bytes * 1.1 / (1024 * 1024))::BIGINT * 1024 * 1024;
+
     BEGIN
         -- Read /proc/meminfo to get total memory using SECURITY DEFINER wrapper
         SELECT SPLIT_PART(hivesense_app.read_proc_meminfo(), ' kB', 1) INTO __memory_check_result;
         SELECT SPLIT_PART(__memory_check_result, 'MemTotal:', 2) INTO __memory_check_result;
-        SELECT TRIM(__memory_check_result)::BIGINT / 1024 / 1024 INTO __system_memory_gb;
-
-        RAISE NOTICE 'System total memory: % GB', ROUND(__system_memory_gb, 1);
+        __system_memory_bytes := TRIM(__memory_check_result)::BIGINT * 1024;
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE 'Could not determine system memory: %. Using conservative settings.', SQLERRM;
-        __system_memory_gb := 0;
     END;
+    __ram_limit_bytes := __system_memory_bytes / 4;
 
-    -- Check shared memory (/dev/shm) availability
-    BEGIN
-        __shm_size_gb := hivesense_app.get_shm_size_gb();
-        IF __shm_size_gb IS NOT NULL THEN
-            RAISE NOTICE 'Shared memory (/dev/shm) size: % GB', __shm_size_gb;
-        ELSE
-            RAISE NOTICE 'Could not determine shared memory size. Using conservative settings.';
-        END IF;
-    EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Error checking shared memory: %. Using conservative settings.', SQLERRM;
-        __shm_size_gb := NULL;
-    END;
-
-    -- Check if system memory is sufficient
-    IF __system_memory_gb >= (__desired_work_mem_gb + 30) THEN
-        __can_use_system_mem := TRUE;
+    IF CURRENT_SETTING('dynamic_shared_memory_type') = 'posix' THEN
+        BEGIN
+            __shm_size_gb := hivesense_app.get_shm_size_gb();
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Error checking shared memory: %. Using conservative settings.', SQLERRM;
+        END;
+        __shm_limit_bytes := COALESCE(__shm_size_gb * 1024 * 1024 * 1024 * 0.9, 0)::BIGINT;
+        __shm_limit := FORMAT('%s (90%% of /dev/shm, %s)', PG_SIZE_PRETTY(__shm_limit_bytes),
+                              COALESCE(__shm_size_gb || ' GB', 'unknown'));
+    ELSE
+        __shm_limit := FORMAT('none (dynamic_shared_memory_type = %s)', CURRENT_SETTING('dynamic_shared_memory_type'));
     END IF;
 
-    -- Check if shared memory is sufficient (shm_size >= maintenance_work_mem + 4GB)
-    IF __shm_size_gb IS NOT NULL AND __shm_size_gb >= (__desired_work_mem_gb + 4) THEN
-        __can_use_shm := TRUE;
+    RAISE NOTICE 'HNSW graph of % vectors: estimated %, % with a 10%% margin. Limits: % (desired_maintenance_work_mem_gb), % (25%% of system memory, %), %',
+                 _rows, PG_SIZE_PRETTY(__graph_bytes), PG_SIZE_PRETTY(__wanted_bytes),
+                 PG_SIZE_PRETTY(__cap_bytes), PG_SIZE_PRETTY(__ram_limit_bytes),
+                 PG_SIZE_PRETTY(__system_memory_bytes), __shm_limit;
+
+    IF __wanted_bytes <= __current_bytes THEN
+        RAISE NOTICE 'The graph fits the current maintenance_work_mem (%): keeping it', __current_maintenance_work_mem;
+        RETURN __current_maintenance_work_mem;
     END IF;
 
-    -- Determine appropriate maintenance_work_mem based on BOTH system memory and shared memory
-    IF __can_use_system_mem AND __can_use_shm THEN
-        RAISE NOTICE 'Both system memory (% GB) and shared memory (% GB) are sufficient. Setting maintenance_work_mem to %GB',
-                    ROUND(__system_memory_gb, 1), __shm_size_gb, __desired_work_mem_gb;
-        RETURN __desired_work_mem_gb || 'GB';
-    END IF;
-
-    IF NOT __can_use_system_mem THEN
-        RAISE NOTICE 'System memory insufficient (% GB < % GB + 30). Using default maintenance_work_mem: %',
-                    ROUND(__system_memory_gb, 1), __desired_work_mem_gb, __current_maintenance_work_mem;
-    ELSIF NOT __can_use_shm THEN
-        RAISE NOTICE 'Shared memory insufficient (% GB < % GB + 4). Using default maintenance_work_mem: %',
-                    __shm_size_gb, __desired_work_mem_gb, __current_maintenance_work_mem;
+    IF __wanted_bytes > __cap_bytes THEN
+        RAISE NOTICE 'The graph needs more than desired_maintenance_work_mem_gb (%): keeping maintenance_work_mem %, the build will spill to disk',
+                     PG_SIZE_PRETTY(__cap_bytes), __current_maintenance_work_mem;
+    ELSIF __wanted_bytes > __ram_limit_bytes THEN
+        RAISE NOTICE 'The graph needs more than 25%% of system memory (%): keeping maintenance_work_mem %, the build will spill to disk',
+                     PG_SIZE_PRETTY(__ram_limit_bytes), __current_maintenance_work_mem;
+    ELSIF __wanted_bytes > __shm_limit_bytes THEN
+        RAISE NOTICE 'The graph needs more than 90%% of /dev/shm (%): keeping maintenance_work_mem %, the build will spill to disk; raise the HAF container''s shm_size to at least % for an in-memory build',
+                     PG_SIZE_PRETTY(__shm_limit_bytes), __current_maintenance_work_mem,
+                     PG_SIZE_PRETTY(CEIL(__wanted_bytes / 0.9)::BIGINT);
+    ELSE
+        RAISE NOTICE 'Setting maintenance_work_mem for the HNSW build to % (the graph''s estimate plus 10%%)',
+                     __wanted_bytes / (1024 * 1024) || 'MB';
+        RETURN __wanted_bytes / (1024 * 1024) || 'MB';
     END IF;
     RETURN __current_maintenance_work_mem;
 END;
@@ -486,7 +526,7 @@ BEGIN
         -- Use minimum of 32 and max_parallel_workers for our target
         __max_parallel_maintenance_workers := LEAST(32, __max_parallel_workers);
 
-        __new_maintenance_work_mem := hivesense_app.index_build_maintenance_work_mem();
+        __new_maintenance_work_mem := hivesense_app.index_build_maintenance_work_mem(__row_count);
 
         -- Set maintenance_work_mem based on memory check
         EXECUTE FORMAT('SET maintenance_work_mem TO %L', __new_maintenance_work_mem);

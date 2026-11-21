@@ -565,7 +565,8 @@ BEGIN
     BEGIN
         EXECUTE format('SET max_parallel_maintenance_workers TO %s',
                        LEAST(32, current_setting('max_parallel_workers')::INT));
-        EXECUTE format('SET maintenance_work_mem TO %L', index_build_maintenance_work_mem());
+        EXECUTE format('SET maintenance_work_mem TO %L',
+                       index_build_maintenance_work_mem((SELECT count(*) FROM posts_vectors_merged)));
         EXECUTE 'SET work_mem TO ''512MB''';
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE 'Could not raise index build settings: %', SQLERRM;
