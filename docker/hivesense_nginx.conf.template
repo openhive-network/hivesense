@@ -13,7 +13,12 @@ http {
     # ${RESOLVER} will be replaced by the docker entrypoint script.
     # Resolving the upstream per request (variable proxy_pass below) lets nginx
     # start while hivesense-postgrest is not yet in DNS, instead of exiting.
-    resolver ${RESOLVER} valid=10s;
+    # ipv6=off: PostgREST listens on IPv4 only (its default server-host !4), so
+    # an AAAA answer on a dual-stack network is an address that refuses, or
+    # after a recreate belongs to nobody. A compose network always has IPv4
+    # unless enable_ipv4: false, which no stack running this image sets.
+    # A recreated PostgREST heals within valid + proxy_connect_timeout (~8 s).
+    resolver ${RESOLVER} valid=5s ipv6=off;
 
     # hive.rpc_form (shipped by the common-ci-configuration nginx base image)
     # forwards a GET or HEAD of an /rpc/ function as a form POST of the
@@ -45,6 +50,11 @@ http {
                     }
 
                     proxy_pass  $postgrest_upstream;  # my PostREST is  here!
+                    # A connect on a Docker network takes well under a
+                    # millisecond; fail fast on an address left unowned by a
+                    # recreate, so a later request re-resolves, instead of
+                    # hanging for nginx's default 60 s.
+                    proxy_connect_timeout 3s;
                     # Stream what exceeds the memory buffers to the client
                     # instead of spooling it to proxy_temp: with a full or
                     # failing disk, spooling truncates exactly the large
